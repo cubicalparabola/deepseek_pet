@@ -1,0 +1,204 @@
+{
+  "idle": {
+    "type": "video",
+    "source": "animations/idle.webm",
+    "loop": true,
+    "priority": 0,
+    "interruptible": true,
+    "cooldown": 0,
+    "fallback": true,
+    "label": "待机",
+    "tags": ["idle", "loop", "base"],
+    "render": { "className": "anim-idle" }
+  },
+
+  "lie": {
+    "type": "video",
+    "source": "animations/lie.webm",
+    "loop": false,
+    "priority": 10,
+    "interruptible": true,
+    "cooldown": 60000,
+    "label": "趴下休息",
+    "tags": ["ambient", "idle-group", "rest"],
+    "render": { "className": "anim-lie" }
+  },
+
+  "sleep": {
+    "type": "video",
+    "source": "animations/sleep.webm",
+    "loop": false,
+    "priority": 20,
+    "interruptible": false,
+    "cooldown": 180000,
+    "label": "睡觉",
+    "tags": ["ambient", "rest", "sleep"],
+    "render": { "className": "anim-sleep" }
+  },
+
+  "work": {
+    "type": "video",
+    "source": "animations/work.webm",
+    "loop": false,
+    "priority": 30,
+    "interruptible": true,
+    "cooldown": 60000,
+    "label": "工作",
+    "tags": ["routine", "task"],
+    "render": { "className": "anim-work" }
+  },
+  "read": {
+    "type": "video",
+    "source": "animations/read.webm",
+    "loop": false,
+    "priority": 30,
+    "interruptible": true,
+    "cooldown": 60000,
+    "label": "看书",
+    "tags": ["routine", "task"],
+    "render": { "className": "anim-read" }
+  },
+  "sing": {
+    "type": "video",
+    "source": "animations/sing.webm",
+    "loop": false,
+    "priority": 30,
+    "interruptible": true,
+    "cooldown": 45000,
+    "label": "唱歌",
+    "tags": ["routine", "show"],
+    "render": { "className": "anim-sing" }
+  },
+  "hungry": {
+    "type": "video",
+    "source": "animations/hungry.webm",
+    "loop": false,
+    "priority": 30,
+    "interruptible": true,
+    "cooldown": 90000,
+    "label": "饿了",
+    "tags": ["needs", "notice"],
+    "render": { "className": "anim-hungry" }
+  },
+  "hot": {
+    "type": "video",
+    "source": "animations/hot.webm",
+    "loop": false,
+    "priority": 30,
+    "interruptible": true,
+    "cooldown": 90000,
+    "label": "好热",
+    "tags": ["needs", "notice"],
+    "render": { "className": "anim-hot" }
+  },
+  "remind": {
+    "type": "video",
+    "source": "animations/remind.webm",
+    "loop": false,
+    "priority": 40,
+    "interruptible": true,
+    "cooldown": 30000,
+    "label": "提醒",
+    "tags": ["notice", "reminder"],
+    "render": { "className": "anim-remind" }
+  },
+  "talk": {
+    "type": "video",
+    "source": "animations/talk.webm",
+    "loop": false,
+    "priority": 40,
+    "interruptible": true,
+    "cooldown": 15000,
+    "label": "说话",
+    "tags": ["interaction", "chat"],
+    "render": { "className": "anim-talk" }
+  },
+  "stroke": {
+    "type": "video",
+    "source": "animations/stroke.webm",
+    "loop": false,
+    "priority": 50,
+    "interruptible": true,
+    "cooldown": 4000,
+    "label": "被抚摸",
+    "tags": ["reaction", "touch", "click", "pet"],
+    "render": { "className": "anim-stroke" }
+  },
+  "peek": {
+    "type": "video",
+    "source": "animations/peek.webm",
+    "loop": false,
+    "priority": 35,
+    "interruptible": true,
+    "cooldown": 20000,
+    "label": "探头张望",
+    "tags": ["reaction", "peek"],
+    "render": { "className": "anim-peek" }
+  },
+  "cute": {
+    "type": "video",
+    "source": "animations/cute.webm",
+    "loop": false,
+    "priority": 50,
+    "interruptible": true,
+    "cooldown": 8000,
+    "label": "卖萌",
+    "tags": ["reaction", "affection", "click"],
+    "render": { "className": "anim-cute" }
+  },
+  "fawning": {
+    "type": "video",
+    "source": "animations/fawning.webm",
+    "loop": false,
+    "priority": 50,
+    "interruptible": true,
+    "cooldown": 10000,
+    "label": "撒娇",
+    "tags": ["reaction", "affection", "click"],
+    "render": { "className": "anim-fawning" }
+  },
+  "play": {
+    "type": "video",
+    "source": "animations/play.webm",
+    "loop": false,
+    "priority": 45,
+    "interruptible": true,
+    "cooldown": 20000,
+    "label": "玩耍",
+    "tags": ["reaction", "play"],
+    "render": { "className": "anim-play" }
+  },
+  "bomb": {
+    "type": "video",
+    "source": "animations/bomb.webm",
+    "loop": false,
+    "priority": 100,
+    "interruptible": false,
+    "cooldown": 300000,
+    "label": "爆炸",
+    "tags": ["special", "override", "cutscene"],
+    "render": { "className": "anim-bomb" }
+  },
+  "catch-down": {
+    "type": "video",
+    "source": "animations/catch_down.webm",
+    "loop": false,
+    "priority": 35,
+    "interruptible": true,
+    "cooldown": 5000,
+    "label": "接下坠",
+    "tags": ["reaction", "catching"],
+    "render": { "className": "anim-catch-down" }
+  },
+  "catch-right": {
+    "type": "video",
+    "source": "animations/catch_right.webm",
+    "loop": false,
+    "priority": 35,
+    "interruptible": true,
+    "cooldown": 5000,
+    "label": "接右",
+    "tags": ["reaction", "catching"],
+    "render": { "className": "anim-catch-right" }
+  }
+}

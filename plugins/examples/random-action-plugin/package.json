@@ -1,0 +1,9 @@
+{
+  "name": "random-action-plugin",
+  "displayName": "随机动作插件",
+  "version": "0.1.0",
+  "description": "示例插件：定时随机请求动画，验证 Action Pipeline 与优先级裁决",
+  "author": "ds_pet",
+  "main": "index.ts",
+  "private": true
+}

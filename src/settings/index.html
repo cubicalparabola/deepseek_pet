@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      设置窗口页面。
+
+      这是一个**普通窗口**（有边框、可聚焦），因此可以用原生控件做滚动条。
+      安全基线：与桌宠页面一致 —— 不联网、不 eval，只允许本地样式与脚本。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'none'; connect-src 'none'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>桌宠设置</title>
+    <link rel="stylesheet" href="./settings.css" />
+  </head>
+  <body>
+    <main class="panel">
+      <h1>桌宠大小</h1>
+
+      <div class="readout">
+        <span id="scale-percent" class="percent">100%</span>
+        <span id="scale-detail" class="detail">—</span>
+      </div>
+
+      <input
+        id="scale-slider"
+        class="slider"
+        type="range"
+        min="0"
+        max="42"
+        step="1"
+        value="12"
+        aria-label="桌宠大小"
+      />
+
+      <div class="ticks">
+        <span id="tick-min">20%<br /><small>最小</small></span>
+        <span id="tick-default">60%<br /><small>默认</small></span>
+        <span id="tick-large">170%<br /><small>大</small></span>
+        <span id="tick-max">250%<br /><small>上限</small></span>
+      </div>
+
+      <p id="notice" class="notice" hidden></p>
+
+      <div class="actions">
+        <button id="reset" type="button" class="ghost">恢复默认大小</button>
+        <button id="open-config" type="button" class="ghost">打开配置目录</button>
+      </div>
+
+      <label class="switch">
+        <input id="always-on-top" type="checkbox" />
+        <span>总是置顶（盖在其它窗口之上）</span>
+      </label>
+
+      <p class="hint">
+        拖动滚动条即时生效，并自动写入
+        <code>assets/config/settings.json</code>，重启后保持不变。<br />
+        步进 <span id="step">5%</span>，可调范围 <span id="range">20%–250%</span>。
+      </p>
+    </main>
+
+    <footer class="footer">
+      <span id="saved" class="saved">已保存</span>
+      <button id="close" type="button" class="primary">关闭</button>
+    </footer>
+
+    <script type="module" src="./settings.js"></script>
+  </body>
+</html>

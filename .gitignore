@@ -1,0 +1,32 @@
+node_modules/
+dist/
+release/
+
+# 构建产物（由 npm run icons / npm run assets 生成，可随时重新生成）
+build/icon.ico
+build/icon.png
+build/icon-32.png
+build/tray.png
+build/tray@2x.png
+build/tray-16.png
+
+# 运行期用户设置（首次运行时自动生成，不应提交）
+assets/config/settings.json
+
+# 诊断与验收产物
+build/*.json
+build/*.log
+build/*.html
+build/*.bin
+build/*.txt
+build/knockout/
+# 素材蒙版对比图（由 npm run compare:matte 重新生成）
+build/matte/
+*.log
+
+.DS_Store
+Thumbs.db
+
+# Windows 控制台设备名（调试时误建的文件）
+CONOUT$
+

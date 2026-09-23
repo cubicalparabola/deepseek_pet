@@ -1,0 +1,15 @@
+{
+  "_comment": "插件开关清单：enabled=false 即停用，path 为相对 plugins/ 的目录（默认与 id 同名）。核心程序无需修改。",
+  "plugins": [
+    {
+      "id": "hello-plugin",
+      "path": "examples/hello-plugin",
+      "enabled": true
+    },
+    {
+      "id": "random-action-plugin",
+      "path": "examples/random-action-plugin",
+      "enabled": true
+    }
+  ]
+}

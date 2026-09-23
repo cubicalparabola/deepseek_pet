@@ -1,0 +1,9 @@
+{
+  "name": "hello-plugin",
+  "displayName": "Hello 插件",
+  "version": "0.1.0",
+  "description": "示例插件：监听 pet:click 与 animation:end，验证 Plugin API 可用",
+  "author": "ds_pet",
+  "main": "index.ts",
+  "private": true
+}

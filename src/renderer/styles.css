@@ -1,0 +1,126 @@
+/*
+ * 桌宠样式。
+ *
+ * 关键点：
+ * 1. html/body 必须完全透明，且不可滚动、不可选中 —— 桌宠窗口不该有“网页感”；
+ * 2. 舞台铺满窗口，视频用 object-fit: contain 保证 834x1112 / 720x966 两种素材都不变形；
+ * 3. #pet-video 是主渲染层：素材本身带 alpha（VP9 WebM），直接播放即可，
+ *    不需要任何 mix-blend-mode 或 canvas 抠图；
+ *
+ * 尺寸：窗口大小由主进程按「素材宽高比 × 用户设定尺寸」决定（见 pet-size.ts），
+ * 这里的图层永远是 100%，因此改尺寸不需要改样式。
+ */
+
+:root {
+  --pet-width: 100%;
+  --pet-height: 100%;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  /* 桌宠不是网页：禁止选中、禁止拖拽、禁止右键默认菜单 */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+  cursor: default;
+  font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+}
+
+body {
+  /* 透明窗口下 body 也必须透明，否则会出现黑/白方块 */
+  background-color: transparent;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 舞台                                                                        */
+/* -------------------------------------------------------------------------- */
+
+.pet-stage {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  /* 整个舞台都是可交互区域（点击/拖拽由 InteractionManager 处理） */
+  pointer-events: auto;
+}
+
+.pet-stage.hidden {
+  /* 数据未就绪前先不可见，避免闪一下黑块 */
+  opacity: 0;
+}
+
+.pet-layer {
+  position: absolute;
+  inset: 0;
+  width: var(--pet-width);
+  height: var(--pet-height);
+  pointer-events: none;
+  background: transparent;
+}
+
+.pet-media {
+  /* contain 保证不同分辨率素材都不变形、不裁切 */
+  object-fit: contain;
+  object-position: center bottom;
+  opacity: 0;
+}
+
+.pet-media.layer-active {
+  opacity: 1;
+}
+
+/*
+ * 视频层是主渲染层。
+ * 素材（VP9 WebM + alpha side channel）本身就是透明的，
+ * 所以这里不需要任何 mix-blend-mode 之类的“抠图技巧”，
+ * 保持默认混合模式即可得到正确的半透明边缘与阴影。
+ */
+#pet-video {
+  display: block;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 启动失败提示                                                                */
+/* -------------------------------------------------------------------------- */
+
+.pet-status {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(180, 40, 40, 0.9);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
+  display: none;
+}
+
+.pet-stage.startup-failed .pet-status {
+  display: block;
+}
+
+.pet-stage.startup-failed .pet-status::after {
+  content: '桌宠启动失败，请查看主进程日志（Ctrl+Shift+I 可打开开发者工具）。';
+}
+
+/* -------------------------------------------------------------------------- */
+/* 交互反馈：鼠标悬停时轻微高亮（可读性辅助，不影响动画）                        */
+/* -------------------------------------------------------------------------- */
+
+.pet-stage:hover #pet-video {
+  filter: drop-shadow(0 0 6px rgba(110, 199, 255, 0.25));
+}

@@ -1,0 +1,57 @@
+appId: com.dspet.desktop-pet
+productName: DesktopPet
+copyright: Copyright © 2025 ds_pet
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - package.json
+  - '!**/*.map'
+
+extraResources:
+  # 素材与配置：开发模式从仓库根读取，打包后从 resources/ 读取（见 shared/config.ts）
+  - from: assets
+    to: assets
+    filter:
+      - '**/*'
+  # 插件源码（用户可自行编辑 / 新增插件目录）
+  - from: plugins
+    to: plugins
+    filter:
+      - '**/*'
+      - '!**/node_modules/**'
+  # 托盘/应用图标（必须放在 asar 之外，nativeImage 无法读取 asar 内的图片）
+  - from: build
+    to: build
+    filter:
+      - '*.png'
+      - '*.ico'
+
+asar: true
+compression: normal
+
+# 第一版不签名（无证书）。
+# 关掉签名可以避免 electron-builder 去 GitHub 下载 winCodeSign 工具链 ——
+# 在没有外网的环境下这一步会让 `npm run pack` 直接失败。
+# 将来要发布签名版本时，删掉这两行并配置 CSC_LINK / CSC_KEY_PASSWORD 即可。
+forceCodeSigning: false
+win:
+  signAndEditExecutable: false
+  target:
+    - target: nsis
+      arch:
+        - x64
+  # 由 `npm run icons` 从 assets/brand/ds.png 生成（多尺寸 ICO：16/24/32/48/64/128/256）
+  icon: build/icon.ico
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 鲸鱼娘桌宠

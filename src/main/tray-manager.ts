@@ -1,0 +1,384 @@
+/**
+ * TrayManager —— 系统托盘与原生菜单（托盘菜单 + 右键上下文菜单）。
+ *
+ * 设计要点：
+ * - 托盘菜单与右键菜单共用同一份菜单构造逻辑，保证行为一致；
+ * - 菜单项全部通过回调交给 main.ts，TrayManager 不直接操作业务模块；
+ * - 关闭桌宠窗口不退出程序，托盘常驻（见 WindowManager 的 close 处理）。
+ */
+
+import { Menu, Tray, app, dialog, nativeImage, shell, type MenuItemConstructorOptions } from 'electron';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import type { PetConfig } from '../shared/config';
+import type { TrayStatePayload } from '../shared/ipc';
+import {
+  PET_BASE_HEIGHT,
+  PET_SCALE_DEFAULT,
+  PET_SCALE_MAX,
+  PET_SCALE_MIN,
+  formatPetScale,
+} from '../shared/pet-size';
+import type { Logger } from '../shared/logger';
+import { describeError } from '../shared/errors';
+
+export interface TrayManagerCallbacks {
+  onToggleVisible(): boolean;
+  onShow(): void;
+  onHide(): void;
+  onToggleBehavior(): boolean;
+  onReloadPlugins(): void;
+  /** 让桌宠回到兜底动画（默认 idle），由 renderer 的 Action Pipeline 执行。 */
+  onResetAnimation(): void;
+  /** 播放指定动画（菜单里的快捷动作）。 */
+  onPlayAnimation(animationId: string): void;
+  onSetAlwaysOnTop(value: boolean): void;
+  onOpenSettings(): void;
+  onQuit(): void;
+}
+
+export interface TrayManagerOptions {
+  readonly config: PetConfig;
+  readonly logger: Logger;
+  readonly callbacks: TrayManagerCallbacks;
+}
+
+const EMPTY_STATE: TrayStatePayload = {};
+
+export class TrayManager {
+  private readonly options: TrayManagerOptions;
+  private readonly logger: Logger;
+  private tray: Tray | null = null;
+  private state: TrayStatePayload = EMPTY_STATE;
+  /** 右键菜单打开期间禁止刷新菜单，避免原生菜单闪烁/错位。 */
+  private menuOpen = false;
+
+  public constructor(options: TrayManagerOptions) {
+    this.options = options;
+    this.logger = options.logger;
+  }
+
+  public create(): void {
+    if (this.tray) return;
+    const icon = this.resolveIcon();
+    if (!icon) {
+      this.logger.warn('tray icon not found, tray disabled');
+      return;
+    }
+    try {
+      this.tray = new Tray(icon);
+      this.tray.setToolTip('鲸鱼娘桌宠');
+      this.tray.on('click', () => {
+        this.options.callbacks.onToggleVisible();
+      });
+      this.tray.on('right-click', () => {
+        // Windows 上右键由 setContextMenu 自动处理，这里仅在未设置时兜底
+        if (!this.tray) return;
+        this.tray.popUpContextMenu(this.buildTrayMenu());
+      });
+      this.applyMenu();
+      this.logger.info('tray created');
+    } catch (error) {
+      // 托盘创建失败（例如无桌面环境）不能让主进程崩溃
+      this.logger.error('tray creation failed', { error: describeError(error) });
+      this.tray = null;
+    }
+  }
+
+  /** 更新托盘与菜单展示的状态（可见性/暂停/当前动画/插件列表）。 */
+  public updateState(payload: TrayStatePayload): void {
+    this.state = { ...this.state, ...payload };
+    this.applyMenu();
+  }
+
+  private applyMenu(): void {
+    if (!this.tray || this.menuOpen) return;
+    try {
+      this.tray.setContextMenu(this.buildTrayMenu());
+    } catch (error) {
+      this.logger.error('failed to update tray menu', { error: describeError(error) });
+    }
+  }
+
+  /** 「播放动画」菜单暴露给用户前的可观测性：让日志能确认菜单里到底有多少个动画。 */
+  private logAnimationMenu(count: number, current: string | null): void {
+    if (this.lastMenuLogCount === count && this.lastMenuLogCurrent === current) return;
+    this.lastMenuLogCount = count;
+    this.lastMenuLogCurrent = current;
+    this.logger.info('animation menu updated', {
+      data: {
+        count,
+        current: current ?? '(none)',
+        ids: (this.state.animations ?? []).map((a) => a.id).join(','),
+      },
+    });
+  }
+
+  private lastMenuLogCount = -1;
+  private lastMenuLogCurrent: string | null = null;
+
+  /**
+   * 尺寸相关菜单项（托盘与右键菜单共用）。
+   *
+   * 按需求「点击桌宠大小直接弹窗口，中间不必多点一次」：
+   * 这里**不再有「桌宠大小」子菜单**，而是一个直接打开设置窗口的菜单项，
+   * 标签上顺带把当前尺寸与可调范围显示出来（既当入口又当读数）。
+   */
+  private buildSizeItems(): MenuItemConstructorOptions[] {
+    const size = this.state.size;
+    const currentScale = size?.scale ?? PET_SCALE_DEFAULT;
+    const callbacks = this.options.callbacks;
+
+    const items: MenuItemConstructorOptions[] = [
+      {
+        label: size
+          ? `调整大小…（当前 ${formatPetScale(currentScale)} · ${size.width}×${size.height}）`
+          : '调整大小…',
+        click: () => callbacks.onOpenSettings(),
+      },
+      {
+        label: `可调范围 ${formatPetScale(PET_SCALE_MIN)} – ${formatPetScale(PET_SCALE_MAX)}（基准高 ${PET_BASE_HEIGHT}px）`,
+        enabled: false,
+      },
+    ];
+    if (size?.clampedByDisplay) {
+      items.push({ label: '（已按屏幕高度自动收敛）', enabled: false });
+    }
+    return items;
+  }
+
+  /**
+   * 「播放动画」子菜单：列出**全部**已注册动画，方便手动测试。
+   *
+   * 第一版没有设置界面，这个菜单就是最直接的动画试放入口：
+   * 点任意一条都会通过 `onPlayAnimation(id)` -> IPC -> Action Pipeline 播放，
+   * 与插件/AI 走的是同一条路径。
+   *
+   * 显示格式：`标签 (id) [优先级]`，循环动画额外标注。
+   */
+  private buildAnimationSubmenu(): MenuItemConstructorOptions[] {
+    const animations = this.state.animations ?? [];
+    const callbacks = this.options.callbacks;
+    const current = this.state.currentAnimation ?? null;
+    this.logAnimationMenu(animations.length, current);
+
+    if (animations.length === 0) return [{ label: '（动画清单未加载）', enabled: false }];
+
+    const items: MenuItemConstructorOptions[] = animations.map((animation) => {
+      const marks: string[] = [`${animation.priority}`];
+      if (animation.loop) marks.push('循环');
+      if (animation.type !== 'video') marks.push(animation.type);
+      const suffix = marks.length > 0 ? `　[${marks.join(' · ')}]` : '';
+      return {
+        label: `${animation.label} (${animation.id})${suffix}`,
+        // 用 radio 让"当前正在播的动画"一目了然
+        type: 'radio',
+        checked: current === animation.id,
+        click: () => callbacks.onPlayAnimation(animation.id),
+      };
+    });
+
+    items.push({ type: 'separator' });
+    items.push({
+      label: `共 ${animations.length} 个动画（按优先级排序）`,
+      enabled: false,
+    });
+    return items;
+  }
+
+  /** 托盘菜单（显示/隐藏、行为、尺寸、动画试放、插件、设置、退出）。 */
+  private buildTrayMenu(): Menu {
+    const visible = this.state.visible ?? true;
+    const paused = this.state.behaviorPaused ?? false;
+    const alwaysOnTop = this.state.alwaysOnTop ?? true;
+    const callbacks = this.options.callbacks;
+
+    const stateLabel = this.state.currentState ? `状态：${this.state.currentState}` : '状态：未知';
+    const animationLabel = this.state.currentAnimation
+      ? `动画：${this.state.currentAnimation}`
+      : '动画：（未播放）';
+
+    const template: MenuItemConstructorOptions[] = [
+      { label: '鲸鱼娘', enabled: false },
+      { label: stateLabel, enabled: false },
+      { label: animationLabel, enabled: false },
+      { type: 'separator' },
+      { label: '显示桌宠', enabled: !visible, click: () => callbacks.onShow() },
+      { label: '隐藏桌宠', enabled: visible, click: () => callbacks.onHide() },
+      { type: 'separator' },
+      ...this.buildSizeItems(),
+      {
+        label: '总是置顶',
+        type: 'checkbox',
+        checked: alwaysOnTop,
+        click: (item) => callbacks.onSetAlwaysOnTop(item.checked),
+      },
+      { type: 'separator' },
+      { label: '播放动画（测试）', submenu: this.buildAnimationSubmenu() },
+      { label: '恢复默认动画', click: () => callbacks.onResetAnimation() },
+      { type: 'separator' },
+      { label: '暂停行为', enabled: !paused, click: () => callbacks.onToggleBehavior() },
+      { label: '恢复行为', enabled: paused, click: () => callbacks.onToggleBehavior() },
+      { type: 'separator' },
+      { label: '重载插件', click: () => callbacks.onReloadPlugins() },
+      { label: '设置…', click: () => callbacks.onOpenSettings() },
+      { type: 'separator' },
+      { label: '退出', click: () => callbacks.onQuit() },
+    ];
+
+    return Menu.buildFromTemplate(template);
+  }
+
+  /**
+   * 桌宠右键上下文菜单。
+   * @param context 由 renderer 提供的当前状态（命中区域 / 当前动画）。
+   */
+  public showContextMenu(context: { region?: string; animationId?: string | null } = {}): void {
+    const visible = this.state.visible ?? true;
+    const paused = this.state.behaviorPaused ?? false;
+    const callbacks = this.options.callbacks;
+    const plugins = this.state.plugins ?? [];
+
+    const pluginItems: MenuItemConstructorOptions[] = plugins.length > 0
+      ? plugins.map((plugin) => ({
+          label: `${plugin.enabled ? '●' : '○'} ${plugin.name} (${plugin.version})`,
+          sublabel: `${plugin.status}${plugin.error ? ` · ${plugin.error}` : ''}`,
+          enabled: false,
+        }))
+      : [{ label: '（无插件）', enabled: false }];
+
+    const template: MenuItemConstructorOptions[] = [
+      { label: '鲸鱼娘', enabled: false },
+      {
+        label: context.region ? `点击区域：${context.region}` : '点击区域：-',
+        enabled: false,
+      },
+      {
+        label: context.animationId ? `当前动画：${context.animationId}` : '当前动画：（未播放）',
+        enabled: false,
+      },
+      { type: 'separator' },
+      { label: '插件', submenu: pluginItems },
+      { label: '播放动画（测试）', submenu: this.buildAnimationSubmenu() },
+      { label: '恢复默认动画', click: () => callbacks.onResetAnimation() },
+      { type: 'separator' },
+      ...this.buildSizeItems(),
+      { label: '显示桌宠', enabled: !visible, click: () => callbacks.onShow() },
+      { label: '隐藏桌宠', enabled: visible, click: () => callbacks.onHide() },
+      { label: paused ? '恢复行为' : '暂停行为', click: () => callbacks.onToggleBehavior() },
+      { type: 'separator' },
+      { label: '重载全部插件', click: () => callbacks.onReloadPlugins() },
+      { label: '打开配置目录', click: () => this.openConfigDirectory() },
+      { label: '设置…', click: () => callbacks.onOpenSettings() },
+      { type: 'separator' },
+      { label: '退出', click: () => callbacks.onQuit() },
+    ];
+
+    const menu = Menu.buildFromTemplate(template);
+    this.menuOpen = true;
+    menu.popup({
+      callback: () => {
+        this.menuOpen = false;
+        this.applyMenu();
+      },
+    });
+  }
+
+  /**
+   * 兜底信息框（正常路径不再经过这里）。
+   *
+   * 「设置…」现在打开的是**真正的设置窗口**（`main/settings-window-manager.ts`，
+   * 用滚动条连续调尺寸，拖动即生效并写入 settings.json）。
+   * 原生对话框做不出滑块，因此这里只保留一个"设置窗口打不开时"的信息出口。
+   */
+  public showSettingsDialog(): void {
+    const configPath = this.options.config.configPath;
+    const size = this.state.size;
+    const current = size ? Math.round(size.scale * 100) : 100;
+    const alwaysOnTop = this.state.alwaysOnTop ?? true;
+
+    dialog.showMessageBoxSync({
+      type: 'info',
+      title: '桌宠设置',
+      message: `当前尺寸：${size ? `${size.width}×${size.height}` : '未知'}（${current}%）`,
+      detail: [
+        '大小请用「设置…」窗口里的滚动条调整（拖动即生效并自动保存）。',
+        '',
+        `当前：${current}%　置顶：${alwaysOnTop ? '开' : '关'}　基准高度：${PET_BASE_HEIGHT}px`,
+        size?.clampedByDisplay ? '注意：当前尺寸已按屏幕高度自动收敛。' : '',
+        '',
+        '其他配置仍通过 JSON 编辑：',
+        '  • assets/config/animations.json —— 动画 Manifest',
+        '  • assets/config/plugins.json    —— 插件开关',
+        '  • assets/config/settings.json   —— 尺寸与置顶（设置窗口会自动写入）',
+        '',
+        `配置目录：${configPath}`,
+      ].filter(Boolean).join('\n'),
+      buttons: ['好'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+  }
+
+  private openConfigDirectory(): void {
+    const target = this.options.config.configPath;
+    try {
+      void shell.openPath(target);
+    } catch (error) {
+      this.logger.error('failed to open config directory', { error: describeError(error) });
+    }
+  }
+
+  public showAboutDialog(): void {
+    dialog.showMessageBoxSync({
+      type: 'info',
+      title: '关于',
+      message: '鲸鱼娘桌宠',
+      detail: `版本 ${app.getVersion()}\nElectron ${process.versions.electron}\nChromium ${process.versions.chrome}`,
+      buttons: ['好'],
+      noLink: true,
+    });
+  }
+
+  public destroy(): void {
+    if (!this.tray) return;
+    this.tray.destroy();
+    this.tray = null;
+    this.logger.info('tray destroyed');
+  }
+
+  /**
+   * 托盘图标。
+   *
+   * 打包注意：图标必须位于 asar **之外**，否则 nativeImage 读不到。
+   * `config.appRoot` 在打包模式已被解析为 `resources/`，开发模式是仓库根，
+   * 两种情况下 `<appRoot>/build/*` 都能命中（见 main.ts 的路径解析）。
+   *
+   * 尺寸策略（用户反馈"图标太小"后的处理）：
+   * - 托盘槽位只有 16 逻辑像素，Windows 还会再留一圈空白 —— 因此图标素材
+   *   必须**铺满画布**（生成时不加内边距，见 tools/make-icons.mjs）；
+   * - 本机显示缩放是 125%，32px 的图会被放大显示而发糊、显得更小，
+   *   因此优先加载 `tray@2x.png`（64×64），让 Windows 直接挑合适的一档；
+   * - 找不到时逐级回退到 32px / 应用图标，绝不让托盘因缺图而消失。
+   */
+  private resolveIcon(): Electron.NativeImage | null {
+    const candidates = [
+      join(this.options.config.appRoot, 'build', 'tray@2x.png'),
+      join(this.options.config.appRoot, 'build', 'tray.png'),
+      join(this.options.config.appRoot, 'build', 'icon.png'),
+      join(this.options.config.appRoot, 'build', 'icon.ico'),
+    ];
+    for (const candidate of candidates) {
+      if (!existsSync(candidate)) continue;
+      try {
+        const image = nativeImage.createFromPath(candidate);
+        if (!image.isEmpty()) return image;
+      } catch (error) {
+        this.logger.warn('failed to load tray icon', { error: describeError(error), data: { candidate } });
+      }
+    }
+    this.logger.warn('tray icon not found; tray disabled', { data: { searched: candidates.join(' | ') } });
+    return null;
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "name": "desktop-pet",
+  "productName": "DesktopPet",
+  "version": "0.1.0",
+  "description": "Windows 桌面宠物（Electron + TypeScript）第一版",
+  "private": true,
+  "main": "dist/main/main.js",
+  "author": "ds_pet",
+  "license": "MIT",
+  "scripts": {
+    "assets": "node tools/generate-assets.mjs",
+    "icons": "node tools/make-icons.mjs",
+    "typecheck": "tsc --noEmit",
+    "build:main": "esbuild src/main/main.ts src/preload/preload.ts --bundle --platform=node --target=node20 --format=cjs --outdir=dist --outbase=src --sourcemap --external:electron --external:esbuild",
+    "build:renderer": "esbuild src/renderer/renderer.ts --bundle --platform=browser --target=chrome120 --format=esm --outfile=dist/renderer/renderer.js --sourcemap",
+    "build:settings": "esbuild src/settings/settings.ts --bundle --platform=browser --target=chrome120 --format=esm --outfile=dist/settings/settings.js --sourcemap",
+    "build:copy": "node tools/copy-static.mjs",
+    "build:plugins": "node tools/build-plugins.mjs",
+    "acceptance": "electron tools/acceptance.cjs",
+    "convert:alpha": "node tools/convert-alpha.mjs",
+    "verify:alpha": "electron tools/verify-alpha-assets.cjs",
+    "verify:visual": "electron tools/verify-visual.cjs",
+    "verify:console": "node tools/verify-console-encoding.mjs",
+    "logs": "node tools/logs.mjs",
+    "build": "npm run typecheck && npm run build:main && npm run build:renderer && npm run build:settings && npm run build:plugins && npm run build:copy",
+    "start": "npm run build && electron .",
+    "dev": "npm run build && electron . --dev",
+    "pack": "npm run build && electron-builder --win --dir --config electron-builder.yml",
+    "dist": "npm run build && electron-builder --win --config electron-builder.yml",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "probe": "node tools/probe-webm.mjs assets/animations"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "electron": "^33.3.1",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.7.2"
+  }
+}

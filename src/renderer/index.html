@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      桌宠窗口页面。
+
+      安全基线：CSP 禁止一切网络能力（connect-src 'none'），只允许本地素材。
+      素材通过自定义协议 pet-asset:// 加载（见 main/asset-protocol.ts），
+      该协议只映射 assets/ 目录，且拒绝路径穿越。
+
+      script-src 说明：
+        'self'  —— 页面自身的 renderer.js；
+        blob:   —— 插件沙箱需要（插件代码由主进程编译后经 IPC 下发，
+                   在 renderer 中以 blob ES module 形式执行）。
+                   **没有**开启 'unsafe-eval'：new Function / eval / setTimeout(字符串)
+                   依然被 CSP 拒绝，插件代码只能以模块方式执行，
+                   且其作用域里没有 Node / Electron 能力。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src pet-asset: data: blob:; media-src pet-asset: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' blob:; connect-src 'none'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>鲸鱼娘桌宠</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <!-- 舞台：与窗口同尺寸，透明背景 -->
+    <div id="pet-stage" class="pet-stage hidden" data-region="outside">
+      <!--
+        图层顺序（由下到上）：
+          1/2. video-a / video-b —— **双缓冲**视频层。
+               切换动画时先把新素材加载到隐藏的那个 <video> 上，
+               等它真的可播了再交换可见性。否则换源瞬间
+               readyState 会掉到 0（Chromium 的 emptied），
+               视频纹理为空 -> 桌宠整个透明 -> 看起来"闪一下"。
+          3. image   —— PNG 静态动画层（Manifest 中 type: "image" 的条目）
+      -->
+      <video
+        id="pet-video"
+        class="pet-layer pet-media"
+        playsinline
+        muted
+        preload="auto"
+        disablepictureinpicture
+        aria-hidden="true"
+      ></video>
+      <video
+        id="pet-video-b"
+        class="pet-layer pet-media"
+        playsinline
+        muted
+        preload="auto"
+        disablepictureinpicture
+        aria-hidden="true"
+      ></video>
+      <img id="pet-image" class="pet-layer pet-media" alt="" aria-hidden="true" />
+      <!-- 启动失败提示（默认隐藏，避免黑框） -->
+      <div id="pet-status" class="pet-status" role="status" aria-live="polite"></div>
+    </div>
+
+    <script type="module" src="./renderer.js"></script>
+  </body>
+</html>

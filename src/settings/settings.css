@@ -1,0 +1,242 @@
+/*
+ * 设置窗口样式。
+ *
+ * 这是一个普通窗口（非透明），因此可以正常使用背景色、边框与原生控件外观。
+ * 主题跟随系统深浅色，避免在深色桌面上突然弹出一块白。
+ */
+
+:root {
+  --bg: #1b1d23;
+  --panel: #23262e;
+  --line: #333846;
+  --text: #e8eaf0;
+  --muted: #9aa3b5;
+  --accent: #59a9ff;
+  --ok: #4ec98a;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f4f5f7;
+    --panel: #ffffff;
+    --line: #dfe2e8;
+    --text: #1d2027;
+    --muted: #6b7383;
+    --accent: #1f7ae0;
+    --ok: #1f9d5f;
+  }
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  font-size: 13px;
+  user-select: none;
+  overflow: hidden;
+}
+
+.panel {
+  flex: 1;
+  padding: 18px 20px 8px;
+  overflow-y: auto;
+}
+
+h1 {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin-bottom: 14px;
+}
+
+.readout {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.percent {
+  font-size: 26px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  min-width: 88px;
+}
+
+.detail {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------- 滚动条 ------------------------------- */
+
+.slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 26px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.slider::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--line);
+}
+
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: -6px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--panel);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+.slider:focus-visible::-webkit-slider-thumb {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.ticks {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  margin-top: 2px;
+}
+
+.ticks span:first-child {
+  text-align: left;
+}
+
+.ticks span:last-child {
+  text-align: right;
+}
+
+.ticks small {
+  color: var(--muted);
+  opacity: 0.75;
+}
+
+/* -------------------------------- 提示 -------------------------------- */
+
+.notice {
+  margin-top: 10px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  background: rgba(255, 176, 32, 0.12);
+  border: 1px solid rgba(255, 176, 32, 0.35);
+  color: #ffb020;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* -------------------------------- 按钮 -------------------------------- */
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin: 14px 0 4px;
+}
+
+button {
+  font: inherit;
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  min-width: 80px;
+}
+
+button.ghost {
+  color: var(--muted);
+}
+
+/* -------------------------------- 开关 -------------------------------- */
+
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.switch input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.hint {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.hint code {
+  font-family: Consolas, "Cascadia Mono", monospace;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+/* -------------------------------- 底栏 -------------------------------- */
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.saved {
+  color: var(--ok);
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+.saved.show {
+  opacity: 1;
+}

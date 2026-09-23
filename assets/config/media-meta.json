@@ -1,0 +1,127 @@
+{
+  "_comment": "素材分辨率元数据（由 tools/probe-webm.mjs 生成）。主进程用它推导桌宠窗口宽高比，避免窗口与画面比例不一致。新增素材时重新运行 npm run probe 并更新本文件即可。",
+  "bomb.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 6.04,
+    "fps": 24,
+    "alpha": true
+  },
+  "catch_down.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 6.04,
+    "fps": 24,
+    "alpha": true
+  },
+  "catch_right.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 6.04,
+    "fps": 24,
+    "alpha": true
+  },
+  "cute.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 6.04,
+    "fps": 24,
+    "alpha": true
+  },
+  "fawning.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 6.04,
+    "fps": 24,
+    "alpha": true
+  },
+  "hot.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 6.04,
+    "fps": 24,
+    "alpha": true
+  },
+  "hungry.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 6.04,
+    "fps": 24,
+    "alpha": true
+  },
+  "idle.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 5.21,
+    "fps": 24,
+    "alpha": true
+  },
+  "lie.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 4.92,
+    "fps": 24,
+    "alpha": true
+  },
+  "peek.webm": {
+    "width": 834,
+    "height": 1112,
+    "fps": 24,
+    "alpha": true
+  },
+  "play.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 6.04,
+    "fps": 24,
+    "alpha": true
+  },
+  "read.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 6.04,
+    "fps": 24,
+    "alpha": true
+  },
+  "remind.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 6.04,
+    "fps": 24,
+    "alpha": true
+  },
+  "sing.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 6.04,
+    "fps": 24,
+    "alpha": true
+  },
+  "sleep.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 6.04,
+    "fps": 24,
+    "alpha": true
+  },
+  "stroke.webm": {
+    "width": 834,
+    "height": 1112,
+    "fps": 24,
+    "alpha": true
+  },
+  "talk.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 6.04,
+    "fps": 24,
+    "alpha": true
+  },
+  "work.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 6.04,
+    "fps": 24,
+    "alpha": true
+  }
+}
