@@ -27,7 +27,10 @@ build/frames/
 build/loop-frames/
 build/motion-frames/
 build/seam-frames/
+build/frames-capture/
 build/backup-animations/
+# 被替换掉的旧素材备份（换素材时自动生成）
+build/backup-segments/
 *.log
 
 .DS_Store

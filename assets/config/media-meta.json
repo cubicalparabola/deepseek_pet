@@ -199,21 +199,21 @@
   "watch-end.webm": {
     "width": 834,
     "height": 1112,
-    "duration": 4.54,
+    "duration": 4.42,
     "fps": 24,
     "alpha": true
   },
   "watch-loop.webm": {
     "width": 834,
     "height": 1112,
-    "duration": 2.17,
+    "duration": 2,
     "fps": 24,
     "alpha": true
   },
   "watch-start.webm": {
     "width": 834,
     "height": 1112,
-    "duration": 1.5,
+    "duration": 1.58,
     "fps": 24,
     "alpha": true
   },
