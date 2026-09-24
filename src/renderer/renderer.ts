@@ -111,6 +111,7 @@ class PetApplication {
       stage: this.stage,
       element: requireElement('pet-bubble'),
       textElement: requireElement('pet-bubble-text'),
+      bodyElement: requireElement('pet-bubble-body'),
     });
 
     this.runtime = new RuntimeCapabilities({
@@ -244,9 +245,12 @@ class PetApplication {
      * 必须显式写成 CSS 变量。尺寸来自主进程（bootstrap.size），
      * 这里只做落地；气泡本身多大也由主进程算好一起下发。
      */
-    this.applyBubbleLayout(bootstrap?.bubble ?? null);
     if (bootstrap?.bubble) {
+      // 同样先状态、再布局，最后量行数（见 onBubble 的说明）
       this.bubble.applyState(bootstrap.bubble.state);
+      this.applyBubbleLayout(bootstrap.bubble);
+    } else {
+      this.applyBubbleLayout(null);
     }
 
     this.eventBus.emit(PetEvents.AppReady, {
@@ -370,8 +374,12 @@ class PetApplication {
       this.handleSizeChanged(size);
     });
     this.runtime.onBubble((payload) => {
-      this.applyBubbleLayout(payload);
+      /*
+       * 顺序很重要：先落状态（把文本写进 DOM），再落布局（宽度/字号生效），
+       * 最后才量行数 —— measureTextLines 依赖已生效的宽度与字号。
+       */
       this.bubble.applyState(payload.state);
+      this.applyBubbleLayout(payload);
       this.logger.info('bubble updated', {
         data: { visible: payload.state.visible, textLength: payload.state.text.length },
       });
@@ -416,6 +424,26 @@ class PetApplication {
       ?? (size ? resolveBubbleLayout({ petWidth: size.width, petHeight: size.height }) : null);
     if (!layout) return;
     this.bubble.applyLayout(layout);
+    /*
+     * 量出"当前文本在当前宽度下占几行"回报主进程 —— 气泡高度按它贴合文本。
+     * 必须先 applyLayout（字号与宽度已生效）再量，否则量到的是上一次的尺寸。
+     * 行数只依赖宽度与字号，主进程一次重算即可收敛；两边相等时主进程会直接忽略。
+     */
+    const text = this.bubble.getText();
+    if (text === '') return;
+    const lines = this.bubble.measureTextLines(text);
+    if (lines <= 0) return;
+    /*
+     * 往返：主进程按行数重算气泡高度并调整窗口，顺手把新布局返回。
+     * 落地前先比对行数，避免"重算后又被自己再次触发"的无谓往返。
+     */
+    void this.runtime.reportBubbleTextLines(text, lines).then((payload) => {
+      if (payload === null) return;
+      if (payload.layout.textLines === lines && payload.layout.bubbleHeight === this.bubble.getBubbleHeight()) {
+        return;
+      }
+      this.bubble.applyLayout(payload.layout);
+    });
   }
 
   /**

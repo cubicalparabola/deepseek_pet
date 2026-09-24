@@ -134,22 +134,35 @@ body {
 .pet-bubble-text {
   position: absolute;
   /* 内缩比例与 shared/bubble.ts 的 BUBBLE_TEXT_INSET 保持一致 */
-  left: 5.4%;
-  right: 9.1%;
-  top: 4%;
-  bottom: 11.3%;
+  left: 5%;
+  right: 9%;
+  top: 18%;
+  bottom: 46%;
   /*
-   * 短文本垂直居中：文字区比一句话高得多，贴顶会显得空荡、也偏离气泡视觉中心。
-   * 用 flex 而不是 `vertical-align` —— 后者对块级滚动容器无效。
-   * 长文本时内容自然撑满，居中不影响滚动。
-   */
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  /*
+   * 短文本垂直居中：文字区比一句话高得多，贴顶会显得空荡。
+   *
+   * 用 `margin-block: auto`（在内层 .pet-bubble-body 上）而**不是**
+   * `justify-content: center` —— 后者在滚动容器里内容超高时会把顶部
+   * 溢出到不可滚动区，首行被裁且滚不回去（实测踩过）。
+   *
    * 长文本滚动：内容超出文字区时出现滚动条。
    * `overflow-y: auto`（而不是 scroll）—— 短文本不该无谓地显示滚动条。
    */
+  /*
+   * 短文本垂直居中用 flex 的 `justify-content: safe center`：
+   *   - 有富余空间 -> 正文居中（短句不贴顶）；
+   *   - 内容超高   -> `safe` 让它退回顶部对齐，正常滚动。
+   *
+   * 为什么正文是**独立子元素**而不是直接放文本：容器是滚动容器，
+   * 正文自己还要做水平居中（`width: fit-content` + `margin-inline: auto`），
+   * 两者作用在不同元素上才不会互相干扰。
+   *
+   * 长文本滚动：内容超出文字区时出现滚动条。
+   * `overflow-y: auto`（而不是 scroll）—— 短文本不该无谓地显示滚动条。
+   */
+  display: flex;
+  flex-direction: column;
+  justify-content: safe center;
   overflow-y: auto;
   overflow-x: hidden;
   /* 保留作者换行（气泡样本里有空行），同时允许自动折行 */
@@ -165,18 +178,38 @@ body {
   text-align: left;
 }
 
-/* 细长滚动条：默认样式在透明窗口里太突兀 */
+/*
+ * 正文本身。
+ *
+ * 水平：`width: fit-content` + `margin-inline: auto` 让**短句水平居中**、
+ *       长句自然占满整行。文字区本来就是为长文本留的宽度，短句贴左会显得偏。
+ * 垂直：交给外层滚动容器的 `justify-content: safe center`。
+ *       **不要**在这里再用 `margin-block: auto` —— flex 溢出项的 auto 外边距
+ *       不会归零，正文会漏到容器外面（实测底部溢出 32px）。
+ */
+.pet-bubble-body {
+  margin-inline: auto;
+  width: fit-content;
+  max-width: 100%;
+}
+
+/* 细滚动条：默认样式在透明窗口里太突兀；颜色调亮一点，长文本时更容易被注意到 */
 .pet-bubble-text::-webkit-scrollbar {
-  width: 6px;
+  width: 8px;
 }
 
 .pet-bubble-text::-webkit-scrollbar-thumb {
-  background: rgba(90, 130, 200, 0.45);
-  border-radius: 3px;
+  background: rgba(74, 118, 190, 0.65);
+  border-radius: 4px;
+}
+
+.pet-bubble-text::-webkit-scrollbar-thumb:hover {
+  background: rgba(58, 100, 172, 0.85);
 }
 
 .pet-bubble-text::-webkit-scrollbar-track {
-  background: transparent;
+  background: rgba(255, 255, 255, 0.35);
+  border-radius: 4px;
 }
 
 .pet-media {

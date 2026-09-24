@@ -59,6 +59,13 @@ export class BubbleController {
   private readonly deps: BubbleControllerDeps;
   private state: BubbleState = { visible: false, text: '' };
   private layout: BubbleLayout;
+  /**
+   * 最近一次由 Renderer 测出的文本行数。
+   *
+   * 气泡高度按它贴合文本 —— 这是"气泡随文本长短变化"的输入。
+   * null 表示还没测出来（按最大高度渲染）。
+   */
+  private textLines: number | null = null;
 
   public constructor(deps: BubbleControllerDeps) {
     this.deps = deps;
@@ -66,11 +73,17 @@ export class BubbleController {
     this.layout = resolveBubbleLayout(this.layoutInput(this.deps.getPetSize()));
   }
 
-  /** 组装布局输入（宠物尺寸 + 工作区高度上限）。 */
-  private layoutInput(pet: WindowSize): { petWidth: number; petHeight: number; maxWindowHeight: number } {
+  /** 组装布局输入（宠物尺寸 + 文本行数 + 工作区高度上限）。 */
+  private layoutInput(pet: WindowSize): {
+    petWidth: number;
+    petHeight: number;
+    textLines?: number;
+    maxWindowHeight: number;
+  } {
     return {
       petWidth: pet.width,
       petHeight: pet.height,
+      ...(this.textLines !== null ? { textLines: this.textLines } : {}),
       maxWindowHeight: this.deps.getMaxWindowHeight(),
     };
   }
@@ -93,12 +106,48 @@ export class BubbleController {
   }
 
   /**
-   * 显示气泡（带文本）。重复调用只更新文本，不做多余的窗口调整。
+   * 显示气泡（带文本）。
+   *
+   * 文本变了要**重置行数**并重新调整窗口：行数是"气泡多高"的输入，
+   * 留着上一条文本的行数会让新文本用错高度（等 Renderer 回报后才纠正，
+   * 中间会闪一下）。所以这里先把行数清空（按最大高度渲染一次），
+   * Renderer 量出新行数后会回传，再收敛到贴合文本的高度。
    */
   public show(text: string): BubblePayload {
     const wasVisible = this.state.visible;
+    const textChanged = text !== this.state.text;
+    if (textChanged) this.textLines = null;
     this.state = { visible: true, text };
-    this.applyLayout(wasVisible ? null : this.deps.getPetSize());
+
+    /*
+     * 需要动窗口的三种情况：
+     *   - 之前是隐藏的（窗口要从"纯宠物"长到"含气泡"）；
+     *   - 文本变了且已经可见（气泡高度可能变，窗口跟着变）；
+     * 其余情况（同一文本重复 show）只刷新状态，不动窗口。
+     */
+    const needsResize = !wasVisible || textChanged;
+    this.applyLayout(needsResize ? this.deps.getPetSize() : null);
+    return this.payload();
+  }
+
+  /**
+   * Renderer 量出的文本行数回报。
+   *
+   * 行数决定气泡高度，因此这里要按行数重算并调整窗口 ——
+   * 这就是"气泡大小随文本长短变化"。行数只依赖"文字区宽度 + 字号"，
+   * 两者在一次布局内固定，所以这个闭环最多两轮就收敛。
+   */
+  public reportTextLines(text: string, lines: number): BubblePayload {
+    // 只接受"当前正在显示的那条文本"的回报，避免旧文本的迟到回报改错高度
+    if (!this.state.visible || text !== this.state.text) return this.payload();
+    if (lines <= 0) return this.payload();
+    if (this.textLines === lines) return this.payload();
+
+    this.deps.logger.debug('bubble text lines reported', {
+      data: { lines, previous: this.textLines ?? null, textLength: text.length },
+    });    this.textLines = lines;
+    // 行数变了 -> 气泡高度变 -> 需要按宠物锚点重新调整窗口
+    this.applyLayout(this.deps.getPetSize());
     return this.payload();
   }
 
@@ -106,6 +155,7 @@ export class BubbleController {
   public hide(): BubblePayload {
     const wasVisible = this.state.visible;
     this.state = { visible: false, text: this.state.text };
+    this.textLines = null;
     this.applyLayout(wasVisible ? this.deps.getPetSize() : null);
     return this.payload();
   }

@@ -738,7 +738,9 @@ app.whenReady().then(async () => {
    */
   const bubbleRun = await run(`(async () => {
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-    const text = (s) => document.getElementById('pet-bubble-text').textContent;
+    /* 内容比较必须读**正文元素**：滚动容器里还有正文这一层，
+       其 textContent 会带上 HTML 缩进产生的空白（踩过）。 */
+    const text = () => document.getElementById('pet-bubble-body').textContent;
     const el = () => document.getElementById('pet-bubble-text');
 
     // ---- 1) 先记录"无气泡"时的窗口尺寸，用于核对锚点 ----
@@ -864,6 +866,9 @@ app.whenReady().then(async () => {
       textSample: String(text()).slice(0, 12),
       textAfterLongSetSample: String(textAfterLongSet).slice(0, 12),
       longTextSample: longText.slice(0, 12),
+      /* 长度对比：384 vs 380 之类能立刻看出是不是多了空白 */
+      readLength: String(textAfterLongSet).length,
+      longTextLen: longText.length,
     };
   })()`);
 
@@ -879,7 +884,7 @@ app.whenReady().then(async () => {
 
   // 2) 长文本出现滚动条并且能滚到底
   record(
-    '对话气泡：长文本可滚动（出现滚动条且能滚到底）',
+    '对话气泡：超长文本出现滚动条且能滚到底（高度到上限后不再拉高）',
     bubbleRun.longState?.scrollable === true &&
       bubbleRun.scrolled?.atBottom === true &&
       bubbleRun.scrolled?.scrollHeight > bubbleRun.scrolled?.clientHeight &&
@@ -968,10 +973,82 @@ app.whenReady().then(async () => {
     JSON.stringify({ layoutCheck, checks: layoutCheck ? Object.entries(layoutCheck).map(([k, v]) => `${k}=${v}`).join(',') : 'null' }),
   );
 
+  /*
+   * 6) 气泡大小**随文本长短变化**。
+   *
+   * 链路：Renderer 用 canvas 量出"当前宽度下占几行" -> 回报主进程 ->
+   * 主进程按行数重算气泡高度（有下限与上限）-> 调整窗口 -> 回传布局。
+   * 期望：文本越长气泡越高（到上限为止），超过上限则不再变高、改为文字区滚动。
+   */
+  const bubbleAdaptive = await run(`(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const samples = [
+      { name: '极短', text: '早' },
+      { name: '短', text: '今天也一起加油吧！' },
+      { name: '中', text: '这是一段中等长度的文本，用来观察气泡高度会不会跟着变高。大概两到三行。' },
+      { name: '长', text: '当文字超过一屏时，气泡内部会出现滚动条，可以用鼠标滚轮或拖动滚动条查看后面的内容，文字不会溢出气泡的描边。下面还有一些内容用来把文本撑长：一、气泡的尾巴指向桌宠的头顶；二、气泡在桌宠上方，窗口会向上扩展。' },
+      { name: '极长', text: '这一段刻意写得非常长，用来把气泡撑到高度上限。'.repeat(16) + '结尾。' },
+    ];
+    const rows = [];
+    for (const sample of samples) {
+      await window.petAPI.bubble.set({ visible: true, text: sample.text });
+      await wait(900);
+      const s = window.petApp.describeBubble();
+      rows.push({
+        name: sample.name,
+        chars: sample.text.length,
+        bubbleHeight: s.bubble?.height ?? 0,
+        scrollable: s.scrollable,
+        textAreaHeight: s.clientHeight,
+        contentHeight: s.scrollHeight,
+      });
+    }
+    await window.petAPI.bubble.set(null);
+    await wait(700);
+
+    const heights = rows.map((r) => r.bubbleHeight);
+    const cap = Math.max(...heights);
+    return {
+      rows,
+      heights,
+      cap,
+      monotonic: heights.every((h, i) => i === 0 || h >= heights[i - 1] - 2),
+      shortest: heights[0],
+      tallest: heights[heights.length - 1],
+      /** 到达上限的行数（至少两条 -> 说明确实"到上限后不再变高"） */
+      atCap: rows.filter((r) => r.bubbleHeight === cap).length,
+      /** 需要滚动的那几条：都是内容超出正文区的 */
+      scrollRows: rows.filter((r) => r.scrollable),
+      /** 不需要滚动的：内容都在正文区内放得下 */
+      fitsRows: rows.filter((r) => !r.scrollable),
+    };
+  })()`);
+
+  record(
+    '对话气泡：大小随文本长短变化（越长越高，单调不减）',
+    bubbleAdaptive.monotonic === true && (bubbleAdaptive.tallest ?? 0) > (bubbleAdaptive.shortest ?? 0),
+    `heights=${JSON.stringify(bubbleAdaptive.heights)}`,
+  );
+  /*
+   * 拉伸上限 + 滚动条：
+   *   - 到上限后**不再变高**（至少两条文本共用同一高度）；
+   *   - 超出上限的文本 -> 正文出现滚动条（scrollHeight > clientHeight）；
+   *   - 没超出的 -> 不滚动。
+   */
+  record(
+    '对话气泡：到拉伸上限后不再变高，超出部分转为文字区滚动',
+    (bubbleAdaptive.atCap ?? 0) >= 2 &&
+      (bubbleAdaptive.scrollRows ?? []).length >= 1 &&
+      (bubbleAdaptive.fitsRows ?? []).length >= 1 &&
+      (bubbleAdaptive.scrollRows ?? []).every((r) => r.contentHeight > r.textAreaHeight) &&
+      (bubbleAdaptive.fitsRows ?? []).every((r) => r.contentHeight <= r.textAreaHeight + 2),
+    JSON.stringify({ cap: bubbleAdaptive.cap, atCap: bubbleAdaptive.atCap, scroll: bubbleAdaptive.scrollRows?.map((r) => r.name), fits: bubbleAdaptive.fitsRows?.map((r) => r.name) }),
+  );
+
   record(
     '对话气泡：文字内容原样落地',
     bubbleRun.textMatches === true,
-    `matches=${bubbleRun.textMatches} 设置后="${bubbleRun.textAfterLongSetSample}" 结束="${bubbleRun.textSample}" src="${bubbleRun.longTextSample}" len=${bubbleRun.longTextLength}`,
+    `matches=${bubbleRun.textMatches} 读到=${bubbleRun.readLength}字/期望=${bubbleRun.longTextLen}字 读到开头="${bubbleRun.textAfterLongSetSample}" src="${bubbleRun.longTextSample}"`,
   );
 
   /*

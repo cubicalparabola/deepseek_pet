@@ -167,6 +167,16 @@ class DesktopPetApplication {
       setAlwaysOnTop: (value) => this.applyAlwaysOnTop(value),
       // 对话气泡：托盘菜单与验收脚本共用这一条实现（null = 隐藏）
       setBubble: (state) => this.applyBubble(state),
+      // Renderer 量出的文本行数回报 -> 重算气泡高度（气泡随文本长短变化的闭环）
+      reportBubbleTextLines: (text, lines) => {
+        const controller = this.bubbleController;
+        if (!controller) {
+          return { state: { visible: false, text: '' }, layout: resolveBubbleLayout({ petWidth: 1, petHeight: 1 }) };
+        }
+        const payload = controller.reportTextLines(text, lines);
+        this.refreshTray();
+        return payload;
+      },
       // 设置窗口：只有它能改尺寸，且改动与托盘菜单共用同一条写盘路径
       setScaleFromSettingsWindow: (scale) => {
         const state = this.applyScale(scale);

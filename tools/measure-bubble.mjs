@@ -73,8 +73,13 @@ function decodePng(file) {
 }
 
 const file = process.argv[2] ?? 'assets/bubble.png';
-/** alpha 阈值：只把"真的看得见"的像素算进去，忽略极淡的外发光。 */
-const ALPHA_MIN = 40;
+/**
+ * alpha 阈值：只把"实心"像素算进去，忽略外发光/抗锯齿。
+ *
+ * 阈值太低（如 40）会把很淡的外发光也算成图形，导致正文下边界与尾巴起点
+ * 都被拉到底部（实测：把 51px 高的尾巴量成了 100px+，且尾巴中心偏到 91%）。
+ */
+const ALPHA_MIN = Number(process.argv[3] ?? 200);
 const img = decodePng(file);
 const alpha = (x, y) => {
   const i = (y * img.width + x) * img.channels;
@@ -210,11 +215,24 @@ const report = {
   },
 };
 
-/* 尾巴的水平位置（确认居中） */
+/* 尾巴的水平位置（按每行跨度的**加权平均**，而不是包围盒中点：
+   包围盒会被同行残留的浅色装饰拉偏 —— 实测把 76% 处的尾巴算成了 91.7%） */
 const tailRows = rows.filter((r) => r.y >= tailStart && r.span > 0);
 if (tailRows.length) {
-  const tailCenter = (Math.min(...tailRows.map((r) => r.min)) + Math.max(...tailRows.map((r) => r.max))) / 2;
-  report.measured.tailCenterPct = +((tailCenter / W) * 100).toFixed(2);
+  let weightSum = 0;
+  let weighted = 0;
+  for (const r of tailRows) {
+    const center = (r.min + r.max) / 2;
+    weightSum += r.span;
+    weighted += center * r.span;
+  }
+  const weightedCenter = weightSum > 0 ? weighted / weightSum : 0;
+  report.measured.tailCenterPct = +((weightedCenter / W) * 100).toFixed(2);
+  report.measured.tailRowsSampled = tailRows.length;
+  /* 最底部那一行的 x 范围最能代表尾巴尖本身 */
+  const tip = tailRows[tailRows.length - 1];
+  report.measured.tailTip = { y: tip.y, minX: tip.min, maxX: tip.max, centerPct: +((((tip.min + tip.max) / 2) / W) * 100).toFixed(2) };
+  report.measured.tailWidthAtTipPx = tip.span;
 }
 
 console.log(JSON.stringify(report, null, 1));

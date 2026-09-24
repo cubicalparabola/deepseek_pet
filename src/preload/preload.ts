@@ -250,6 +250,8 @@ function buildPetBridge(): PetBridge {
     bubble: {
       set: (state: BubbleState | null): Promise<BubblePayload> =>
         ipcRenderer.invoke(IpcChannels.PetSetBubble, state) as Promise<BubblePayload>,
+      reportTextLines: (payload: { text: string; lines: number }): Promise<BubblePayload> =>
+        ipcRenderer.invoke(IpcChannels.BubbleReportText, payload) as Promise<BubblePayload>,
     },
 
     notifyAnimationChanged: (payload: AnimationChangedPayload): void =>

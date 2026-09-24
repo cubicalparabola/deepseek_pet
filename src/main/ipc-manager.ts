@@ -49,6 +49,12 @@ export interface IpcManagerDependencies {
    * 托盘菜单与验收脚本共用这一条实现。
    */
   setBubble(state: BubbleState | null): BubblePayload;
+  /**
+   * Renderer 回报"当前文本占几行"，据此重算气泡高度。返回重算后的状态与布局。
+   *
+   * Renderer 只在行数与自己算出来的不一致时才会回报，因此这里不必再做去重。
+   */
+  reportBubbleTextLines(text: string, lines: number): BubblePayload;
   /** 设置窗口专用：应用尺寸并把最新状态推回设置窗口。 */
   setScaleFromSettingsWindow(scale: number): PetSettingsState;
   setAlwaysOnTopFromSettingsWindow(value: boolean): PetSettingsState;
@@ -159,6 +165,21 @@ export class IpcManager {
       if (record === null) return this.deps.setBubble(null);
       const visible = asBoolean(record.visible, false);
       return this.deps.setBubble({ visible, text: asString(record.text, '') });
+    });
+
+    /*
+     * Renderer 回报"文本占几行" -> 重算气泡高度（气泡随文本长短变化的闭环）。
+     *
+     * 用 `handle`（invoke 往返）与其它 Renderer->Main 通知保持一致：
+     * preload 的 send 助手走的就是 invoke，而且**顺手把重算后的布局返回**，
+     * 渲染层拿到就能直接落地，不必再等一次推送。
+     */
+    this.handle(IpcChannels.BubbleReportText, (_event, payload) => {
+      const record = asRecord(payload);
+      if (record === null) return this.deps.setBubble(null);
+      const text = asString(record.text, '');
+      const lines = Math.max(0, Math.round(asNumber(record.lines, 0)));
+      return this.deps.reportBubbleTextLines(text, lines);
     });
 
     /* ------------------------- 设置窗口专用通道 ------------------------- */

@@ -95,6 +95,22 @@ export class RuntimeCapabilities {
     return this.bridge.commands.onBubble(handler);
   }
 
+  /**
+   * 回报当前文本占用的行数，并拿到**重算后的布局**。
+   *
+   * 气泡高度由行数决定（主进程算），字体度量只有渲染层能做，所以这一步是往返：
+   * 主进程顺手返回新布局，调用方直接落地即可。
+   */
+  public async reportBubbleTextLines(text: string, lines: number): Promise<BubblePayload | null> {
+    if (!this.bridge) return null;
+    try {
+      return await this.bridge.bubble.reportTextLines({ text, lines });
+    } catch (error) {
+      this.logger.warn('reporting bubble text lines failed', { error });
+      return null;
+    }
+  }
+
   /** 当前尺寸 + 设置快照。 */
   public async getSettings(): Promise<PetSettingsState | null> {
     if (!this.bridge) return null;

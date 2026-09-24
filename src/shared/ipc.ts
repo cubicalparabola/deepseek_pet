@@ -39,6 +39,13 @@ export const IpcChannels = {
   SettingsSetAlwaysOnTop: 'pet:settings-set-always-on-top',
   /** 显示/隐藏对话气泡（托盘菜单与验收脚本共用同一条实现）。 */
   PetSetBubble: 'pet:set-bubble',
+  /**
+   * Renderer -> Main：回报"当前文本在文字区宽度下占几行"。
+   *
+   * 只有 Renderer 能做字体度量，而气泡高度由 Main 决策，所以这一环必须回传。
+   * Main 据此重算气泡高度 —— 这就是"气泡大小随文本长短变化"的闭环。
+   */
+  BubbleReportText: 'pet:bubble-report-text',
 
   /* 设置窗口（独立的小窗口，只暴露尺寸/置顶） */
   SettingsWindowShow: 'pet:settings-window-show',
@@ -239,6 +246,13 @@ export interface BubbleAPI {
    * 传 null 表示隐藏。
    */
   set(state: BubbleState | null): Promise<BubblePayload>;
+  /**
+   * 回报当前文本占用的行数（Renderer 量出后调用），返回**重算后的状态与布局**。
+   *
+   * 气泡高度由文本行数决定，而字体度量只有 Renderer 能做，因此由它回传；
+   * 主进程顺手把新布局返回，渲染层直接落地，省掉一次单独推送。
+   */
+  reportTextLines(payload: { text: string; lines: number }): Promise<BubblePayload>;
 }
 
 export interface CommandAPI {
