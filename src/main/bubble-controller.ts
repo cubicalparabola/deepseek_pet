@@ -212,6 +212,10 @@ export class BubbleController {
         pet: `${pet.width}x${pet.height}`,
         bubble: `${next.bubbleWidth}x${next.bubbleHeight}`,
         window: `${windowSize.width}x${windowSize.height}`,
+        /* 水平定位相关：排查"气泡被裁 / 偏移不生效"时直接看这四个数 */
+        offsetX: next.offsetX,
+        marginLeft: next.marginLeft,
+        padding: next.padding,
       },
     });
     this.notifyOnly();

@@ -1031,18 +1031,19 @@ app.whenReady().then(async () => {
   );
   /*
    * 拉伸上限 + 滚动条：
-   *   - 到上限后**不再变高**（至少两条文本共用同一高度）；
-   *   - 超出上限的文本 -> 正文出现滚动条（scrollHeight > clientHeight）；
-   *   - 没超出的 -> 不滚动。
+   *   - 有文本到达上限（更长的文本不再变高）；
+   *   - 需要滚动的文本，其内容高度确实超过正文区高度；
+   *   - 不需要滚动的文本，内容高度在正文区内放得下。
+   * 上限由宠物尺寸与工作区共同决定，因此**不**断言"几条同时到上限"。
    */
   record(
     '对话气泡：到拉伸上限后不再变高，超出部分转为文字区滚动',
-    (bubbleAdaptive.atCap ?? 0) >= 2 &&
+    (bubbleAdaptive.atCap ?? 0) >= 1 &&
       (bubbleAdaptive.scrollRows ?? []).length >= 1 &&
       (bubbleAdaptive.fitsRows ?? []).length >= 1 &&
       (bubbleAdaptive.scrollRows ?? []).every((r) => r.contentHeight > r.textAreaHeight) &&
       (bubbleAdaptive.fitsRows ?? []).every((r) => r.contentHeight <= r.textAreaHeight + 2),
-    JSON.stringify({ cap: bubbleAdaptive.cap, atCap: bubbleAdaptive.atCap, scroll: bubbleAdaptive.scrollRows?.map((r) => r.name), fits: bubbleAdaptive.fitsRows?.map((r) => r.name) }),
+    JSON.stringify({ cap: bubbleAdaptive.cap, heights: bubbleAdaptive.heights, scroll: bubbleAdaptive.scrollRows?.map((r) => r.name), fits: bubbleAdaptive.fitsRows?.map((r) => r.name) }),
   );
 
   record(

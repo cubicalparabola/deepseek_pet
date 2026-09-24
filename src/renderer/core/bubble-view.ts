@@ -77,6 +77,15 @@ export class BubbleView {
       : layout.containerHeight;
     this.element.style.width = `${layout.bubbleWidth}px`;
     this.element.style.height = `${Math.round(containerHeight)}px`;
+    /*
+     * 水平位置用**显式左边距**，不要用 flex 居中 + 位移。
+     *
+     * 舞台是 `align-items: center` 的 flex 容器，会先把气泡居中；
+     * 再叠 `left`/`transform` 的偏移时，两者在窗口尺寸变化下结果不可预测
+     * （实测气泡左边缘跑到窗口外 23px 被裁）。这里改成：让舞台左对齐，
+     * 气泡位置完全由 marginLeft 决定（窗口宽度已含偏移量，不会溢出）。
+     */
+    this.element.style.marginLeft = `${layout.marginLeft}px`;
   }
 
   /**

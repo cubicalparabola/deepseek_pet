@@ -78,6 +78,8 @@ app.whenReady().then(async () => {
         geometry: {
           bubbleTop: Math.round(br.top),
           bubbleBottom: Math.round(br.bottom),
+          bubbleLeft: Math.round(br.left),
+          bubbleRight: Math.round(br.right),
           textTop: Math.round(tr.top),
           textBottom: Math.round(tr.bottom),
           /** 文字区底边到气泡底边的距离（应 > 0，否则文字会被气泡裁掉） */
@@ -88,6 +90,18 @@ app.whenReady().then(async () => {
           /** 正文底边越过文字区底边多少 px（>0 表示溢出容器，会被裁） */
           bodyOverflowBelowText: Math.round(wr.bottom - tr.bottom),
           overflowY: getComputedStyle(t).overflowY,
+          /** 气泡在窗口内的左右留白（均应为正数，否则气泡被窗口裁掉） */
+          marginLeft: Math.round(br.left),
+          marginRight: Math.round(window.innerWidth - br.right),
+          /** 宠物在窗口内的中心 x（用于核对"左移 1/3 气泡宽"） */
+          petCenterX: Math.round(pr.left + pr.width / 2),
+          bubbleCenterX: Math.round(br.left + br.width / 2),
+          /** 气泡中心相对宠物中心的偏移（应为 -气泡宽/3 左右） */
+          centerOffset: Math.round((br.left + br.width / 2) - (pr.left + pr.width / 2)),
+          /** 内联样式与布局下发的 marginLeft（用于排查"样式没落地"） */
+          inlineMarginLeft: b.style.marginLeft,
+          inlineTransform: b.style.transform || '(none)',
+          computedMarginLeft: getComputedStyle(b).marginLeft,
         },
         windowInner: { w: window.innerWidth, h: window.innerHeight },
       };
@@ -113,6 +127,8 @@ app.whenReady().then(async () => {
       lastH = h;
     }
     const state = await snap();
+    /* 附上主进程视角的窗口 bounds，用于判断"下发的尺寸是否真的生效" */
+    state.mainWindowBounds = win.getBounds();
     const image = await win.webContents.capturePage();
     writeFileSync(join(outDir, `${sample.name}.png`), image.toPNG());
     rows.push({ name: sample.name, ...state });
@@ -140,7 +156,7 @@ app.whenReady().then(async () => {
   console.log('=== 气泡随文本长短变化 ===');
   for (const r of rows) {
     console.log(
-      `  ${r.name.padEnd(8)} 字数=${String(r.text.length).padStart(3)}  气泡=${r.bubble.w}x${r.bubble.h}  文字区高=${r.text.clientH} 内容高=${r.text.scrollH}  滚动=${r.text.scrollable}  文字区底到气泡底=${r.geometry.textBottomToBubbleBottom}px  正文越界=${r.geometry.bodyOverflowBelowText}px overflowY=${r.geometry.overflowY}`,
+      `  ${r.name.padEnd(8)} 字数=${String(r.text.length).padStart(3)}  气泡=${r.bubble.w}x${r.bubble.h}  文字区高=${r.text.clientH} 内容高=${r.text.scrollH}  滚动=${r.text.scrollable}  窗口=${r.windowInner.w}  气泡左边距=${r.geometry.marginLeft} 右边距=${r.geometry.marginRight}  气泡中心偏移=${r.geometry.centerOffset}(应≈${-Math.round(r.bubble.w / 3)})`,
     );
   }
   console.log(`  高度序列: ${heights.join(' -> ')}`);

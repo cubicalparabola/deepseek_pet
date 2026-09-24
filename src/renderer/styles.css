@@ -66,7 +66,8 @@ body {
   /* 上下两段：气泡在上，宠物在下；窗口四周留出 padding 给气泡外发光 */
   display: flex;
   flex-direction: column;
-  align-items: center;
+  /* 气泡位置由 marginLeft 显式给出，因此**左对齐**（居中会与偏移叠加、不可预测） */
+  align-items: flex-start;
   justify-content: flex-end;
   padding: var(--bubble-pad);
   /*
@@ -88,13 +89,16 @@ body {
 
 /*
  * 宠物容器：**固定像素尺寸**（不跟着窗口拉伸）。
- * 贴底居中 —— 窗口向上扩张时宠物的脚不会移动。
+ * 贴底 + 水平居中 —— 窗口向上扩张、左右变宽时宠物的位置不受影响
+ * （舞台是 flex-start 左对齐，所以这里要靠 auto 外边距自己居中）。
  */
 .pet-pet {
   position: relative;
   flex: 0 0 auto;
   width: var(--pet-px-width);
   height: var(--pet-px-height);
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .pet-layer {
@@ -136,8 +140,8 @@ body {
   /* 内缩比例与 shared/bubble.ts 的 BUBBLE_TEXT_INSET 保持一致 */
   left: 5%;
   right: 9%;
-  top: 18%;
-  bottom: 46%;
+  top: 22%;
+  bottom: 30%;
   /*
    * 短文本垂直居中：文字区比一句话高得多，贴顶会显得空荡。
    *

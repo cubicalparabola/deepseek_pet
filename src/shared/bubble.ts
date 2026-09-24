@@ -29,12 +29,16 @@ export const BUBBLE_IMAGE_HEIGHT = 1246;
 /**
  * 主体在整图中的上下边界（相对图高的百分比）。
  *
- * 实测方法：在 40% 宽的列上向下扫 alpha（避开左上角星星与右下角尾巴），
- * 得到 y≈97..1095。**不要**用整图 alpha 包围盒：星星装饰会把它撑大
- * （实测得到 82%~86% 的错误高度）。
+ * 实测方法：逐行扫 200 以上的 alpha，取"宽度 ≥ 97% 图宽"的连续区间 ——
+ * 这一段是气泡主体的**饱满区**，y=125..1059（占图 10%~85%）。
+ * 尾巴在 y≈1110..1167（89%~94%），所以主体下方还留了一段透明区。
+ *
+ * ⚠️ 不要用"整图 alpha 包围盒"或单列扫描来量：左上角星星会把上边界拉高，
+ * 右下角尾巴会把下边界拉低（实测因此得到 7.8%~87.9% 的错误值，
+ * 导致正文区只占主体一半、下方一大片空白）。
  */
-export const BUBBLE_BODY_TOP_PCT = (97 / 1246) * 100;
-export const BUBBLE_BODY_BOTTOM_PCT = (1095 / 1246) * 100;
+export const BUBBLE_BODY_TOP_PCT = (125 / 1246) * 100;
+export const BUBBLE_BODY_BOTTOM_PCT = (1059 / 1246) * 100;
 
 /** 主体高度占整图高度的比例（≈ 80.2%）。 */
 export const BUBBLE_BODY_HEIGHT_RATIO = (BUBBLE_BODY_BOTTOM_PCT - BUBBLE_BODY_TOP_PCT) / 100;
@@ -54,6 +58,17 @@ export function bubbleContainerHeight(contentHeight: number): number {
 }
 
 /**
+ * 气泡相对**宠物**的水平偏移（占气泡宽度的比例，负值 = 左移）。
+ *
+ * 用户要求：气泡整体左移 1/3 个气泡宽。
+ * 因为素材的尾巴在**右下角**，左移之后尾巴正好落在宠物头顶附近。
+ *
+ * 实现要点：窗口宽度必须为此留出空间（见 windowWidth 的算法），
+ * 否则左移部分会被舞台的 overflow 裁掉。
+ */
+export const BUBBLE_OFFSET_X_RATIO = -1 / 3;
+
+/**
  * 气泡宽度 = 宠物**高度** × 该系数。
  *
  * 为什么基准取高度而不是宽度（实测教训）：
@@ -70,21 +85,23 @@ export const BUBBLE_WIDTH_RATIO = 1.2;
 /**
  * 文字区内缩（相对**容器**宽/高，百分比）。
  *
- * 由素材实测推出（图 1263x1246，主体 y≈97..1095 占图 7.8%~87.9%）：
- *   - 上 18%：主体顶边 7.8% + 主体内再留 20%×80.2% ≈ 24%，取略小的 18%；
- *   - 下 42%：正文区底边在容器 58% 处（主体内部再留 20%），避开右下角尾巴；
- *   - 左右：实心从 x=24 到 x=1238（1.9%），那是描边外沿，文字取 5%；
+ * 由素材实测推出（图 1263x1246，主体饱满区 y=125..1059 占图 10%~85%）：
+ *   - 上 22%：在主体顶边（10%）与正文之间留出约 12% 容器高的上边距；
+ *   - 下 30%：正文区底边落在容器 70% 处，主体底边在 85% —— 下方留 15%
+ *     （既避开右下角尾巴，又不至于像之前那样留出 28% 的大片空白）；
+ *   - 左右：实心从 x=16 到 x=1246（约 1.3%），那是描边外沿，文字取 5%；
  *   - 右侧额外多留（合计 9%）：滚动条会占用右边缘，否则文字顶到描边上。
  *
  * ⚠️ 这四个数必须与 BUBBLE_BODY_HEIGHT_RATIO × BUBBLE_BODY_TEXT_RATIO 自洽：
- * 正文区占容器 = 1 - 上 - 下 = 40%，而 0.802 × 0.6 ≈ 48%（略宽松，安全）。
+ * 正文区占容器 = 1 - 上 - 下 = 48%，而主体占容器 75% —— 也就是正文区
+ * 占主体的 64%（合理：主体上下各留一点边距）。
  * 不自洽时容器高度会算错、正文被气泡底边裁掉（实测踩过两次）。
  */
 export const BUBBLE_TEXT_INSET = {
   left: 5,
   right: 9,
-  top: 18,
-  bottom: 46,
+  top: 22,
+  bottom: 30,
 } as const;
 
 /**
@@ -247,6 +264,23 @@ export interface BubbleLayout {
    * 显示时正常、**隐藏时宠物跳了 700 多像素**。
    */
   readonly petBottomOffset: number;
+  /**
+   * 气泡相对宠物中心线的水平偏移（像素，负值 = 左移）。
+   *
+   * 窗口宽度已含这份偏移量，渲染层把它作用到气泡元素上即可（不会溢出舞台）。
+   */
+  readonly offsetX: number;
+  /**
+   * 气泡左边缘到舞台内容区左边的距离（像素）。
+   *
+   * 由"宠物中心 + offsetX 处居中"反推，渲染层直接用 `margin-left` 落地。
+   *
+   * 为什么不交给 flex 居中 + 位移：气泡是 flex 项，舞台 `align-items: center`
+   * 会先把它居中，再叠上 `left`/`transform` 的位移 —— 两者叠加在窗口尺寸变化时
+   * 结果不可预测（实测气泡左边缘跑到窗口外 23px 被裁）。
+   * 显式给出左边距后，气泡位置完全由这个数决定。
+   */
+  readonly marginLeft: number;
 }
 
 /** Main -> Renderer：气泡状态 + 布局。 */
@@ -331,10 +365,29 @@ export function resolveBubbleLayout(input: BubbleLayoutInput): BubbleLayout {
 
   const finalBubbleHeight = shrink < 1 ? Math.max(1, Math.round(bubbleHeight * shrink)) : bubbleHeight;
   const containerHeight = Math.round(bubbleContainerHeight(finalBubbleHeight));
+  const offsetX = Math.round(bubbleWidth * BUBBLE_OFFSET_X_RATIO);
 
-  // 窗口 = 气泡在上、宠物在下，两者之间留 gap；四周再留 padding
-  const windowWidth = Math.max(petWidth + padding * 2, bubbleWidth + padding * 2);
+  /*
+   * 窗口宽度要能同时容纳"气泡左移"和"宠物居中"。
+   *
+   * 直觉上只需 `气泡宽 + |偏移|`，但实测那样会算不出足够的余量
+   * （气泡左边缘仍被窗口裁掉、且 flex 居中与偏移叠加后基准不可预测）。
+   * 这里干脆按 `气泡宽 + 2×|偏移|` 留足空间：无论位于哪种基准，
+   * 左移后的气泡都完整落在窗口内。代价是窗口略宽（多出的部分是透明的）。
+   */
+  const windowWidth = Math.max(
+    petWidth + padding * 2,
+    bubbleWidth + padding * 2 + Math.abs(offsetX) * 2,
+  );
   const windowHeight = petHeight + gap + containerHeight + padding * 2;
+
+  /*
+   * 气泡左边距：让"气泡中心"落在"宠物中心 + offsetX"上。
+   * 内容区宽 = windowWidth - 2×padding；宠物在内容区里居中。
+   */
+  const contentWidth = windowWidth - padding * 2;
+  const petLeft = (contentWidth - petWidth) / 2;
+  const marginLeft = Math.max(0, Math.round(petLeft + petWidth / 2 + offsetX - bubbleWidth / 2));
 
   return {
     windowWidth,
@@ -346,6 +399,8 @@ export function resolveBubbleLayout(input: BubbleLayoutInput): BubbleLayout {
     bubbleHeight: finalBubbleHeight,
     containerHeight,
     gap,
+    offsetX,
+    marginLeft,
     fontSize: Math.max(BUBBLE_FONT_MIN, Math.round(fontSize * shrink)),
     /** 本次布局对应的文本行数（Renderer 用它判断"要不要重算"）。 */
     textLines: typeof lines === 'number' && lines > 0 ? lines : 0,
