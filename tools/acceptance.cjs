@@ -1130,6 +1130,47 @@ app.whenReady().then(async () => {
     bubbleAck.afterSecondClick?.bubbleHidden === true,
     JSON.stringify(bubbleAck.afterSecondClick),
   );
+
+  /*
+   * 8) 点"知道了"**不应**触发宠物点击动画。
+   *
+   * 气泡与宠物在同一个窗口里，气泡上的指针事件会冒泡到舞台，
+   * 曾被当成"点到了宠物" —— 点按钮顺带播一次点击动画（用户反馈）。
+   * 现在 InteractionManager 忽略一切来自 `data-pet-ui` 元素内部的指针事件。
+   *
+   * 断言用**事件计数**而不是看动画名：动画可能被别的来源触发（例如插件），
+   * 只关心"这次点击有没有产生宠物交互事件"。
+   */
+  const ackNoAnim = await run(`(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const bus = window.petDebug.bus;
+    const seen = [];
+    const subs = [
+      bus.on('pet:click', (p) => seen.push({ t: 'pet:click', region: p.region })),
+      bus.on('pet:dblclick', (p) => seen.push({ t: 'pet:dblclick', region: p.region })),
+      bus.on('pet:drag', (p) => seen.push({ t: 'pet:drag', phase: p.phase })),
+    ];
+    await window.petAPI.bubble.set({ visible: true, text: '点下面的按钮关闭我' });
+    for (let i = 0; i < 30; i++) { await wait(120); }
+    const ack = document.getElementById('pet-bubble-ack');
+    const r = ack.getBoundingClientRect();
+    const point = { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+
+    /* 用真实指针事件（合成 DOM click 不经过 InteractionManager，测不出冒泡） */
+    ack.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: point.x, clientY: point.y, screenX: point.x, screenY: point.y }));
+    ack.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, clientX: point.x, clientY: point.y, screenX: point.x, screenY: point.y }));
+    ack.click();
+    await wait(900);
+    const bubbleHidden = document.getElementById('pet-bubble').hidden;
+    subs.forEach((s) => s.unsubscribe());
+    return { point, eventsDuringAck: seen, bubbleHidden };
+  })()`);
+
+  record(
+    '对话气泡：点"知道了"不触发宠物点击动画',
+    (ackNoAnim.eventsDuringAck ?? []).length === 0 && ackNoAnim.bubbleHidden === true,
+    JSON.stringify(ackNoAnim),
+  );
   record(
     '对话气泡：文字内容原样落地',
     bubbleRun.textMatches === true,

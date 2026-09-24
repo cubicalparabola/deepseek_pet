@@ -147,6 +147,12 @@ export class InteractionManager {
 
   private handlePointerDown = (event: PointerEvent): void => {
     if (event.button !== 0) return;
+    /*
+     * 从**界面元素**（如气泡上的"知道了"按钮、气泡里的文字/滚动条）发起的指针事件
+     * 一律不参与宠物交互 —— 否则点按钮会顺带触发一次宠物点击动画（用户反馈）。
+     * 用 `data-pet-ui` 标记，而不是写死元素 id：以后再加别的浮层 UI 只要打标记。
+     */
+    if (isFromPetUi(event.target)) return;
     this.pointerDown = true;
     this.dragging = false;
     this.downAt = Date.now();
@@ -173,6 +179,8 @@ export class InteractionManager {
 
   private handlePointerUp = (event: PointerEvent): void => {
     if (!this.pointerDown) return;
+    /* 兜底：pointerup 落在 UI 元素上时同样不当作宠物点击 */
+    if (isFromPetUi(event.target)) return;
     const wasDragging = this.dragging;
     this.pointerDown = false;
     this.dragging = false;
@@ -217,6 +225,7 @@ export class InteractionManager {
   };
 
   private handleDoubleClick = (event: MouseEvent): void => {
+    if (isFromPetUi(event.target)) return;
     const { region, nx, ny } = this.resolveRegion(event.clientX, event.clientY);
     if (region === 'outside') return;
     const payload: PetClickPayload = {
@@ -234,6 +243,8 @@ export class InteractionManager {
 
   private handleContextMenu = (event: MouseEvent): void => {
     event.preventDefault();
+    /* 在气泡 UI 上右键不该弹出宠物右键菜单 */
+    if (isFromPetUi(event.target)) return;
     const { region } = this.resolveRegion(event.clientX, event.clientY);
     this.logger.debug('context menu requested', { data: { region } });
     this.options.onContextMenu({ region });
@@ -293,6 +304,19 @@ export class InteractionManager {
     };
     this.eventBus.emit(PetEvents.PetDrag, payload);
   }
+}
+
+/**
+ * 事件是否来自**浮层 UI**（带 `data-pet-ui` 标记的元素内部，例如对话气泡）。
+ *
+ * 为什么要这个判断：气泡与宠物在同一个窗口里，气泡上的点击/拖动/右键都会
+ * 冒泡到舞台的指针事件，被当成"点到了宠物" —— 点"知道了"按钮会顺带触发
+ * 一次宠物点击动画（用户反馈）。打标记而不是写死元素 id，
+ * 以后再加别的浮层 UI 只要给元素加 `data-pet-ui` 即可。
+ */
+function isFromPetUi(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return target.closest('[data-pet-ui]') !== null;
 }
 
 function clamp01(value: number): number {

@@ -37,8 +37,13 @@
       固定像素尺寸，不能用 100% 跟着窗口走。
     -->
     <div id="pet-stage" class="pet-stage hidden" data-region="outside">
-      <!-- 对话气泡：贴图是 assets/bubble.png，文字压在中部的留白区里 -->
-      <div id="pet-bubble" class="pet-bubble" role="status" aria-live="polite" hidden>
+      <!--
+        对话气泡：贴图是 assets/bubble.png，文字压在中部的留白区里。
+        `data-pet-ui`：标记"这是 UI，不是宠物的一部分" ——
+        InteractionManager 会忽略从它内部发起的一切指针事件（点击/拖动/双击/右键），
+        否则点"知道了"按钮会顺带触发一次宠物点击动画。
+      -->
+      <div id="pet-bubble" class="pet-bubble" role="status" aria-live="polite" data-pet-ui="1" hidden>
         <!--
           三层结构：
             #pet-bubble-text  —— 滚动容器（正文区，overflow-y: auto）；
