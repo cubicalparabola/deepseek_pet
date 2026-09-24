@@ -1,5 +1,5 @@
 {
-  "_comment": "素材分辨率元数据（由 tools/probe-webm.mjs 生成）。主进程用它推导桌宠窗口宽高比，避免窗口与画面比例不一致。新增素材时重新运行 npm run probe 并更新本文件即可。",
+  "_comment": "素材分辨率元数据（由 tools/refresh-media-meta.mjs 生成）。主进程用它推导桌宠窗口宽高比，避免窗口与画面比例不一致。换素材后重新运行该工具即可。",
   "bomb.webm": {
     "width": 834,
     "height": 1112,
@@ -52,20 +52,42 @@
   "idle.webm": {
     "width": 834,
     "height": 1112,
-    "duration": 5.21,
+    "duration": 5.04,
     "fps": 24,
     "alpha": true
   },
   "lie.webm": {
     "width": 834,
     "height": 1112,
-    "duration": 4.92,
+    "duration": 5.13,
+    "fps": 24,
+    "alpha": true
+  },
+  "overheat-end.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 4.08,
+    "fps": 24,
+    "alpha": true
+  },
+  "overheat-loop.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 3.79,
+    "fps": 24,
+    "alpha": true
+  },
+  "overheat-start.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 1.92,
     "fps": 24,
     "alpha": true
   },
   "peek.webm": {
     "width": 834,
     "height": 1112,
+    "duration": 6.04,
     "fps": 24,
     "alpha": true
   },
@@ -76,14 +98,42 @@
     "fps": 24,
     "alpha": true
   },
-  "read.webm": {
+  "read-end.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 4.38,
+    "fps": 24,
+    "alpha": true
+  },
+  "read-loop.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 1.75,
+    "fps": 24,
+    "alpha": true
+  },
+  "read-start.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 1.63,
+    "fps": 24,
+    "alpha": true
+  },
+  "remind.webm": {
     "width": 834,
     "height": 1112,
     "duration": 6.04,
     "fps": 24,
     "alpha": true
   },
-  "remind.webm": {
+  "roll.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 6.04,
+    "fps": 24,
+    "alpha": true
+  },
+  "shake.webm": {
     "width": 834,
     "height": 1112,
     "duration": 6.04,
@@ -97,7 +147,28 @@
     "fps": 24,
     "alpha": true
   },
-  "sleep.webm": {
+  "sleep-end.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 2.71,
+    "fps": 24,
+    "alpha": true
+  },
+  "sleep-loop.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 0.88,
+    "fps": 24,
+    "alpha": true
+  },
+  "sleep-start.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 2.42,
+    "fps": 24,
+    "alpha": true
+  },
+  "spin.webm": {
     "width": 834,
     "height": 1112,
     "duration": 6.04,
@@ -107,6 +178,14 @@
   "stroke.webm": {
     "width": 834,
     "height": 1112,
+    "duration": 6.04,
+    "fps": 24,
+    "alpha": true
+  },
+  "swim.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 6.04,
     "fps": 24,
     "alpha": true
   },
@@ -117,10 +196,45 @@
     "fps": 24,
     "alpha": true
   },
-  "work.webm": {
+  "watch-end.webm": {
     "width": 834,
     "height": 1112,
-    "duration": 6.04,
+    "duration": 4.54,
+    "fps": 24,
+    "alpha": true
+  },
+  "watch-loop.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 2.17,
+    "fps": 24,
+    "alpha": true
+  },
+  "watch-start.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 1.5,
+    "fps": 24,
+    "alpha": true
+  },
+  "work-end.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 4.08,
+    "fps": 24,
+    "alpha": true
+  },
+  "work-loop.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 1.71,
+    "fps": 24,
+    "alpha": true
+  },
+  "work-start.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 1.92,
     "fps": 24,
     "alpha": true
   }

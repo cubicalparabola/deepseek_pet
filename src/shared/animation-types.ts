@@ -45,7 +45,64 @@ export interface AnimationDefinition {
   readonly render?: AnimationRenderOptions;
   /** 是否为该状态机状态下的默认兜底动画（通常只有 idle 为 true）。 */
   readonly fallback?: boolean;
+  /**
+   * **持续动画**的分段配置。
+   *
+   * 写法：
+   * ```jsonc
+   * "segments": {
+   *   "start":     "animations/read-start.webm",
+   *   "loop":      "animations/read-loop.webm",
+   *   "end":       "animations/read-end.webm",
+   *   "loopCount": 3
+   * }
+   * ```
+   *
+   * 播放流程：
+   * ```text
+   * start 播一次 -> loop 重复 loopCount 次 -> end 播一次 -> 动画结束
+   *                     ↑
+   *               中途被打断也转去播 end
+   * ```
+   * 只要写了 `segments`，该动画就是持续动画（`kind: 'persistent'`）。
+   */
+  readonly segments?: PersistentSegments;
+  /**
+   * 显式指定形态。一般不用写 —— 默认规则：
+   * 有 `segments` 就是 `persistent`，否则 `one-shot`。
+   */
+  readonly kind?: AnimationKind;
 }
+
+/** 动画形态：一次性 / 持续。由 `segments` 是否存在推导。 */
+export type AnimationKind = 'one-shot' | 'persistent';
+
+/**
+ * 持续动画的三段素材（start / loop / end）。
+ *
+ * 各段都可以省略，语义：
+ * - 没有 `start`：直接进入循环；
+ * - 没有 `loop`：退化为"一次性的 start -> end"；
+ * - 没有 `end`：循环次数用完或被打断时直接结束，不播收尾。
+ */
+export interface PersistentSegments {
+  /** 开场段：播一次。相对 assets/ 的路径。 */
+  readonly start?: string;
+  /** 循环段：重复播放。相对 assets/ 的路径。 */
+  readonly loop?: string;
+  /** 收尾段：播一次。相对 assets/ 的路径。 */
+  readonly end?: string;
+  /**
+   * 循环段播放次数，播够后自动转去播收尾段。
+   *
+   * - 正整数：例如 `3` = 循环 3 遍后播 end；
+   * - `0` 或省略：**无限循环**，只在中途被打断时才播收尾。
+   */
+  readonly loopCount?: number;
+}
+
+/** 持续动画当前处于哪一段（供调试与自动化验收查询）。 */
+export type PersistentPhase = 'start' | 'loop' | 'end';
 
 /**
  * 动画的渲染微调。
@@ -85,9 +142,9 @@ export const AnimationPriority = {
 
 /** 归一化后的动画定义（所有可选字段都已填好默认值）。 */
 export type ResolvedAnimation = Required<
-  Pick<AnimationDefinition, 'id' | 'type' | 'source' | 'loop' | 'priority' | 'interruptible' | 'cooldown'>
+  Pick<AnimationDefinition, 'id' | 'type' | 'source' | 'loop' | 'priority' | 'interruptible' | 'cooldown' | 'kind'>
 > &
-  Omit<AnimationDefinition, 'loop' | 'priority' | 'interruptible' | 'cooldown'>;
+  Omit<AnimationDefinition, 'loop' | 'priority' | 'interruptible' | 'cooldown' | 'kind'>;
 
 /** play() 的选项。 */
 export interface PlayOptions {

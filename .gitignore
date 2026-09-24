@@ -22,10 +22,12 @@ build/*.txt
 build/knockout/
 # 素材蒙版对比图（由 npm run compare:matte 重新生成）
 build/matte/
-# 逐帧转储：分析素材/循环点时的中间产物，动辄几百 MB，绝不入库
+# 逐帧转储与分析中间产物：动辄几百 MB，绝不入库
 build/frames/
 build/loop-frames/
 build/motion-frames/
+build/seam-frames/
+build/backup-animations/
 *.log
 
 .DS_Store

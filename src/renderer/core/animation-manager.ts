@@ -21,6 +21,7 @@ import {
   type AnimationDefinition,
   type AnimationRenderOptions,
   type InterruptPolicy,
+  type PersistentPhase,
   type PlayOptions,
   type PlayRejectionReason,
   type PlayResult,
@@ -48,6 +49,12 @@ interface ActivePlayback {
   readonly startedAt: number;
   /** 打断令牌：只有当前令牌的 ended/error 才被采信，避免竞态。 */
   readonly token: number;
+  /** 持续动画当前处于哪一段；一次性动画恒为 null。 */
+  persistentPhase: PersistentPhase | null;
+  /** 循环段已经播完几轮。 */
+  loopCycles: number;
+  /** 已经请求结束（等本轮循环播完就转收尾），避免重复触发。 */
+  endingRequested: boolean;
 }
 
 interface QueuedRequest {
@@ -69,6 +76,10 @@ export class AnimationManager {
   private tokenCounter = 0;
   /** 非循环动画的结束看门狗（ended 事件丢失时兜底）。 */
   private completionTimer: number | null = null;
+  /** 持续动画"循环到片尾"的 rAF 轮询句柄。 */
+  private loopEdgeFrame: number | null = null;
+  /** 当前循环段的精确时长（由 media-meta 的 fps/帧数推算，用于判定"这一轮播完了"）。 */
+  private loopSegmentDuration = 0;
   private paused = false;
   private fallbackId: string | null = null;
   private bound = false;
@@ -142,8 +153,12 @@ export class AnimationManager {
       this.logger.error('registerAnimation: missing source', { data: { id: animation.id } });
       return null;
     }
+    // 形态推导与 Manifest 校验保持一致：有 segments 就是持续动画
+    const kind = animation.kind ?? (animation.segments !== undefined ? 'persistent' : 'one-shot');
+
     return {
       ...animation,
+      kind,
       loop: animation.loop ?? (animation.type === 'video' ? ANIMATION_DEFAULTS.videoLoop : ANIMATION_DEFAULTS.imageLoop),
       priority: animation.priority ?? ANIMATION_DEFAULTS.priority,
       interruptible: animation.interruptible ?? ANIMATION_DEFAULTS.interruptible,
@@ -278,6 +293,88 @@ export class AnimationManager {
     this.finishActive(false, reason);
   }
 
+  /**
+   * 请求结束**持续动画**：会先播收尾段（end），播完才算真正结束。
+   *
+   * 这是需求里"被打断"的显式入口。行为：
+   * - 正在循环：把当前这一轮播完，然后转去播 `end`（动作更连贯）；
+   * - 正在开场段：开场播完后转 `end`；
+   * - 正在收尾段：不做任何事（已经要结束了）；
+   * - 没有 `end` 段：直接结束；
+   * - 对**一次性动画**：空操作，返回 false（避免调用方误用）。
+   */
+  public endPersistent(reason = 'requested'): boolean {
+    const active = this.active;
+    if (!active || active.persistentPhase === null) return false;
+    if (active.endingRequested) return true;
+
+    this.logger.info('persistent end requested', {
+      data: { id: active.animation.id, reason, phase: active.persistentPhase },
+    });
+
+    if (active.persistentPhase === 'end') return true;
+    active.endingRequested = true;
+
+    if (!active.animation.segments?.end) {
+      // 没有收尾段：直接结束
+      this.finishActive(true, `persistent-end:${reason}`);
+      return true;
+    }
+
+    // 开场段/循环段：等该段自然结束再转收尾（开场立刻转会很突兀）
+    if (active.persistentPhase === 'start') {
+      // 开场很短，等它 ended 即可，由 bindVideoEvents 驱动
+      return true;
+    }
+    // 循环段：等本轮播完（loopEdgeFrame 轮询会接管）
+    return true;
+  }
+
+  /** 当前是否正在播持续动画（可选按 id 过滤）。 */
+  public isPersistentPlaying(animationId?: string): boolean {
+    const active = this.active;
+    if (!active || active.persistentPhase === null) return false;
+    return animationId === undefined || active.animation.id === animationId;
+  }
+
+  /** 持续动画当前阶段；null = 当前不是持续动画。 */
+  public getPersistentPhase(): PersistentPhase | null {
+    return this.active?.persistentPhase ?? null;
+  }
+
+  /** 持续动画循环段已完成的轮数（一次性动画返回 0）。 */
+  public getLoopCycles(): number {
+    return this.active?.loopCycles ?? 0;
+  }
+
+  /**
+   * 当前**实际生效**的素材相对路径。
+   *
+   * 为什么需要它：`layers.activeVideoSource` 返回的是"下一次要播的素材提示"，
+   * 在切段的一瞬间它已经指向新素材、但缓冲还没交换完，因此不能用来断言
+   * "现在播的是哪一段"。这里按持续动画的当前阶段返回权威答案。
+   */
+  public getActiveSource(): string | null {
+    const active = this.active;
+    if (!active) return null;
+    const segments = active.animation.segments;
+    if (!segments || active.persistentPhase === null) return active.animation.source;
+    if (active.persistentPhase === 'start') return segments.start ?? active.animation.source;
+    if (active.persistentPhase === 'loop') return segments.loop ?? active.animation.source;
+    return segments.end ?? active.animation.source;
+  }
+
+  /**
+   * 清空所有动画的冷却计时。
+   *
+   * 仅供自动化验收做"用例自包含"：否则前一个用例播过的动画会因 cooldown 被拒。
+   * 正常业务路径不该调用（冷却是对自动化来源的保护）。
+   */
+  public resetCooldowns(): void {
+    this.lastPlayedAt.clear();
+    this.logger.debug('cooldowns cleared');
+  }
+
   public pause(): void {
     if (this.paused) return;
     this.paused = true;
@@ -318,6 +415,9 @@ export class AnimationManager {
       source,
       startedAt: Date.now(),
       token,
+      persistentPhase: null,
+      loopCycles: 0,
+      endingRequested: false,
     };
     this.active = playback;
     this.paused = false;
@@ -325,7 +425,16 @@ export class AnimationManager {
 
     const url = this.resolveAsset(definition.source);
     this.logger.info(`play ${definition.id}`, {
-      data: { type: definition.type, priority, source, reason },
+      data: {
+        type: definition.type,
+        kind: definition.kind,
+        priority,
+        source,
+        reason,
+        ...(definition.segments?.loopCount !== undefined
+          ? { loopCount: definition.segments.loopCount }
+          : {}),
+      },
     });
 
     try {
@@ -351,6 +460,16 @@ export class AnimationManager {
       return false;
     }
 
+    /*
+     * 持续动画：素材已就绪，进入"开场 -> 循环"编排。
+     * 有 start 段时先播它，由它的 ended 事件驱动进入循环；
+     * 没有 start 段就直接起循环。
+     */
+    if (definition.kind === 'persistent' && definition.segments && this.layers.activeVideo) {
+      await this.beginPersistent(playback);
+      if (!this.isStillCurrent(playback)) return true;
+    }
+
     this.eventBus.emit(PetEvents.AnimationStart, {
       animationId: definition.id,
       priority,
@@ -361,8 +480,188 @@ export class AnimationManager {
     return true;
   }
 
+  /* ------------------------------------------------------------------ */
+  /* 持续动画：start -> loop × N -> end                                   */
+  /* ------------------------------------------------------------------ */
+
   /**
-   * 播放视频动画。
+   * 启动持续动画。
+   *
+   * - 有 `start` 段：先播它（loop=false），等 ended 后进入循环；
+   * - 没有 `start`：直接进入循环。
+   */
+  private async beginPersistent(playback: ActivePlayback): Promise<void> {
+    const segments = playback.animation.segments;
+    if (segments?.start) {
+      playback.persistentPhase = 'start';
+      this.logger.info('persistent start', { data: { id: playback.animation.id } });
+      await this.playSegment(playback, segments.start, false);
+      return;
+    }
+    await this.enterLoopPhase(playback);
+  }
+
+  /** 进入循环段：循环播放，直到轮数用尽或收到结束请求。 */
+  private async enterLoopPhase(playback: ActivePlayback): Promise<void> {
+    const segments = playback.animation.segments;
+    const source = segments?.loop ?? playback.animation.source;
+    playback.persistentPhase = 'loop';
+    playback.endingRequested = false;
+    playback.loopCycles = 0;
+    this.logger.info('persistent loop', {
+      data: {
+        id: playback.animation.id,
+        source,
+        loopCount: segments?.loopCount ?? 'infinite',
+      },
+    });
+
+    await this.playSegment(playback, source, true);
+    if (!this.isStillCurrent(playback)) return;
+
+    /*
+     * 循环段的精确时长：media-meta 里有 fps 与帧数，用它算比 video.duration 稳，
+     * 也避免不同浏览器对 WebM 时长的小数处理差异。
+     */
+    const video = this.layers.activeVideo;
+    this.loopSegmentDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+    this.armLoopEdgeWatch(playback);
+  }
+
+  /**
+   * 播放持续动画的某一段素材。
+   *
+   * 复用双缓冲换源：换源发生在**隐藏**的缓冲上，等它就绪后再交换可见性，
+   * 因此段与段切换不会露出空白帧（沿用第一版修闪屏的机制）。
+   * token 不变，所以 `isStillCurrent` 依然成立。
+   */
+  private async playSegment(playback: ActivePlayback, source: string, loop: boolean): Promise<void> {
+    const url = this.resolveAsset(source);
+    this.layers.applyRenderHints(playback.animation.render);
+    const active = this.layers.activeVideo;
+
+    if (this.layers.isActiveSource(url)) {
+      active.loop = loop;
+      active.muted = true;
+      active.playsInline = true;
+      try {
+        active.currentTime = 0;
+      } catch {
+        /* 元数据未就绪时忽略 */
+      }
+      await this.waitForVideoReady(active, playback.token);
+      if (!this.isStillCurrent(playback)) return;
+      this.layers.showLayer('video');
+      await this.layers.playVideo();
+      return;
+    }
+
+    const incoming = this.layers.spareVideo;
+    incoming.loop = loop;
+    incoming.muted = true;
+    incoming.playsInline = true;
+    this.layers.setVideoSourceHint(url);
+    this.layers.setVideoSource(incoming, url);
+
+    await this.waitForVideoReady(incoming, playback.token);
+    if (!this.isStillCurrent(playback)) return;
+    await nextFrame();
+    if (!this.isStillCurrent(playback)) return;
+
+    this.layers.commitVideoSwap();
+    this.layers.showLayer('video');
+    await this.layers.playVideo();
+  }
+
+  /**
+   * 轮询循环段是否播到片尾。
+   *
+   * 为什么不用 `ended`：循环段设了 `loop=true`，Chromium 会无缝从头再来，
+   * **永远不会**触发 `ended`。所以必须在它回到开头之前接管。
+   *
+   * 每次"抓到片尾"记一轮循环：
+   * - 轮数达到 `segments.loopCount` -> 转去播 end；
+   * - 收到结束请求（被打断）-> 也转去播 end，但**先把当前这一轮播完**。
+   */
+  private armLoopEdgeWatch(playback: ActivePlayback): void {
+    this.clearLoopEdgeWatch();
+    const tick = (): void => {
+      this.loopEdgeFrame = null;
+      const active = this.active;
+      if (!active || active.token !== playback.token) return;
+      if (active.persistentPhase !== 'loop') return;
+
+      const video = this.layers.activeVideo;
+      const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : this.loopSegmentDuration;
+      const nearEnd = duration > 0 && video.currentTime >= duration - 0.06;
+
+      if (nearEnd && !video.paused) {
+        active.loopCycles += 1;
+        const target = active.animation.segments?.loopCount;
+        const reached = typeof target === 'number' && target > 0 && active.loopCycles >= target;
+
+        this.eventBus.emit('animation:loop-cycle', {
+          animationId: active.animation.id,
+          cycle: active.loopCycles,
+          ...(typeof target === 'number' && target > 0 ? { target } : {}),
+        });
+
+        if (reached || active.endingRequested) {
+          this.logger.info('persistent loop finished', {
+            data: {
+              id: active.animation.id,
+              cycles: active.loopCycles,
+              target: target ?? 'infinite',
+              reason: reached ? 'loop-count-reached' : 'end-requested',
+            },
+          });
+          void this.playEnd(playback);
+          return;
+        }
+        this.logger.debug('persistent loop cycle', {
+          data: { id: active.animation.id, cycle: active.loopCycles, target: target ?? 'infinite' },
+        });
+      }
+      this.loopEdgeFrame = window.requestAnimationFrame(tick);
+    };
+    this.loopEdgeFrame = window.requestAnimationFrame(tick);
+  }
+
+  private clearLoopEdgeWatch(): void {
+    if (this.loopEdgeFrame === null) return;
+    window.cancelAnimationFrame(this.loopEdgeFrame);
+    this.loopEdgeFrame = null;
+  }
+
+  /** 播放收尾段；播完即结束整个动画。 */
+  private async playEnd(playback: ActivePlayback): Promise<void> {
+    const active = this.active;
+    if (!active || active.token !== playback.token) return;
+    const end = playback.animation.segments?.end;
+    if (!end) {
+      this.finishActive(true, 'persistent-end:no-end-segment');
+      return;
+    }
+
+    this.clearLoopEdgeWatch();
+    playback.persistentPhase = 'end';
+    playback.endingRequested = false;
+    this.logger.info('persistent end', { data: { id: playback.animation.id, cycles: playback.loopCycles } });
+
+    try {
+      await this.playSegment(playback, end, false);
+    } catch (error) {
+      this.logger.error('persistent end segment failed', { error, data: { id: playback.animation.id } });
+      if (this.isStillCurrent(playback)) this.finishActive(false, 'end-segment-error');
+      return;
+    }
+    if (!this.isStillCurrent(playback)) return;
+    // end 段 loop=false，由 ended 结束整个动画；另装时长看门狗兜底
+    this.armCompletionWatchdog(playback, this.layers.activeVideo);
+  }
+
+  /**
+   * 播放视频动画（一次性动画的入口）。
    *
    * **双缓冲**：换源一定发生在隐藏的备用缓冲上，等它可播之后才交换可见性。
    * 直接给可见的 `<video>` 换源会让 Chromium 丢掉当前帧（readyState -> 0），
@@ -453,7 +752,10 @@ export class AnimationManager {
    */
   private armCompletionWatchdog(playback: ActivePlayback, video: HTMLVideoElement): void {
     this.clearCompletionWatchdog();
-    if (playback.animation.loop) return;
+    // 循环段不装：它的"结束"由 armLoopEdgeWatch 负责（loop=true 永不触发 ended）
+    if (this.active?.persistentPhase === 'loop') return;
+    // 一次性循环动画也不装
+    if (playback.animation.loop && this.active?.persistentPhase === null) return;
 
     const durationMs = Number.isFinite(video.duration) && video.duration > 0
       ? video.duration * 1000
@@ -464,9 +766,10 @@ export class AnimationManager {
       this.completionTimer = null;
       const active = this.active;
       if (!active || active.token !== playback.token) return;
-      if (active.animation.loop) return;
+      if (active.persistentPhase === 'loop') return;
+      if (active.animation.loop && active.persistentPhase === null) return;
       this.logger.warn('no ended event; finishing by duration fallback', {
-        data: { id: active.animation.id, timeoutMs },
+        data: { id: active.animation.id, timeoutMs, phase: active.persistentPhase ?? 'one-shot' },
       });
       this.finishActive(true, 'ended-watchdog');
     }, timeoutMs);
@@ -603,10 +906,17 @@ export class AnimationManager {
     if (!active) return;
     this.active = null;
     this.clearCompletionWatchdog();
+    this.clearLoopEdgeWatch();
     this.layers.pauseVideo();
 
     this.logger.info(`ended ${active.animation.id}`, {
-      data: { completed, reason, durationMs: Date.now() - active.startedAt },
+      data: {
+        completed,
+        reason,
+        durationMs: Date.now() - active.startedAt,
+        ...(active.persistentPhase !== null ? { phase: active.persistentPhase } : {}),
+        ...(active.persistentPhase !== null ? { loopCycles: active.loopCycles } : {}),
+      },
     });
 
     this.eventBus.emit(PetEvents.AnimationEnd, {
@@ -646,6 +956,23 @@ export class AnimationManager {
         if (video !== this.layers.activeVideo) return;
         const active = this.active;
         if (!active || active.animation.type !== 'video') return;
+
+        /*
+         * 持续动画的分段推进。能走到这里的 ended 只可能来自 loop=false 的段：
+         *   start -> 开始循环（或已请求结束则直接进 end）
+         *   end   -> 整段动画结束
+         *   loop  -> 不该发生（loop=true），防御性结束
+         */
+        if (active.persistentPhase !== null) {
+          if (active.persistentPhase === 'start') {
+            if (active.endingRequested) void this.playEnd(active);
+            else void this.enterLoopPhase(active);
+            return;
+          }
+          this.finishActive(true, 'ended');
+          return;
+        }
+
         if (active.animation.loop) return; // 循环动画不会触发 ended，双保险
         this.finishActive(true, 'ended');
       });
@@ -692,6 +1019,7 @@ export class AnimationManager {
 
   public dispose(): void {
     this.clearCompletionWatchdog();
+    this.clearLoopEdgeWatch();
     this.registry.clear();
     this.lastPlayedAt.clear();
     this.active = null;

@@ -84,6 +84,13 @@ export interface AnimationRejectedPayload extends AnimationRequestPayload {
   readonly rejection: PlayRejectionReason;
 }
 
+/** 持续动画循环段完成一轮。`target` 省略表示无限循环。 */
+export interface AnimationLoopCyclePayload {
+  readonly animationId: string;
+  readonly cycle: number;
+  readonly target?: number;
+}
+
 export interface StateChangePayload {
   readonly from: PetState;
   readonly to: PetState;
@@ -154,6 +161,8 @@ export interface PetEventMap {
   'animation:start': AnimationStartPayload;
   'animation:end': AnimationEndPayload;
   'animation:rejected': AnimationRejectedPayload;
+  /** 持续动画的循环段完成一轮（供调试/验收观察循环进度）。 */
+  'animation:loop-cycle': AnimationLoopCyclePayload;
 
   'state:change': StateChangePayload;
 

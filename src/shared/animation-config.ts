@@ -11,9 +11,11 @@
 import {
   ANIMATION_DEFAULTS,
   type AnimationDefinition,
+  type AnimationKind,
   type AnimationManifest,
   type AnimationManifestEntry,
   type AnimationType,
+  type PersistentSegments,
   type ResolvedAnimation,
 } from './animation-types';
 import { ConfigError } from './errors';
@@ -48,13 +50,86 @@ function normalizeRelativeSource(source: string): string | null {
   return segments.join('/');
 }
 
+/** 路径扩展名是否与该动画类型匹配。 */
+function extensionMatches(source: string, type: AnimationType): boolean {
+  const extension = source.slice(source.lastIndexOf('.')).toLowerCase();
+  const allowed = type === 'video' ? VIDEO_EXTENSIONS : IMAGE_EXTENSIONS;
+  return (allowed as readonly string[]).includes(extension);
+}
+
+/**
+ * 归一化持续动画的分段配置。
+ *
+ * 规则：
+ * - `start` / `loop` / `end` 都是可选的，但**至少要有一个**（否则不叫分段动画）；
+ * - 每段路径都必须合法且扩展名与 type 匹配；
+ * - `loopCount` 必须是正整数；0 或非法值 = 无限循环（省略该字段）；
+ * - **只有 `loop` 而没有 `end`** 时给出警告（循环次数用完后会直接结束，没有收尾动作）。
+ */
+function normalizeSegments(
+  raw: unknown,
+  type: AnimationType,
+  id: string,
+  issues: ManifestValidationIssue[],
+): { segments: PersistentSegments } | { error: string } {
+  if (!isPlainObject(raw)) return { error: 'segments 必须是对象' };
+
+  const normalize = (key: 'start' | 'loop' | 'end'): string | undefined | { error: string } => {
+    const value = raw[key];
+    if (value === undefined) return undefined;
+    if (typeof value !== 'string') return { error: `segments.${key} 必须是字符串路径` };
+    const normalized = normalizeRelativeSource(value);
+    if (!normalized) return { error: `segments.${key} 路径非法` };
+    if (!extensionMatches(normalized, type)) {
+      return { error: `segments.${key} 扩展名与 type "${type}" 不匹配` };
+    }
+    return normalized;
+  };
+
+  const start = normalize('start');
+  if (start && typeof start === 'object') return start;
+  const loop = normalize('loop');
+  if (loop && typeof loop === 'object') return loop;
+  const end = normalize('end');
+  if (end && typeof end === 'object') return end;
+
+  if (!start && !loop && !end) {
+    return { error: 'segments 至少要指定 start / loop / end 之一' };
+  }
+
+  const loopCount =
+    typeof raw.loopCount === 'number' && Number.isFinite(raw.loopCount) && raw.loopCount > 0
+      ? Math.floor(raw.loopCount)
+      : undefined;
+
+  if (loop && !end && loopCount !== undefined) {
+    issues.push({
+      id,
+      level: 'warn',
+      message: `持续动画配置了 loopCount=${loopCount} 但没有 end 段，循环结束后将直接结束（没有收尾动作）`,
+    });
+  }
+
+  return {
+    segments: {
+      ...(start ? { start } : {}),
+      ...(loop ? { loop } : {}),
+      ...(end ? { end } : {}),
+      ...(loopCount !== undefined ? { loopCount } : {}),
+    },
+  };
+}
+
 /**
  * 归一化单条定义。
- * @returns 归一化后的定义，或 null + 错误原因。
+ *
+ * @param issues 用于收集"不致命但值得提醒"的问题（例如持续动画没配 end 段）。
+ * @returns 归一化后的定义，或 error 原因。
  */
 export function normalizeAnimation(
   id: string,
   entry: AnimationManifestEntry,
+  issues: ManifestValidationIssue[] = [],
 ): { animation: ResolvedAnimation } | { error: string } {
   if (typeof id !== 'string' || id.trim() === '') return { error: '缺少 id' };
   if (!isPlainObject(entry)) return { error: '定义必须是对象' };
@@ -100,6 +175,31 @@ export function normalizeAnimation(
     return { error: `source 扩展名 ${extension || '(无)'} 与 type "${type}" 不匹配` };
   }
 
+  /*
+   * 形态判定（一次性 / 持续）：
+   * - 写了 `segments` 就是持续动画；
+   * - 显式 `"kind": "one-shot"` 可以强制一次性（覆盖上面的推导）；
+   * - 其余一律一次性。
+   */
+  let segments: PersistentSegments | undefined;
+  if (entry.segments !== undefined) {
+    const result = normalizeSegments(entry.segments, type as AnimationType, id, issues);
+    if ('error' in result) return { error: result.error };
+    segments = result.segments;
+  }
+
+  const explicitKind: AnimationKind | null =
+    entry.kind === 'persistent' ? 'persistent' : entry.kind === 'one-shot' ? 'one-shot' : null;
+  const kind: AnimationKind = explicitKind ?? (segments !== undefined ? 'persistent' : 'one-shot');
+
+  if (kind === 'persistent' && segments === undefined) {
+    issues.push({
+      id,
+      level: 'warn',
+      message: '声明为 persistent 但没有 segments，将按一次性动画播放',
+    });
+  }
+
   const animation: ResolvedAnimation = {
     id,
     type: type as AnimationType,
@@ -108,6 +208,8 @@ export function normalizeAnimation(
     priority,
     interruptible,
     cooldown,
+    kind,
+    ...(segments ? { segments } : {}),
     ...(tags ? { tags } : {}),
     ...(typeof entry.label === 'string' ? { label: entry.label } : {}),
     ...(isPlainObject(entry.render) ? { render: entry.render } : {}),
@@ -156,7 +258,7 @@ export function validateManifest(raw: unknown): ManifestValidationResult {
       continue;
     }
 
-    const result = normalizeAnimation(entryId, rawEntry as AnimationManifestEntry);
+    const result = normalizeAnimation(entryId, rawEntry as AnimationManifestEntry, issues);
     if ('error' in result) {
       issues.push({ id: entryId, level: 'error', message: `${result.error}，已跳过` });
       continue;

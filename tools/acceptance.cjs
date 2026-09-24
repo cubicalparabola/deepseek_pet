@@ -155,7 +155,7 @@ app.whenReady().then(async () => {
   record('petApp 已挂载', !state.error, JSON.stringify(state));
   record('兜底动画 idle 正在播放', state.animation === 'idle', `animation=${state.animation}`);
   record('状态机初始 PLAYING', state.state === 'PLAYING', `state=${state.state}`);
-  record('Manifest 注册了 18 个动画', state.animations === 18, `animations=${state.animations}`);
+  record('Manifest 注册了 24 个动画', state.animations === 24, `animations=${state.animations}`);
   record('两个示例插件已加载', state.plugins === 2, `plugins=${state.plugins}`);
 
   /* ------------------------- 媒体与透明素材 ------------------------- */
@@ -425,6 +425,133 @@ app.whenReady().then(async () => {
   record('循环播放期间不触发 animation:end', looping.endedFired === false, `endedFired=${looping.endedFired}`);
   record('循环期间仍处于 idle 动画', looping.currentAnimation === 'idle', `animation=${looping.currentAnimation}`);
 
+  /* ------------- 持续动画机制：start -> loop × N -> end ------------- */
+  // 需求：播放 start 后播放若干 loop，最后"被打断"或"循环次数达到"时播放 end。
+  const persistentManifest = await run(`(() => {
+    const anim = window.petDebug.anim;
+    const rows = anim.list().map((id) => {
+      const d = anim.getDefinition(id);
+      return {
+        id,
+        kind: d ? d.kind : null,
+        seg: d && d.segments ? { start: Boolean(d.segments.start), loop: Boolean(d.segments.loop), end: Boolean(d.segments.end), loopCount: d.segments.loopCount ?? null } : null,
+      };
+    });
+    return rows;
+  })()`);
+  const persistentIds = ['overheat', 'read', 'sleep', 'watch', 'work'];
+  const persistRows = persistentManifest.filter((r) => persistentIds.includes(r.id));
+  const oneShotRows = persistentManifest.filter((r) => !persistentIds.includes(r.id));
+  record(
+    '5 条持续动画均带 start/loop/end 三段',
+    persistRows.length === 5 && persistRows.every((r) => r.kind === 'persistent' && r.seg && r.seg.start && r.seg.loop && r.seg.end),
+    JSON.stringify(persistRows.map((r) => `${r.id}:${r.kind}:${r.seg ? `${r.seg.start ? 'S' : '-'}${r.seg.loop ? 'L' : '-'}${r.seg.end ? 'E' : '-'}${r.seg.loopCount === null ? '(inf)' : '(' + r.seg.loopCount + ')'}` : 'none'}`)),
+  );
+  record(
+    '其余 19 条为一次性动画（无 segments）',
+    oneShotRows.length === 19 && oneShotRows.every((r) => r.kind === 'one-shot' && r.seg === null),
+    JSON.stringify({ count: oneShotRows.length, kinds: [...new Set(oneShotRows.map((r) => r.kind))] }),
+  );
+
+  // 完整走一遍：start -> loop -> 循环到次数 -> end -> 结束
+  const cycleRun = await run(`(async () => {
+    const anim = window.petDebug.anim;
+    const bus = window.petDebug.bus;
+    const video = () => document.querySelector('video.layer-active') || document.getElementById('pet-video') || document.querySelector('video');
+    const srcOf = () => String(video().currentSrc || video().src || '').split('/').pop();
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    anim.resetCooldowns();
+    const cycles = [];
+    const sub = bus.on('animation:loop-cycle', (p) => { if (p.animationId === 'read') cycles.push(p.cycle); });
+    let endEvent = null;
+    const subEnd = bus.on('animation:end', (p) => { if (p.animationId === 'read') endEvent = p; });
+
+    await anim.play('read', { interrupt: 'force', reason: 'persistent-cycle-test' });
+    const phaseStart = anim.getPersistentPhase();
+    const srcStart = srcOf();
+
+    // 等开场段播完（read-start ≈ 1.63s）。
+    // 注意用 anim.getActiveSource() 而不是 video.currentSrc：
+    // 切段瞬间缓冲可能还没交换完，currentSrc 会滞后一个段。
+    let phaseLoop = null, srcLoop = null;
+    for (let i = 0; i < 40 && phaseLoop === null; i++) {
+      await wait(100);
+      if (anim.getPersistentPhase() === 'loop') { phaseLoop = 'loop'; srcLoop = anim.getActiveSource(); }
+    }
+
+    // 等它自己循环到次数（read loopCount=4，loop 段 1.75s → 约 7s）
+    const target = (anim.getDefinition('read').segments || {}).loopCount;
+    let sawEndSrc = false;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 30000 && !endEvent) {
+      await wait(100);
+      if (srcOf().includes('-end')) sawEndSrc = true;
+    }
+    sub.unsubscribe();
+    subEnd.unsubscribe();
+    return { phaseStart, srcStart, phaseLoop, srcLoop, target, cycles, sawEndSrc, endEvent, phaseAfter: anim.getPersistentPhase(), current: anim.getCurrentAnimation() };
+  })()`);
+  record('持续动画起始阶段为 start', cycleRun.phaseStart === 'start' && String(cycleRun.srcStart).includes('-start'), JSON.stringify({ phase: cycleRun.phaseStart, src: cycleRun.srcStart }));
+  record('开场播完自动进入 loop 阶段', cycleRun.phaseLoop === 'loop' && String(cycleRun.srcLoop).includes('-loop'), JSON.stringify({ phase: cycleRun.phaseLoop, src: cycleRun.srcLoop }));
+  record(
+    '循环段按 loopCount 精确计数',
+    Array.isArray(cycleRun.cycles) && cycleRun.cycles.length === cycleRun.target && cycleRun.cycles[cycleRun.cycles.length - 1] === cycleRun.target,
+    JSON.stringify({ target: cycleRun.target, cycles: cycleRun.cycles }),
+  );
+  record('循环次数达到后播放 end 段', cycleRun.sawEndSrc === true, `endSrcSeen=${cycleRun.sawEndSrc}`);
+  record('end 播完后动画结束并回到兜底 idle', Boolean(cycleRun.endEvent) && cycleRun.phaseAfter === null && cycleRun.current === 'idle', JSON.stringify({ end: cycleRun.endEvent, phase: cycleRun.phaseAfter, current: cycleRun.current }));
+
+  // 被打断：循环中请求结束 -> 播完本轮 -> 播 end -> 结束
+  const interruptRun = await run(`(async () => {
+    const anim = window.petDebug.anim;
+    const bus = window.petDebug.bus;
+    const video = () => document.querySelector('video.layer-active') || document.getElementById('pet-video') || document.querySelector('video');
+    const srcOf = () => String(video().currentSrc || video().src || '').split('/').pop();
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    anim.resetCooldowns();
+    // watch 是无限循环（loopCount 未配），正好用来测"只能被打断结束"
+    await anim.play('watch', { interrupt: 'force', reason: 'persistent-interrupt-test' });
+    for (let i = 0; i < 40 && anim.getPersistentPhase() !== 'loop'; i++) await wait(100);
+    const phaseBefore = anim.getPersistentPhase();
+    const srcBefore = anim.getActiveSource();
+
+    const accepted = anim.endPersistent('acceptance-interrupt');
+    const phaseRightAfter = anim.getPersistentPhase();
+
+    let endEvent = null;
+    const sub = bus.on('animation:end', (p) => { if (p.animationId === 'watch') endEvent = p; });
+    let sawEndSrc = false;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 30000 && !endEvent) {
+      await wait(100);
+      if (srcOf().includes('-end')) sawEndSrc = true;
+    }
+    sub.unsubscribe();
+    return { phaseBefore, srcBefore, accepted, phaseRightAfter, sawEndSrc, endEvent, current: anim.getCurrentAnimation() };
+  })()`);
+  record('无限循环的持续动画（watch）循环段无 loopCount', interruptRun.phaseBefore === 'loop' && String(interruptRun.srcBefore).includes('-loop'), JSON.stringify(interruptRun));
+  record('被打断时不立刻切断（先播完本轮，仍在 loop 阶段）', interruptRun.accepted === true && interruptRun.phaseRightAfter === 'loop', `phase=${interruptRun.phaseRightAfter}`);
+  record('打断后播放 end 段并结束', interruptRun.sawEndSrc === true && Boolean(interruptRun.endEvent) && interruptRun.current === 'idle', JSON.stringify({ endSrc: interruptRun.sawEndSrc, end: interruptRun.endEvent, current: interruptRun.current }));
+
+  // 对一次性动画调用 endPersistent 必须是空操作
+  const endOnOneShot = await run(`(async () => {
+    const anim = window.petDebug.anim;
+    anim.resetCooldowns();
+    await anim.play('cute', { interrupt: 'force', reason: 'one-shot-endprobe' });
+    const before = anim.getCurrentAnimation();
+    const accepted = anim.endPersistent('should-be-noop');
+    return { before, accepted, current: anim.getCurrentAnimation(), phase: anim.getPersistentPhase() };
+  })()`);
+  record(
+    'endPersistent() 对一次性动画是空操作',
+    endOnOneShot.accepted === false && endOnOneShot.phase === null && endOnOneShot.current === 'cute',
+    JSON.stringify(endOnOneShot),
+  );
+  await run(`window.petDebug.anim.play('idle', { interrupt: 'force', reason: 'restore-after-persistent-tests' })`);
+  await wait(1200);
+
   /* ------------------- 长按不得产生形变 ------------------- */
   const geometry = await run(`(async () => {
     // 双缓冲：每次重新取当前可见缓冲
@@ -628,13 +755,23 @@ app.whenReady().then(async () => {
     // 同优先级应被拒绝
     const r2 = await anim.play('fawning', { priority: 50, reason: 'test' });
     out.equalReason = r2.accepted ? null : r2.reason;
-    // 不可打断：sleep(interruptible=false) 播放中，更高优先级也不能抢占
-    await anim.play('sleep', { priority: 20, interrupt: 'force', reason: 'test' });
-    out.sleepPlaying = anim.getCurrentAnimation();
+    /*
+     * 不可打断 + 冷却：这里**契约注册**一条专用动画，而不是依赖 Manifest 里
+     * 某条素材恰好配了 interruptible=false / cooldown。
+     * 原因：素材与 Manifest 会随需求变化（例如 sleep 后来改成了持续动画），
+     * 让断言依赖"机制"而不是"某条素材的当前配置"，用例才不会被无关改动打破。
+     */
+    anim.registerAnimation({
+      id: 'ac-guarded', type: 'video', source: 'animations/lie.webm',
+      priority: 20, interruptible: false, cooldown: 180000,
+    });
+    anim.resetCooldowns();
+    await anim.play('ac-guarded', { priority: 20, interrupt: 'force', reason: 'test' });
+    out.guardedPlaying = anim.getCurrentAnimation();
     const r3 = await anim.play('bomb', { priority: 100, reason: 'test' });
     out.nonInterruptibleReason = r3.accepted ? null : r3.reason;
-    // 冷却：sleep cooldown=180000ms，紧接着再次 force 请求应被 cooldown 拒绝
-    const r4 = await anim.play('sleep', { priority: 20, interrupt: 'force', reason: 'test' });
+    // 冷却：紧接着再次 force 请求应被 cooldown 拒绝
+    const r4 = await anim.play('ac-guarded', { priority: 20, interrupt: 'force', reason: 'test' });
     out.cooldownReason = r4.accepted ? null : r4.reason;
     // 收尾：停止，避免影响后续用例
     anim.stop('test-cleanup');
@@ -643,7 +780,7 @@ app.whenReady().then(async () => {
   record('低优先级动画可正常播放', priority.low === 'lie', JSON.stringify(priority));
   record('高优先级可抢占低优先级', priority.interruptAccepted === true && priority.after === 'cute', `after=${priority.after}`);
   record('同优先级被拒绝 (equal-priority)', priority.equalReason === 'equal-priority', `reason=${priority.equalReason}`);
-  record('interruptible=false 拒绝更高优先级抢占', priority.nonInterruptibleReason === 'not-interruptible', `reason=${priority.nonInterruptibleReason}`);
+  record('interruptible=false 拒绝更高优先级抢占', priority.nonInterruptibleReason === 'not-interruptible', `reason=${priority.nonInterruptibleReason}, playing=${priority.guardedPlaying}`);
   record('动画冷却生效 (cooldown)', priority.cooldownReason === 'cooldown', `reason=${priority.cooldownReason}`);
 
   /* ------------- 手动播放不被冷却吞掉（回归：bomb 只能播一次） ------------- */
