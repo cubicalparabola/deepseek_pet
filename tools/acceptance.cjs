@@ -653,6 +653,42 @@ app.whenReady().then(async () => {
     JSON.stringify(menuSwitch),
   );
 
+  /*
+   * 回归：**同一个动画"播放 -> 再点结束 -> 再播放 -> 再点结束"多个来回**都要生效。
+   *
+   * 之前那条 toggle 断言只跑了一次、而且是"复刻 renderer 的判断"，
+   * 没有覆盖"连续来回"与真实菜单回调 —— 这次补上真实 command 路径。
+   */
+  const toggleRepeat = await run(`(async () => {
+    const anim = window.petDebug.anim;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const rounds = [];
+    for (let round = 0; round < 2; round++) {
+      anim.resetCooldowns();
+      anim.stop('repeat-reset');
+      await wait(200);
+      // 等价于菜单项 click -> onSetAnimation -> 真实处理器（不是复刻逻辑）
+      window.petApp.handleMenuAnimation('watch');
+      for (let i = 0; i < 60 && anim.getPersistentPhase() !== 'loop'; i++) await wait(100);
+      const playing = { animation: anim.getCurrentAnimation(), phase: anim.getPersistentPhase() };
+      // 再次点同一项
+      window.petApp.handleMenuAnimation('watch');
+      let gone = false;
+      const t0 = Date.now();
+      while (Date.now() - t0 < 20000 && !gone) {
+        await wait(150);
+        if (anim.getCurrentAnimation() !== 'watch') gone = true;
+      }
+      rounds.push({ round, playing, gone, after: anim.getCurrentAnimation(), ms: Date.now() - t0 });
+    }
+    return rounds;
+  })()`);
+  record(
+    '同一动画连续两轮"播放->再点结束"都生效',
+    Array.isArray(toggleRepeat) && toggleRepeat.length === 2 && toggleRepeat.every((r) => r.playing.animation === 'watch' && r.gone === true),
+    JSON.stringify(toggleRepeat),
+  );
+
   // 对一次性动画调用 endPersistent 必须是空操作
   const endOnOneShot = await run(`(async () => {
     const anim = window.petDebug.anim;

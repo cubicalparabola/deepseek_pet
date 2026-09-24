@@ -330,45 +330,7 @@ class PetApplication {
       else this.behaviorManager.resume();
     });
     this.runtime.onSetAnimation((animationId) => {
-      /*
-       * 托盘/右键菜单的「播放动画（测试）」。
-       *
-       * 再次点击**正在播放的同一个动画** -> 视为"结束它"：
-       * 菜单用 radio 勾选当前动画，用户看到它已被选中，自然会想"再点一次取消"。
-       * 对持续动画（watch/read/...）尤其重要 —— 它们会一直循环，
-       * 如果没有这个出口，用户就会觉得"watch 无法打断"（实测反馈就是这个）。
-       * 一次性动画的"再点一次"同样是结束（回到兜底），语义一致。
-       */
-      if (this.animationManager.getCurrentAnimation() === animationId) {
-        this.logger.info('tray menu: same animation re-selected; ending it', {
-          data: { animationId, persistent: this.animationManager.isPersistentPlaying(animationId) },
-        });
-        // 持续动画走 endPersistent（会播收尾段，更连贯）；其余直接停
-        if (!this.animationManager.endPersistent('tray-menu-toggle')) {
-          this.animationManager.stop('tray-menu-toggle');
-        }
-        return;
-      }
-
-      void this.execute({
-        type: 'animation',
-        animationId,
-        priority: 70,
-        interrupt: 'force',
-        source: 'user',
-        reason: 'tray-menu',
-        /*
-         * 用户在托盘/右键菜单里**手动**挑的动画：
-         * - `interrupt: 'force'`：必须真的切过去。原来只给优先级（60）+ auto 仲裁，
-         *   而菜单对**所有**动画都给同一个优先级，于是"当前 60 vs 目标 60"
-         *   命中 equal-priority 被拒 —— 表现就是"watch 播放时选别的动画没反应"
-         *   （实测所有动画都被拒，不只是 watch）。用户明确点了这一条，就该生效。
-         * - `bypassCooldown`：长冷却的动画（bomb 5 分钟）点第二次否则毫无反应，
-         *   看起来像"只能播一次"。自动化来源（行为/插件/AI）不享受这两条。
-         * 注意：`force` 仍然无法抢占 `interruptible: false` 的动画（这是硬约束）。
-         */
-        bypassCooldown: true,
-      });
+      this.handleMenuAnimation(animationId);
     });
     this.runtime.onShutdown(() => this.shutdown());
     this.runtime.onSizeChanged((size) => {
@@ -504,6 +466,52 @@ class PetApplication {
     if (this.watchdogTimer === null) return;
     window.clearInterval(this.watchdogTimer);
     this.watchdogTimer = null;
+  }
+
+  /**
+   * 托盘/右键菜单的「播放动画（测试）」处理器。
+   *
+   * 两条菜单（托盘菜单与右键上下文菜单）在 Main 侧都最终调用
+   * `IpcManager.setAnimation(id)` -> `CommandSetAnimation`，因此**必然**走到这里 ——
+   * 也就是说这一处逻辑同时决定两条菜单的行为，不存在"托盘能用、右键不能用"的分叉。
+   * （曾经怀疑过两条路径不同，用 tools/diag-menu-click.cjs 拦截
+   * `Menu.buildFromTemplate` 并直接调用菜单项的 click 回调验证过：两者一致。）
+   *
+   * 行为：
+   * - 再次点击**正在播放的同一个动画** -> 结束它（持续动画播收尾段，其余直接停）；
+   * - 点了**其它**动画 -> 强制切换。
+   */
+  public handleMenuAnimation(animationId: string): void {
+    if (this.animationManager.getCurrentAnimation() === animationId) {
+      this.logger.info('menu: same animation re-selected; ending it', {
+        data: { animationId, persistent: this.animationManager.isPersistentPlaying(animationId) },
+      });
+      // 持续动画走 endPersistent（先播完本轮再播收尾，更连贯）；其余直接停
+      if (!this.animationManager.endPersistent('menu-toggle')) {
+        this.animationManager.stop('menu-toggle');
+      }
+      return;
+    }
+
+    void this.execute({
+      type: 'animation',
+      animationId,
+      priority: 70,
+      interrupt: 'force',
+      source: 'user',
+      reason: 'tray-menu',
+      /*
+       * 用户在托盘/右键菜单里**手动**挑的动画：
+       * - `interrupt: 'force'`：必须真的切过去。原来只给优先级（60）+ auto 仲裁，
+       *   而菜单对**所有**动画都给同一个优先级，于是"当前 60 vs 目标 60"
+       *   命中 equal-priority 被拒 —— 表现就是"watch 播放时选别的动画没反应"
+       *   （实测所有动画都被拒，不只是 watch）。用户明确点了这一条，就该生效。
+       * - `bypassCooldown`：长冷却的动画（bomb 5 分钟）点第二次否则毫无反应，
+       *   看起来像"只能播一次"。自动化来源（行为/插件/AI）不享受这两条。
+       * 注意：`force` 仍然无法抢占 `interruptible: false` 的动画（这是硬约束）。
+       */
+      bypassCooldown: true,
+    });
   }
 
   /* ------------------------------------------------------------------ */

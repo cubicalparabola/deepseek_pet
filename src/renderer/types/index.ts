@@ -48,6 +48,8 @@ declare global {
     petApp?: {
       describe(): Record<string, unknown>;
       debugHandles(): PetDebugHandles;
+      /** 托盘 / 右键菜单选择动画的真实入口（验收脚本直接调用它，避免复刻逻辑）。 */
+      handleMenuAnimation(animationId: string): void;
       shutdown(): void;
     };
     /** 管理器只读引用（调试用）。 */
