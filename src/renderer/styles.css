@@ -148,26 +148,22 @@ body {
   display: none;
 }
 
+/*
+ * 正文区：**绝对定位**在气泡**实心填充区**内。
+ *
+ * 为什么用绝对定位 + 精确像素（而不是 flex 或百分比）：
+ * 贴图顶部 7.8% 是圆角外的透明区，正文若从容器顶开始，滚动时文字会露到
+ * 气泡外面；用百分比又会被"容器高度"和"按钮带"两件事搅在一起算错。
+ * 视觉验证（tools/capture-bubble-verify.cjs + 截图看框）确认过：
+ * 正文区上边界必须从实心区上沿开始。
+ * 上下边界由 Renderer 按实心区算出像素后写入。
+ */
 .pet-bubble-text {
-  /*
-   * 高度由 Renderer 写成**显式像素**（= 容器高 - 按钮带），不用 flex 推算。
-   * 用 `flex: 0 0 auto` 让这个显式高度生效（`flex: 1` 会把它拉伸到剩余空间全体，
-   * 把按钮挤到气泡外面 —— 实测踩过）。
-   */
-  flex: 0 0 auto;
-  min-height: 0;
-  /* 左右内缩与 shared/bubble.ts 的 BUBBLE_TEXT_INSET 保持一致 */
-  margin-left: var(--bubble-inset-left);
-  margin-right: var(--bubble-inset-right);
-  /*
-   * 上下留白由 Renderer 写成**像素**（不是百分比）。
-   *
-   * 为什么不能用百分比：百分比 padding 相对**元素自身**的宽度/高度解析，
-   * 而这个元素是 `flex: 1` 的可伸缩项 —— 它变高 -> padding 变大 -> 它更高，
-   * 正反馈会把整条按钮带的空间吃光（实测文字区撑到 384px、按钮被挤没）。
-   */
-  padding-top: 0;
-  padding-bottom: 0;
+  position: absolute;
+  left: var(--bubble-inset-left);
+  right: var(--bubble-inset-right);
+  top: var(--bubble-text-top);
+  bottom: var(--bubble-text-bottom);
   /*
    * 短文本垂直居中用 flex 的 `justify-content: safe center`：
    *   - 有富余空间 -> 正文居中（短句不贴顶）；
@@ -214,18 +210,16 @@ body {
 }
 
 /*
- * 按钮带：flex 里的一条独立占位行，高度由 Renderer 写成显式像素
- * （= 按钮高 + 下边距 + 上边留白，随宠物缩放）。
- *
- * 为什么单独占一行而不是让按钮自己当 flex 项：
- * 按钮自己当 flex 项时，"容器高 = 正文区 + 按钮 + 下边距"要靠三方对齐，
- * 稍有出入按钮就溢出气泡下沿（实测溢出 19px，反复核对都对不上）。
- * 让带子明确占位后，flex 保证 正文区 + 带子 = 容器高度，恒等成立。
+ * 按钮带：只是一个定位参照（绝对定位的按钮挂在它里面）。
+ * 带子本身不参与 flex 布局，高度由 Renderer 写入（在气泡实心填充区底部）。
  */
 .pet-bubble-ack-band {
-  position: relative;
-  flex: 0 0 auto;
-  width: 100%;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: var(--bubble-ack-band-bottom);
+  height: var(--bubble-ack-band-height);
+  pointer-events: none;
 }
 
 /*
@@ -242,7 +236,7 @@ body {
    * 只用 `bottom` 贴底时，按钮会压在气泡的描边/尾巴根上（实测视觉上"压住气泡底边"）；
    * 上移一点后按钮完整落在气泡的实心填充区内，带子里剩下的部分成为上方的留白。
    */
-  bottom: calc(var(--bubble-button-margin) + var(--bubble-button-lift));
+  bottom: var(--bubble-button-margin);
   width: 50%;
   min-width: 56px;
   display: flex;

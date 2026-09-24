@@ -15,8 +15,12 @@
 
 import type { BubbleLayout, BubbleState } from '../../shared/bubble';
 import {
+  BUBBLE_BODY_BOTTOM_PCT,
+  BUBBLE_BODY_LEFT_PCT,
+  BUBBLE_BODY_RIGHT_PCT,
+  BUBBLE_BODY_TOP_PCT,
   BUBBLE_LINE_HEIGHT,
-  BUBBLE_TEXT_INSET,
+  BUBBLE_TEXT_INSET_FROM_BODY,
   BUBBLE_TEXT_PADDING_RATIO,
 } from '../../shared/bubble';
 export interface BubbleViewOptions {
@@ -81,9 +85,7 @@ export class BubbleView {
     style.setProperty('--bubble-gap', `${layout.gap}px`);
     style.setProperty('--bubble-pad', `${layout.padding}px`);
     style.setProperty('--bubble-font-size', `${layout.fontSize}px`);
-    /* 左右内缩（与 shared/bubble.ts 的 BUBBLE_TEXT_INSET 一致） */
-    style.setProperty('--bubble-inset-left', `${BUBBLE_TEXT_INSET.left}%`);
-    style.setProperty('--bubble-inset-right', `${BUBBLE_TEXT_INSET.right}%`);
+    /* 左右内缩在下面按"实心区边界 + 内缩"算出像素后写入 */
 
     /*
      * 容器高度由共享模型给出（按"主体比例 + 尾巴区比例"反推），
@@ -98,32 +100,57 @@ export class BubbleView {
       ? Math.round(layout.containerHeight / lineHeight) * lineHeight
       : layout.containerHeight;
     /*
-     * 正文区高度：容器高 - 按钮带。两者都是显式像素，flex 保证恒等。
+     * 正文区与按钮都定位在气泡的**实心填充区**内（精确像素，不走 flex/百分比）。
+     *
+     * 贴图顶部 7.8% 以上、86% 以下都是透明区（圆角外 + 尾巴带）。之前用 flex
+     * 或百分比排布时，正文区上沿贴到容器顶、按钮落到 86% 之下，视觉上就
+     * "超出气泡边界"（用截图＋看框确认过）。
+     *
+     * 实心区在容器里的范围：top = 容器高 × BUBBLE_BODY_TOP_PCT
+     *                        bottom = 容器高 × BUBBLE_BODY_BOTTOM_PCT
+     * 实心区内再分：正文区在上、按钮带在下。
      */
-    const textAreaHeight = Math.max(0, containerHeight - layout.buttonBand);
+    const bodyTop = Math.round(containerHeight * (BUBBLE_BODY_TOP_PCT / 100));
+    const bodyBottom = Math.round(containerHeight * (BUBBLE_BODY_BOTTOM_PCT / 100));
+    const buttonBand = Math.min(layout.buttonBand, Math.max(1, bodyBottom - bodyTop - 24));
+    const textTop = bodyTop;
+    const textBottom = Math.max(textTop + 1, bodyBottom - buttonBand);
+    const textAreaHeight = textBottom - textTop;
     const textPad = Math.round(textAreaHeight * BUBBLE_TEXT_PADDING_RATIO);
-    this.textElement.style.height = `${textAreaHeight}px`;
+
+    style.setProperty('--bubble-text-top', `${textTop}px`);
+    style.setProperty('--bubble-text-bottom', `${Math.max(0, containerHeight - textBottom)}px`);
+
+    /*
+     * 左右边界同样锚定到**实心区**内（不再按容器宽的百分比猜）：
+     *   实心区左边 = 容器宽 × BUBBLE_BODY_LEFT_PCT，再往内收 3% 图宽；
+     *   实心区右边 = 容器宽 × BUBBLE_BODY_RIGHT_PCT，再往内收 6%（给滚动条）。
+     */
+    const bodyLeft = Math.round(layout.bubbleWidth * (BUBBLE_BODY_LEFT_PCT / 100));
+    const bodyRight = Math.round(layout.bubbleWidth * (BUBBLE_BODY_RIGHT_PCT / 100));
+    const insetLeft = Math.round(bodyLeft + layout.bubbleWidth * (BUBBLE_TEXT_INSET_FROM_BODY.left / 100));
+    const insetRight = Math.round(
+      (layout.bubbleWidth - bodyRight) + layout.bubbleWidth * (BUBBLE_TEXT_INSET_FROM_BODY.right / 100),
+    );
+    style.setProperty('--bubble-inset-left', `${insetLeft}px`);
+    style.setProperty('--bubble-inset-right', `${insetRight}px`);
+
     this.textElement.style.paddingTop = `${textPad}px`;
     this.textElement.style.paddingBottom = `${textPad}px`;
 
     /*
-     * 按钮带：显式高度；按钮绝对定位在带子里（顶部对齐 + 高度显式），
-     * 带子底部剩下的空间就是按钮到气泡下沿的间距。
+     * 按钮带贴在实心区底部之内；按钮在带内贴底，下方留 buttonMargin。
+     * 带子高度不够时把下边距压到 0（宁可贴紧，也不要越出实心区）。
      */
+    style.setProperty('--bubble-ack-band-bottom', `${Math.max(0, containerHeight - bodyBottom)}px`);
+    style.setProperty('--bubble-ack-band-height', `${buttonBand}px`);
+    const buttonMargin = Math.max(0, Math.min(layout.buttonMargin, buttonBand - layout.buttonHeight));
+    style.setProperty('--bubble-button-margin', `${buttonMargin}px`);
+
     const showButton = layout.buttonHeight > 0;
     this.ackBandElement.hidden = !showButton;
     this.ackElement.hidden = !showButton;
-    this.ackBandElement.style.height = `${layout.buttonBand}px`;
-    if (showButton) {
-      this.ackElement.style.height = `${layout.buttonHeight}px`;
-      style.setProperty('--bubble-button-margin', `${layout.buttonMargin}px`);
-      /*
-       * 上移量：按钮带上下的富余空间里，大部分给按钮**上方**
-       * （这样按钮落在气泡实心填充区内，不会压住底边描边与尾巴根）。
-       */
-      const lift = Math.max(0, Math.round((layout.buttonBand - layout.buttonHeight - layout.buttonMargin) * 0.7));
-      style.setProperty('--bubble-button-lift', `${lift}px`);
-    }
+    if (showButton) this.ackElement.style.height = `${layout.buttonHeight}px`;
 
     this.element.style.width = `${layout.bubbleWidth}px`;
     this.element.style.height = `${Math.round(containerHeight)}px`;
@@ -153,8 +180,15 @@ export class BubbleView {
     const context = this.resolveMeasureContext(layout.fontSize);
     if (context === null) return 0;
 
-    /* 文字区可用宽度 = 气泡宽 × (1 - 左内缩 - 右内缩)，与 CSS 的左右 insets 一致 */
-    const usableWidth = layout.bubbleWidth * (1 - (BUBBLE_TEXT_INSET.left + BUBBLE_TEXT_INSET.right) / 100);
+    /*
+     * 文字区可用宽度：与 CSS 完全一致的算法 ——
+     * 从实心区左右边界再各内缩 BUBBLE_TEXT_INSET_FROM_BODY。
+     * 必须与 applyLayout 里写 --bubble-inset-* 的算法一致，否则
+     * "量出来的行数"与"实际排版行数"会对不上（气泡高度就会算错）。
+     */
+    const leftInset = layout.bubbleWidth * ((BUBBLE_BODY_LEFT_PCT + BUBBLE_TEXT_INSET_FROM_BODY.left) / 100);
+    const rightInset = layout.bubbleWidth * ((100 - BUBBLE_BODY_RIGHT_PCT + BUBBLE_TEXT_INSET_FROM_BODY.right) / 100);
+    const usableWidth = layout.bubbleWidth - leftInset - rightInset;
     if (usableWidth <= 0) return 0;
 
     let lines = 0;
