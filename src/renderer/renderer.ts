@@ -353,12 +353,20 @@ class PetApplication {
       void this.execute({
         type: 'animation',
         animationId,
-        priority: 60,
-        source: 'system',
+        priority: 70,
+        interrupt: 'force',
+        source: 'user',
         reason: 'tray-menu',
-        // 这是用户在托盘/右键菜单里**手动**挑的动画：
-        // 必须绕过 cooldown，否则长冷却的动画（bomb 5 分钟）点第二次毫无反应，
-        // 看起来就是"只能播一次"。自动化来源（行为/插件/AI）不带这个标记。
+        /*
+         * 用户在托盘/右键菜单里**手动**挑的动画：
+         * - `interrupt: 'force'`：必须真的切过去。原来只给优先级（60）+ auto 仲裁，
+         *   而菜单对**所有**动画都给同一个优先级，于是"当前 60 vs 目标 60"
+         *   命中 equal-priority 被拒 —— 表现就是"watch 播放时选别的动画没反应"
+         *   （实测所有动画都被拒，不只是 watch）。用户明确点了这一条，就该生效。
+         * - `bypassCooldown`：长冷却的动画（bomb 5 分钟）点第二次否则毫无反应，
+         *   看起来像"只能播一次"。自动化来源（行为/插件/AI）不享受这两条。
+         * 注意：`force` 仍然无法抢占 `interruptible: false` 的动画（这是硬约束）。
+         */
         bypassCooldown: true,
       });
     });

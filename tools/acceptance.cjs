@@ -615,6 +615,44 @@ app.whenReady().then(async () => {
     JSON.stringify(toggleRun),
   );
 
+  /*
+   * 回归断言：**从菜单选择「其它动画」必须能打断当前动画**。
+   *
+   * 真实 bug：renderer 原来给菜单播放统一用 priority 60 + interrupt 'auto'，
+   * 于是"当前 60 vs 目标 60"命中 equal-priority 被拒 ——
+   * 表现就是"watch 播放时选别的动画没反应"（实测**所有**动画都被拒）。
+   * 菜单是用户明确选择，必须无条件生效：priority 70 + interrupt 'force'。
+   */
+  const menuSwitch = await run(`(async () => {
+    const anim = window.petDebug.anim;
+    const actions = window.petDebug.actions;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const menuPlay = (id) => actions.execute({
+      type: 'animation', animationId: id, priority: 70, interrupt: 'force',
+      source: 'user', reason: 'tray-menu', bypassCooldown: true,
+    });
+
+    const results = [];
+    for (const target of ['talk', 'cute', 'idle']) {
+      anim.resetCooldowns();
+      anim.stop('menu-switch-reset');
+      await wait(150);
+      // 每次起点都一样：用菜单路径起 watch（priority 70，与真实菜单一致）
+      await menuPlay('watch');
+      for (let i = 0; i < 60 && anim.getPersistentPhase() !== 'loop'; i++) await wait(100);
+      const before = anim.getCurrentAnimation();
+      const r = await menuPlay(target);
+      await wait(500);
+      results.push({ target, before, accepted: r.accepted, rejection: r.rejection ?? null, after: anim.getCurrentAnimation() });
+    }
+    return results;
+  })()`);
+  record(
+    '菜单选择其它动画可打断正在播放的持续动画（回归：equal-priority）',
+    menuSwitch.every((r) => r.before === 'watch' && r.accepted === true && r.after === r.target),
+    JSON.stringify(menuSwitch),
+  );
+
   // 对一次性动画调用 endPersistent 必须是空操作
   const endOnOneShot = await run(`(async () => {
     const anim = window.petDebug.anim;
