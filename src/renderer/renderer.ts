@@ -330,6 +330,26 @@ class PetApplication {
       else this.behaviorManager.resume();
     });
     this.runtime.onSetAnimation((animationId) => {
+      /*
+       * 托盘/右键菜单的「播放动画（测试）」。
+       *
+       * 再次点击**正在播放的同一个动画** -> 视为"结束它"：
+       * 菜单用 radio 勾选当前动画，用户看到它已被选中，自然会想"再点一次取消"。
+       * 对持续动画（watch/read/...）尤其重要 —— 它们会一直循环，
+       * 如果没有这个出口，用户就会觉得"watch 无法打断"（实测反馈就是这个）。
+       * 一次性动画的"再点一次"同样是结束（回到兜底），语义一致。
+       */
+      if (this.animationManager.getCurrentAnimation() === animationId) {
+        this.logger.info('tray menu: same animation re-selected; ending it', {
+          data: { animationId, persistent: this.animationManager.isPersistentPlaying(animationId) },
+        });
+        // 持续动画走 endPersistent（会播收尾段，更连贯）；其余直接停
+        if (!this.animationManager.endPersistent('tray-menu-toggle')) {
+          this.animationManager.stop('tray-menu-toggle');
+        }
+        return;
+      }
+
       void this.execute({
         type: 'animation',
         animationId,

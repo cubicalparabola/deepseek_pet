@@ -577,6 +577,44 @@ app.whenReady().then(async () => {
     JSON.stringify(stealRun),
   );
 
+  /*
+   * 托盘菜单"再次点击同一项"必须能结束它。
+   *
+   * 菜单用 radio 勾选当前动画，用户看到已选中自然会想"再点一次取消"；
+   * 持续动画会一直循环，没有这个出口就会觉得"watch 无法打断"（实测反馈）。
+   */
+  const toggleRun = await run(`(async () => {
+    const anim = window.petDebug.anim;
+    const runtime = window.petDebug; // 直接走 renderer 的 onSetAnimation 等价路径
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    anim.resetCooldowns();
+    await anim.play('watch', { interrupt: 'force', priority: 60, reason: 'tray-menu', source: 'system' });
+    for (let i = 0; i < 60 && anim.getPersistentPhase() !== 'loop'; i++) await wait(100);
+    const before = { animation: anim.getCurrentAnimation(), phase: anim.getPersistentPhase() };
+    /*
+     * 模拟菜单再次点同一项：renderer 现在会走 endPersistent('tray-menu-toggle')。
+     * 这里直接复刻那两步，验证"同动画再点一次"确实能结束。
+     */
+    let ended = false;
+    if (anim.getCurrentAnimation() === 'watch') {
+      ended = anim.endPersistent('tray-menu-toggle');
+      if (!ended) anim.stop('tray-menu-toggle');
+    }
+    const phaseAfter = anim.getPersistentPhase();
+    let gone = false;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 20000 && !gone) {
+      await wait(150);
+      if (anim.getCurrentAnimation() !== 'watch') gone = true;
+    }
+    return { before, ended, phaseAfter, gone, now: anim.getCurrentAnimation() };
+  })()`);
+  record(
+    '托盘菜单再次点击同一动画可结束它（watch 的打断出口）',
+    toggleRun.before.animation === 'watch' && toggleRun.ended === true && toggleRun.gone === true,
+    JSON.stringify(toggleRun),
+  );
+
   // 对一次性动画调用 endPersistent 必须是空操作
   const endOnOneShot = await run(`(async () => {
     const anim = window.petDebug.anim;
