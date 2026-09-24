@@ -14,7 +14,11 @@
  */
 
 import type { BubbleLayout, BubbleState } from '../../shared/bubble';
-import { BUBBLE_LINE_HEIGHT, BUBBLE_TEXT_INSET } from '../../shared/bubble';
+import {
+  BUBBLE_LINE_HEIGHT,
+  BUBBLE_TEXT_INSET,
+  BUBBLE_TEXT_PADDING_RATIO,
+} from '../../shared/bubble';
 export interface BubbleViewOptions {
   /** 舞台根元素（CSS 变量写在它上面）。 */
   readonly stage: HTMLElement;
@@ -32,6 +36,8 @@ export interface BubbleViewOptions {
   readonly bodyElement: HTMLElement;
   /** "知道了"关闭按钮。 */
   readonly ackElement: HTMLElement;
+  /** 按钮带（flex 里的一条占位行，按钮绝对定位在里面）。 */
+  readonly ackBandElement: HTMLElement;
   /** 点击关闭按钮时回调（由 App 负责真正隐藏气泡）。 */
   readonly onAcknowledge: () => void;
 }
@@ -42,6 +48,7 @@ export class BubbleView {
   private readonly textElement: HTMLElement;
   private readonly bodyElement: HTMLElement;
   private readonly ackElement: HTMLElement;
+  private readonly ackBandElement: HTMLElement;
   /** 最近一次应用的布局（验收要按它断言"宠物在窗口内的偏移"）。 */
   private layout: BubbleLayout | null = null;
   /** 复用的测量用 canvas 上下文（避免每次量文本都新建元素）。 */
@@ -53,6 +60,7 @@ export class BubbleView {
     this.textElement = options.textElement;
     this.bodyElement = options.bodyElement;
     this.ackElement = options.ackElement;
+    this.ackBandElement = options.ackBandElement;
     /*
      * 按钮的点击只做"上报"，真正隐藏气泡由 App 负责 ——
      * 状态在 Main 进程（窗口尺寸也要跟着收），这里不该自己改状态。
@@ -73,19 +81,50 @@ export class BubbleView {
     style.setProperty('--bubble-gap', `${layout.gap}px`);
     style.setProperty('--bubble-pad', `${layout.padding}px`);
     style.setProperty('--bubble-font-size', `${layout.fontSize}px`);
+    /* 左右内缩（与 shared/bubble.ts 的 BUBBLE_TEXT_INSET 一致） */
+    style.setProperty('--bubble-inset-left', `${BUBBLE_TEXT_INSET.left}%`);
+    style.setProperty('--bubble-inset-right', `${BUBBLE_TEXT_INSET.right}%`);
 
     /*
      * 容器高度由共享模型给出（按"主体比例 + 尾巴区比例"反推），
      * 渲染层不再自己算 —— 两边各算一遍必然把主体拉伸变形。
      *
-     * 额外把容器高度**对齐到整数行高**：正文区高度 = 容器 × 36%，
-     * 不对齐时它的底边会正好切在一行字中间，滚动时最后一行像是被裁掉。
-     * 对齐后上下边界都落在行与行之间（实测踩过：155px 正文区配 24.65px 行高）。
+     * 额外把容器高度**对齐到整数行高**：正文区是 flex 的伸缩项，
+     * 它的高度 = 容器 - 按钮带，不对齐时它的底边会正好切在一行字中间，
+     * 滚动时最后一行像是被裁掉。
      */
     const lineHeight = layout.fontSize * BUBBLE_LINE_HEIGHT;
     const containerHeight = lineHeight > 0
       ? Math.round(layout.containerHeight / lineHeight) * lineHeight
       : layout.containerHeight;
+    /*
+     * 正文区高度：容器高 - 按钮带。两者都是显式像素，flex 保证恒等。
+     */
+    const textAreaHeight = Math.max(0, containerHeight - layout.buttonBand);
+    const textPad = Math.round(textAreaHeight * BUBBLE_TEXT_PADDING_RATIO);
+    this.textElement.style.height = `${textAreaHeight}px`;
+    this.textElement.style.paddingTop = `${textPad}px`;
+    this.textElement.style.paddingBottom = `${textPad}px`;
+
+    /*
+     * 按钮带：显式高度；按钮绝对定位在带子里（顶部对齐 + 高度显式），
+     * 带子底部剩下的空间就是按钮到气泡下沿的间距。
+     */
+    const showButton = layout.buttonHeight > 0;
+    this.ackBandElement.hidden = !showButton;
+    this.ackElement.hidden = !showButton;
+    this.ackBandElement.style.height = `${layout.buttonBand}px`;
+    if (showButton) {
+      this.ackElement.style.height = `${layout.buttonHeight}px`;
+      style.setProperty('--bubble-button-margin', `${layout.buttonMargin}px`);
+      /*
+       * 上移量：按钮带上下的富余空间里，大部分给按钮**上方**
+       * （这样按钮落在气泡实心填充区内，不会压住底边描边与尾巴根）。
+       */
+      const lift = Math.max(0, Math.round((layout.buttonBand - layout.buttonHeight - layout.buttonMargin) * 0.7));
+      style.setProperty('--bubble-button-lift', `${lift}px`);
+    }
+
     this.element.style.width = `${layout.bubbleWidth}px`;
     this.element.style.height = `${Math.round(containerHeight)}px`;
     /*
@@ -97,11 +136,6 @@ export class BubbleView {
      * 气泡位置完全由 marginLeft 决定（窗口宽度已含偏移量，不会溢出）。
      */
     this.element.style.marginLeft = `${layout.marginLeft}px`;
-
-    /* "知道了"按钮：高度随宠物缩放（0 = 不显示） */
-    const showButton = layout.buttonHeight > 0;
-    this.ackElement.hidden = !showButton;
-    if (showButton) this.ackElement.style.height = `${layout.buttonHeight}px`;
   }
 
   /**

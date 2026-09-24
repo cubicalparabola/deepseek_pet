@@ -37,8 +37,8 @@ export const BUBBLE_IMAGE_HEIGHT = 1246;
  * 右下角尾巴会把下边界拉低（实测因此得到 7.8%~87.9% 的错误值，
  * 导致正文区只占主体一半、下方一大片空白）。
  */
-export const BUBBLE_BODY_TOP_PCT = (125 / 1246) * 100;
-export const BUBBLE_BODY_BOTTOM_PCT = (1059 / 1246) * 100;
+export const BUBBLE_BODY_TOP_PCT = (97 / 1246) * 100;
+export const BUBBLE_BODY_BOTTOM_PCT = (1072 / 1246) * 100;
 
 /** 主体高度占整图高度的比例（≈ 80.2%）。 */
 export const BUBBLE_BODY_HEIGHT_RATIO = (BUBBLE_BODY_BOTTOM_PCT - BUBBLE_BODY_TOP_PCT) / 100;
@@ -49,14 +49,15 @@ export const BUBBLE_BODY_ASPECT_RATIO = (1238 - 24) / (1095 - 97);
 /**
  * 由**内容高度**（正文需要的高度）反推**容器**高度。
  *
- * 容器高度 = 正文区高度 / 正文占容器比例（55%）**+ 关闭按钮带**。
- * 按钮带是**另加**的，不挤压正文区。
+ * 容器高度 = 正文区所需高度 + 按钮带高度。
+ *
+ * - 正文区高度 = 内容高 / 0.55（`BUBBLE_CONTENT_TO_CONTAINER`）；
+ * - 按钮带高度 = 渲染层那条占位行的高度，**必须加进来** ——
+ *   它是气泡内部的第 2 行，不加的话按钮带会超出气泡下沿被裁掉
+ *   （实测超出 46px，按钮整个看不见）。
  *
  * 为什么正文区必须跟着内容走、**不能**由宽度推：否则短文本时容器仍然很高，
  * 正文只在中间一小块、上下大量留白（实测 141px 空白）。
- *
- * @param contentHeight 正文需要的高度
- * @param buttonBand    关闭按钮带的高度（0 = 不显示按钮）
  */
 export function bubbleContainerHeight(contentHeight: number, buttonBand = 0): number {
   return contentHeight * BUBBLE_CONTENT_TO_CONTAINER + Math.max(0, buttonBand);
@@ -88,48 +89,61 @@ export const BUBBLE_OFFSET_X_RATIO = -1 / 3;
 export const BUBBLE_WIDTH_RATIO = 1.2;
 
 /**
- * 文字区内缩（相对**容器**宽/高，百分比）。
+ * 文字区**左右**内缩（相对容器宽度，百分比）。
  *
- * 由素材实测推出（图 1263x1246，主体饱满区 y=125..1059 占图 10%~85%）：
- *   - 上 31%：主体顶边 10% + 正文与顶边之间留 21%；
- *   - 下 28%：正文区底边落在容器 69% 处，主体底边 75% —— 下方是**按钮带**；
- *   - 左右：实心从 x=16 到 x=1246（约 1.3%），那是描边外沿，文字取 5%；
- *   - 右侧额外多留（合计 9%）：滚动条会占用右边缘，否则文字顶到描边上。
+ * 只用左右，**上下不再用百分比** —— 这是踩过坑之后的结论：
+ * 加上"知道了"按钮带后，容器高度 = 正文区 + 按钮带，上下百分比等于要同时
+ * 表达"正文区"和"按钮带"两件事，必然算错（实测把正文区从 123px 挤到 108px，
+ * 又把上边距顶到 31%，于是正文上方出现一大片空白）。
  *
- * ⚠️ 这里的百分比是相对**整个容器**（含按钮带）的，因此加按钮带之后
- * 上边距必须同步变大 —— 否则正文区会被按钮带挤小（实测从 123px 掉到 108px）。
- * 正文区占容器 = 1 - 31% - 28% = 41%；正文区占主体 = 41% / 75% ≈ 55%，
- * 与"加按钮之前"的正文区绝对尺寸一致。
- * 不自洽时容器高度会算错、正文会被气泡底边裁掉（实测踩过两次）。
+ * 现在改成 flex 布局：按钮固定占底部一条，正文区自动占剩余空间，
+ * 上下留白由 `BUBBLE_TEXT_PADDING_RATIO` 在**剩余空间内**按比例分配 ——
+ * 按钮带怎么变都不会影响正文区。
+ *
+ * 左右仍用百分比（与容器高度无关）：
+ *   - 左 5%：实心描边从 x=16（1.3%）开始，文字再往里收；
+ *   - 右 9%：滚动条会占用右边缘，额外多留 4%，否则文字顶到描边上。
  */
 export const BUBBLE_TEXT_INSET = {
   left: 5,
   right: 9,
-  top: 31,
-  bottom: 28,
 } as const;
 
 /**
- * 正文区高度占**整个容器**高度的比例。
+ * 正文区**上下留白**占正文区高度的比例（上下各留这么多）。
  *
- * 与 BUBBLE_TEXT_INSET **必须自洽**：1 - top% - bottom%。
- * 正文区 = 容器 55%（上 18% + 下 27%），正文区**下方**才是按钮带。
+ * 与左右内缩不同：这是"在剩余空间里按比例分配"，不是相对整个容器，
+ * 因此按钮带变高时不会连带影响它。
+ */
+export const BUBBLE_TEXT_PADDING_RATIO = 0.16;
+
+/**
+ * 正文区高度占**整个容器**高度的比例（近似值，仅用于反推容器高度）。
  *
- * 正文区高度 = 容器高 × 该比例；而内容高度已由 `alignToBubbleTextHeight()`
+ * = 1 - 左右无关的上下留白 ≈ 1 / (1 + 2×0.16)… 这里直接用实测的 0.55：
+ * 正文区高度 ≈ 容器高 × 0.55（扣掉按钮带之后仍然成立，因为按钮带是**另加**的）。
+ * 容器的精确高度由 `bubbleContainerHeight()` 给出。
+ *
+ * ⚠️ 这个比例只用于**反推容器高度**，不再用于 CSS 定位 ——
+ * CSS 用 flex 让按钮占底部一条、正文区自动占剩余空间。
+ * 正文区高度 = 容器高 × 该比例；内容高度已由 `alignToBubbleTextHeight()`
  * 对齐到整数行高，因此正文区高度也是整数行高的倍数 —— 滚动时下边界落在
  * **行与行之间**，不会把最后一行从中间切断（实测踩过：正文区高 155px 配
  * 24.65px 行高，底边正好切在字中间，看起来像被裁掉）。
  */
-export const BUBBLE_BODY_TEXT_RATIO = 1 - (BUBBLE_TEXT_INSET.top + BUBBLE_TEXT_INSET.bottom) / 100;
+export const BUBBLE_BODY_TEXT_RATIO = 0.55;
 
 /**
- * 关闭按钮（"知道了"）额外占用的高度。
+ * 关闭按钮（"知道了"）额外占用的高度（相对**容器**高度）。
  *
- * 按钮**不挤压正文区**：容器高度 = 正文区所需高度 + 按钮带高度，
- * 按钮带按宠物高度等比（这样它随宠物缩放）。
- * 设计值 ≈ 宠物高 × 0.13：宠物 288 时约 37px，放得下 26px 的按钮 + 上下留白。
+ * 按钮带落在贴图的**尾巴带**里（实心填充到 86%，尾巴区 86%~94%）。
+ * 取容器高的 15% 时按钮正好压在尾巴带上方、且仍在实心区内 ——
+ * 之前按宠物高 0.16 算出的带子让按钮落到了实心区之外
+ * （实测按钮视觉上跑到了气泡外面）。
  */
-export const BUBBLE_BUTTON_BAND_RATIO = 0.13;
+export const BUBBLE_BUTTON_BAND_RATIO = 0.15;
+/** 按钮到气泡底边的间距（相对宠物高）。 */
+export const BUBBLE_BUTTON_MARGIN_RATIO = 0.025;
 
 /** 关闭按钮高度 = 字号 × 该系数，并夹在上下限之间。 */
 export const BUBBLE_BUTTON_HEIGHT_RATIO = 1.55;
@@ -284,6 +298,16 @@ export interface BubbleLayout {
    */
   readonly buttonHeight: number;
   /**
+   * 按钮**带**的总高度（按钮 + 它到气泡底边的间距 + 上边留白）。
+   *
+   * 容器 = 正文区 + 按钮带。渲染层由此得到正文区的**精确高度**：
+   * `正文区高 = 容器高 - buttonBand`，两行都用显式高度，不靠 flex 推算
+   * （实测 flex 推算时按钮会溢出气泡下沿 13px）。
+   */
+  readonly buttonBand: number;
+  /** 按钮到气泡底边的间距（px）。 */
+  readonly buttonMargin: number;
+  /**
    * 本次布局是按"文本占多少行"算出来的（0 = 未提供行数，按最大高度）。
    *
    * Renderer 用它与自己实测的行数比较，决定要不要请求重新布局 ——
@@ -405,15 +429,26 @@ export function resolveBubbleLayout(input: BubbleLayoutInput): BubbleLayout {
     : 1;
 
   const finalBubbleHeight = shrink < 1 ? Math.max(1, Math.round(bubbleHeight * shrink)) : bubbleHeight;
+  /** 不含按钮带时的容器高度（按钮带按它的比例取）。 */
+  const containerHeightBase = bubbleContainerHeight(finalBubbleHeight);
 
   /*
    * 关闭按钮**另加**一条按钮带：不挤压正文区，容器相应加高。
-   * 按钮带高度按宠物高等比，因此按钮会随宠物一起缩放。
-   * 不显示按钮时（input.showButton === false）按钮带为 0。
+   * 按钮带按**基础容器高**（不含按钮带时的高度）取比例 ——
+   * 仍以宠物高为基准会让按钮落到贴图的实心区之外（实测按钮视觉上跑到气泡外面）。
+   * 下界保证带子至少放得下"按钮 + 下边距 + 6px 上边留白"。
    */
   const showButton = input.showButton !== false;
-  const buttonBand = showButton ? Math.round(petHeight * BUBBLE_BUTTON_BAND_RATIO) : 0;
-  const buttonHeight = showButton ? resolveBubbleButton(Math.max(BUBBLE_FONT_MIN, Math.round(fontSize * shrink))) : 0;
+  const buttonMargin = showButton ? Math.max(2, Math.round(petHeight * BUBBLE_BUTTON_MARGIN_RATIO)) : 0;
+  const buttonHeight = showButton
+    ? resolveBubbleButton(Math.max(BUBBLE_FONT_MIN, Math.round(fontSize * shrink)))
+    : 0;
+  const buttonBand = showButton
+    ? Math.max(
+        Math.round(containerHeightBase * BUBBLE_BUTTON_BAND_RATIO),
+        buttonHeight + buttonMargin + 6,
+      )
+    : 0;
 
   const containerHeight = Math.round(bubbleContainerHeight(finalBubbleHeight, buttonBand));
   const offsetX = Math.round(bubbleWidth * BUBBLE_OFFSET_X_RATIO);
@@ -454,6 +489,8 @@ export function resolveBubbleLayout(input: BubbleLayoutInput): BubbleLayout {
     marginLeft,
     fontSize: Math.max(BUBBLE_FONT_MIN, Math.round(fontSize * shrink)),
     buttonHeight,
+    buttonBand,
+    buttonMargin,
     /** 本次布局对应的文本行数（Renderer 用它判断"要不要重算"）。 */
     textLines: typeof lines === 'number' && lines > 0 ? lines : 0,
     /*

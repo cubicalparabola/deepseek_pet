@@ -120,14 +120,27 @@ body {
  * 文字层用绝对定位压在中部的留白区里（四个内缩百分比由
  * tools/measure-bubble.mjs 从素材实测得出，见 shared/bubble.ts）。
  */
+/*
+ * 气泡内部是**两行 flex 布局**：
+ *   上：正文区（#pet-bubble-text，占剩余空间、内部可滚动）
+ *   下：按钮带（#pet-bubble-ack，固定高度）
+ *
+ * 为什么用 flex 而不是给正文区写上下百分比内缩：
+ * 容器高度 = 正文区 + 按钮带，若正文区用"容器百分比"定位，
+ * 上下百分比就得同时表达这两件事，加按钮带后必然算错
+ * （实测正文区被挤小、上边距顶到 31%、正文上方出现一大片空白）。
+ * flex 让按钮固定占底部一条，正文区自动拿剩余空间，两者互不干扰。
+ */
 .pet-bubble {
   position: relative;
   flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
   margin-bottom: var(--bubble-gap);
   background-image: url('pet-asset://assets/bubble.png');
   background-repeat: no-repeat;
   background-size: 100% 100%;
-  /* 气泡自身可滚动的是内部文字层，这里不需要 overflow */
+  /* 气泡自身不滚动，滚动交给里面的正文区 */
   overflow: hidden;
 }
 
@@ -136,22 +149,25 @@ body {
 }
 
 .pet-bubble-text {
-  position: absolute;
-  /* 内缩比例与 shared/bubble.ts 的 BUBBLE_TEXT_INSET 保持一致 */
-  left: 5%;
-  right: 9%;
-  top: 31%;
-  bottom: 28%;
   /*
-   * 短文本垂直居中：文字区比一句话高得多，贴顶会显得空荡。
-   *
-   * 用 `margin-block: auto`（在内层 .pet-bubble-body 上）而**不是**
-   * `justify-content: center` —— 后者在滚动容器里内容超高时会把顶部
-   * 溢出到不可滚动区，首行被裁且滚不回去（实测踩过）。
-   *
-   * 长文本滚动：内容超出文字区时出现滚动条。
-   * `overflow-y: auto`（而不是 scroll）—— 短文本不该无谓地显示滚动条。
+   * 高度由 Renderer 写成**显式像素**（= 容器高 - 按钮带），不用 flex 推算。
+   * 用 `flex: 0 0 auto` 让这个显式高度生效（`flex: 1` 会把它拉伸到剩余空间全体，
+   * 把按钮挤到气泡外面 —— 实测踩过）。
    */
+  flex: 0 0 auto;
+  min-height: 0;
+  /* 左右内缩与 shared/bubble.ts 的 BUBBLE_TEXT_INSET 保持一致 */
+  margin-left: var(--bubble-inset-left);
+  margin-right: var(--bubble-inset-right);
+  /*
+   * 上下留白由 Renderer 写成**像素**（不是百分比）。
+   *
+   * 为什么不能用百分比：百分比 padding 相对**元素自身**的宽度/高度解析，
+   * 而这个元素是 `flex: 1` 的可伸缩项 —— 它变高 -> padding 变大 -> 它更高，
+   * 正反馈会把整条按钮带的空间吃光（实测文字区撑到 384px、按钮被挤没）。
+   */
+  padding-top: 0;
+  padding-bottom: 0;
   /*
    * 短文本垂直居中用 flex 的 `justify-content: safe center`：
    *   - 有富余空间 -> 正文居中（短句不贴顶）；
@@ -198,22 +214,35 @@ body {
 }
 
 /*
- * "知道了"关闭按钮。
+ * 按钮带：flex 里的一条独立占位行，高度由 Renderer 写成显式像素
+ * （= 按钮高 + 下边距 + 上边留白，随宠物缩放）。
  *
- * 位置：**另加**在正文区下方的一条按钮带里（按钮带高度由主进程算进容器高度，
- * 不挤压正文）。按钮带 = 容器 72%~84.5%（正文区底边 72% + 12.5% 按钮带）。
- * 用 `top: 78.2%` + `translateY(-50%)` 让按钮在带内垂直居中。
- *
- * 水平居中且只占中间 50%：素材右下角的尾巴从容器约 84% 宽处开始，
- * 按钮靠中间就不会与尾巴重叠。
- *
- * 高度由 Renderer 按布局下发值设置（随宠物缩放），这里只给外观。
+ * 为什么单独占一行而不是让按钮自己当 flex 项：
+ * 按钮自己当 flex 项时，"容器高 = 正文区 + 按钮 + 下边距"要靠三方对齐，
+ * 稍有出入按钮就溢出气泡下沿（实测溢出 19px，反复核对都对不上）。
+ * 让带子明确占位后，flex 保证 正文区 + 带子 = 容器高度，恒等成立。
+ */
+.pet-bubble-ack-band {
+  position: relative;
+  flex: 0 0 auto;
+  width: 100%;
+}
+
+/*
+ * "知道了"关闭按钮：绝对定位在按钮带里，水平居中占 50% 宽
+ * （素材右下角的尾巴从气泡约 84% 宽处开始，靠中间就不会撞上）。
  */
 .pet-bubble-ack {
   position: absolute;
   left: 50%;
-  top: 78.2%;
-  transform: translate(-50%, -50%);
+  transform: translateX(-50%);
+  /*
+   * 贴在按钮带底部、再上移一点（`--bubble-button-lift`）。
+   *
+   * 只用 `bottom` 贴底时，按钮会压在气泡的描边/尾巴根上（实测视觉上"压住气泡底边"）；
+   * 上移一点后按钮完整落在气泡的实心填充区内，带子里剩下的部分成为上方的留白。
+   */
+  bottom: calc(var(--bubble-button-margin) + var(--bubble-button-lift));
   width: 50%;
   min-width: 56px;
   display: flex;

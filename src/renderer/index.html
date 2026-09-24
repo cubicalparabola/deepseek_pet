@@ -52,7 +52,14 @@
         <div id="pet-bubble-text" class="pet-bubble-text">
           <div id="pet-bubble-body" class="pet-bubble-body"></div>
         </div>
-        <button id="pet-bubble-ack" class="pet-bubble-ack" type="button">知道了</button>
+        <!--
+          按钮带：flex 布局里的一条**独立占位行**（高度随宠物缩放）。
+          按钮绝对定位在这条带子里居中 —— 这样"正文区 + 按钮带 = 容器高度"
+          由 flex 保证，不再手工往容器高度上加一个数（那样按钮会溢出气泡下沿）。
+        -->
+        <div id="pet-bubble-ack-band" class="pet-bubble-ack-band">
+          <button id="pet-bubble-ack" class="pet-bubble-ack" type="button">知道了</button>
+        </div>
       </div>
 
       <div id="pet-pet" class="pet-pet">
