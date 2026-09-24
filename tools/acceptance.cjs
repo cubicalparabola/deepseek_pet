@@ -1046,12 +1046,95 @@ app.whenReady().then(async () => {
     JSON.stringify({ cap: bubbleAdaptive.cap, heights: bubbleAdaptive.heights, scroll: bubbleAdaptive.scrollRows?.map((r) => r.name), fits: bubbleAdaptive.fitsRows?.map((r) => r.name) }),
   );
 
+  /*
+   * 7) "知道了"关闭按钮：**另加**在正文区下方，点击后关闭气泡。
+   *
+   * 走真实点击（`element.click()`，与用户点它等价）验证整条链路：
+   * 按钮 -> BubbleView 回调 -> IPC `pet:bubble-acknowledge` -> Main setBubble(null)
+   * -> 收起窗口 -> 广播新布局 -> 渲染层隐藏。
+   */
+  const bubbleAck = await run(`(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const bubble = () => document.getElementById('pet-bubble');
+    const ack = () => document.getElementById('pet-bubble-ack');
+    const settle = async () => {
+      let last = -1, stable = 0;
+      for (let i = 0; i < 40 && stable < 2; i++) {
+        await wait(120);
+        const h = Math.round(bubble().getBoundingClientRect().height);
+        if (h === last) stable++; else stable = 0;
+        last = h;
+      }
+    };
+    const snap = () => {
+      const b = bubble();
+      const a = ack();
+      const ar = a.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      return {
+        bubbleHidden: b.hidden,
+        ackHidden: a.hidden,
+        ackText: (a.textContent || '').trim(),
+        ackSize: { w: Math.round(ar.width), h: Math.round(ar.height) },
+        /** 按钮必须完整落在气泡容器内 */
+        ackInsideBubble:
+          ar.top >= br.top - 1 && ar.bottom <= br.bottom + 1 &&
+          ar.left >= br.left - 1 && ar.right <= br.right + 1,
+        /** 按钮必须在正文区下方（不挤压正文） */
+        ackBelowText: ar.top >= document.getElementById('pet-bubble-text').getBoundingClientRect().bottom - 1,
+        windowInner: { w: window.innerWidth, h: window.innerHeight },
+        textAreaHeight: document.getElementById('pet-bubble-text').clientHeight,
+      };
+    };
+
+    await window.petAPI.bubble.set({ visible: true, text: '点下面的按钮就能关掉我' });
+    await settle();
+    const shown = snap();
+
+    /* 真实点击 */
+    ack().click();
+    await wait(1200);
+    const afterClick = snap();
+
+    /* 已隐藏时再点一次不应报错，也不应把气泡又弄出来 */
+    ack().click();
+    await wait(600);
+    const afterSecondClick = snap();
+
+    return { shown, afterClick, afterSecondClick };
+  })()`);
+
+  record(
+    '对话气泡：正文下方有"知道了"按钮且完整位于气泡内',
+    bubbleAck.shown?.ackHidden === false &&
+      bubbleAck.shown?.ackText === '知道了' &&
+      bubbleAck.shown?.ackInsideBubble === true &&
+      bubbleAck.shown?.ackSize?.w > 0 &&
+      bubbleAck.shown?.ackSize?.h > 0,
+    JSON.stringify(bubbleAck.shown),
+  );
+  record(
+    '对话气泡：按钮在正文区下方（不挤压正文）',
+    bubbleAck.shown?.ackBelowText === true,
+    `ackBelowText=${bubbleAck.shown?.ackBelowText} textAreaHeight=${bubbleAck.shown?.textAreaHeight}`,
+  );
+  record(
+    '对话气泡：点"知道了"关闭气泡并收起窗口',
+    bubbleAck.afterClick?.bubbleHidden === true &&
+      bubbleAck.afterClick?.windowInner?.w === bubbleAck.afterClick?.windowInner?.h * 0.75 &&
+      (bubbleAck.afterClick?.windowInner?.h ?? 0) < (bubbleAck.shown?.windowInner?.h ?? 0),
+    JSON.stringify({ shown: bubbleAck.shown?.windowInner, afterClick: bubbleAck.afterClick?.windowInner }),
+  );
+  record(
+    '对话气泡：关闭后再点按钮不报错',
+    bubbleAck.afterSecondClick?.bubbleHidden === true,
+    JSON.stringify(bubbleAck.afterSecondClick),
+  );
   record(
     '对话气泡：文字内容原样落地',
     bubbleRun.textMatches === true,
     `matches=${bubbleRun.textMatches} 读到=${bubbleRun.readLength}字/期望=${bubbleRun.longTextLen}字 读到开头="${bubbleRun.textAfterLongSetSample}" src="${bubbleRun.longTextSample}"`,
   );
-
   /*
    * 卡死自愈：**没有任何动画在播、画面却停着一帧**时必须能接回兜底 idle。
    *

@@ -30,6 +30,10 @@ export interface BubbleViewOptions {
    * 同时也能避免写正文时把内部结构覆盖掉。
    */
   readonly bodyElement: HTMLElement;
+  /** "知道了"关闭按钮。 */
+  readonly ackElement: HTMLElement;
+  /** 点击关闭按钮时回调（由 App 负责真正隐藏气泡）。 */
+  readonly onAcknowledge: () => void;
 }
 
 export class BubbleView {
@@ -37,6 +41,7 @@ export class BubbleView {
   private readonly element: HTMLElement;
   private readonly textElement: HTMLElement;
   private readonly bodyElement: HTMLElement;
+  private readonly ackElement: HTMLElement;
   /** 最近一次应用的布局（验收要按它断言"宠物在窗口内的偏移"）。 */
   private layout: BubbleLayout | null = null;
   /** 复用的测量用 canvas 上下文（避免每次量文本都新建元素）。 */
@@ -47,6 +52,12 @@ export class BubbleView {
     this.element = options.element;
     this.textElement = options.textElement;
     this.bodyElement = options.bodyElement;
+    this.ackElement = options.ackElement;
+    /*
+     * 按钮的点击只做"上报"，真正隐藏气泡由 App 负责 ——
+     * 状态在 Main 进程（窗口尺寸也要跟着收），这里不该自己改状态。
+     */
+    this.ackElement.addEventListener('click', () => options.onAcknowledge());
   }
 
   /**
@@ -86,6 +97,11 @@ export class BubbleView {
      * 气泡位置完全由 marginLeft 决定（窗口宽度已含偏移量，不会溢出）。
      */
     this.element.style.marginLeft = `${layout.marginLeft}px`;
+
+    /* "知道了"按钮：高度随宠物缩放（0 = 不显示） */
+    const showButton = layout.buttonHeight > 0;
+    this.ackElement.hidden = !showButton;
+    if (showButton) this.ackElement.style.height = `${layout.buttonHeight}px`;
   }
 
   /**

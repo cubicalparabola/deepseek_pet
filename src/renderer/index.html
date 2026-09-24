@@ -40,9 +40,11 @@
       <!-- 对话气泡：贴图是 assets/bubble.png，文字压在中部的留白区里 -->
       <div id="pet-bubble" class="pet-bubble" role="status" aria-live="polite" hidden>
         <!--
-          两层结构：
-            #pet-bubble-text  —— 滚动容器（overflow-y: auto）；
-            #pet-bubble-body  —— 正文本身，用 margin-block:auto 做垂直居中。
+          三层结构：
+            #pet-bubble-text  —— 滚动容器（正文区，overflow-y: auto）；
+            #pet-bubble-body  —— 正文本身，用 margin-block:auto 做垂直居中；
+            #pet-bubble-ack   —— "知道了"关闭按钮，**另加**在正文区下方
+                                 （按钮带不计入正文区，不会挤压正文）。
           为什么不用 `justify-content: center`：滚动容器里内容超过容器时，
           居中会让**顶部溢出到不可滚动区**，首行被裁掉且滚不回去（实测踩过）。
           `margin-block: auto` 在有多余空间时居中、内容超高时正常从顶部开始并可滚动。
@@ -50,6 +52,7 @@
         <div id="pet-bubble-text" class="pet-bubble-text">
           <div id="pet-bubble-body" class="pet-bubble-body"></div>
         </div>
+        <button id="pet-bubble-ack" class="pet-bubble-ack" type="button">知道了</button>
       </div>
 
       <div id="pet-pet" class="pet-pet">

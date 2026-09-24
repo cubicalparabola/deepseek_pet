@@ -46,6 +46,13 @@ export const IpcChannels = {
    * Main 据此重算气泡高度 —— 这就是"气泡大小随文本长短变化"的闭环。
    */
   BubbleReportText: 'pet:bubble-report-text',
+  /**
+   * Renderer -> Main：用户点了气泡上的"知道了"，请求关闭气泡。
+   *
+   * 与托盘菜单「隐藏气泡」走同一条实现（`setBubble(null)`）——
+   * 气泡状态与窗口尺寸必须成对更新，不能只由渲染层自己藏起来。
+   */
+  BubbleAcknowledge: 'pet:bubble-acknowledge',
 
   /* 设置窗口（独立的小窗口，只暴露尺寸/置顶） */
   SettingsWindowShow: 'pet:settings-window-show',
@@ -253,6 +260,12 @@ export interface BubbleAPI {
    * 主进程顺手把新布局返回，渲染层直接落地，省掉一次单独推送。
    */
   reportTextLines(payload: { text: string; lines: number }): Promise<BubblePayload>;
+  /**
+   * 用户点了气泡上的"知道了"：请求关闭气泡。返回收起后的状态与布局。
+   *
+   * 关闭必须由 Main 执行 —— 窗口尺寸要跟着收回宠物大小。
+   */
+  acknowledge(): Promise<BubblePayload>;
 }
 
 export interface CommandAPI {

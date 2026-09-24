@@ -252,6 +252,8 @@ function buildPetBridge(): PetBridge {
         ipcRenderer.invoke(IpcChannels.PetSetBubble, state) as Promise<BubblePayload>,
       reportTextLines: (payload: { text: string; lines: number }): Promise<BubblePayload> =>
         ipcRenderer.invoke(IpcChannels.BubbleReportText, payload) as Promise<BubblePayload>,
+      acknowledge: (): Promise<BubblePayload> =>
+        ipcRenderer.invoke(IpcChannels.BubbleAcknowledge) as Promise<BubblePayload>,
     },
 
     notifyAnimationChanged: (payload: AnimationChangedPayload): void =>

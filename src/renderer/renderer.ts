@@ -112,6 +112,15 @@ class PetApplication {
       element: requireElement('pet-bubble'),
       textElement: requireElement('pet-bubble-text'),
       bodyElement: requireElement('pet-bubble-body'),
+      ackElement: requireElement('pet-bubble-ack'),
+      /*
+       * 点"知道了"关闭气泡：走与托盘菜单「隐藏气泡」**同一条**实现，
+       * 由 Main 进程收起窗口并广播新状态（气泡状态与窗口尺寸必须成对更新）。
+       */
+      onAcknowledge: () => {
+        this.logger.info('bubble acknowledged by user');
+        this.runtime.hideBubble();
+      },
     });
 
     this.runtime = new RuntimeCapabilities({

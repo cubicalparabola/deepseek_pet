@@ -49,12 +49,17 @@ export const BUBBLE_BODY_ASPECT_RATIO = (1238 - 24) / (1095 - 97);
 /**
  * 由**内容高度**（正文需要的高度）反推**容器**高度。
  *
- * 容器高度 = 内容高度 / 正文区占容器比例（36%）。
- * 为什么必须跟着内容走、**不能**由宽度推：否则短文本时容器仍然很高，
+ * 容器高度 = 正文区高度 / 正文占容器比例（55%）**+ 关闭按钮带**。
+ * 按钮带是**另加**的，不挤压正文区。
+ *
+ * 为什么正文区必须跟着内容走、**不能**由宽度推：否则短文本时容器仍然很高，
  * 正文只在中间一小块、上下大量留白（实测 141px 空白）。
+ *
+ * @param contentHeight 正文需要的高度
+ * @param buttonBand    关闭按钮带的高度（0 = 不显示按钮）
  */
-export function bubbleContainerHeight(contentHeight: number): number {
-  return contentHeight * BUBBLE_CONTENT_TO_CONTAINER;
+export function bubbleContainerHeight(contentHeight: number, buttonBand = 0): number {
+  return contentHeight * BUBBLE_CONTENT_TO_CONTAINER + Math.max(0, buttonBand);
 }
 
 /**
@@ -86,44 +91,67 @@ export const BUBBLE_WIDTH_RATIO = 1.2;
  * 文字区内缩（相对**容器**宽/高，百分比）。
  *
  * 由素材实测推出（图 1263x1246，主体饱满区 y=125..1059 占图 10%~85%）：
- *   - 上 18%：主体顶边在 10%，正文与它之间留约 8% 容器高（≈描边+内圆角）；
- *   - 下 27%：正文区底边落在容器 73% 处，主体底边在 85% —— 下方留 12%
- *     （既避开右下角尾巴，又不至于留出大片空白。实测 48% 文字区时下方
- *     仍有明显空白，用户要求"文字框再大一些"，故收到 55% 文字区）；
+ *   - 上 31%：主体顶边 10% + 正文与顶边之间留 21%；
+ *   - 下 28%：正文区底边落在容器 69% 处，主体底边 75% —— 下方是**按钮带**；
  *   - 左右：实心从 x=16 到 x=1246（约 1.3%），那是描边外沿，文字取 5%；
  *   - 右侧额外多留（合计 9%）：滚动条会占用右边缘，否则文字顶到描边上。
  *
- * ⚠️ 这四个数必须与 BUBBLE_BODY_HEIGHT_RATIO × BUBBLE_BODY_TEXT_RATIO 自洽：
- * 正文区占容器 = 1 - 上 - 下 = 55%，主体占容器 75% —— 正文区占主体 73%。
- * 不自洽时容器高度会算错、正文被气泡底边裁掉（实测踩过两次）。
+ * ⚠️ 这里的百分比是相对**整个容器**（含按钮带）的，因此加按钮带之后
+ * 上边距必须同步变大 —— 否则正文区会被按钮带挤小（实测从 123px 掉到 108px）。
+ * 正文区占容器 = 1 - 31% - 28% = 41%；正文区占主体 = 41% / 75% ≈ 55%，
+ * 与"加按钮之前"的正文区绝对尺寸一致。
+ * 不自洽时容器高度会算错、正文会被气泡底边裁掉（实测踩过两次）。
  */
 export const BUBBLE_TEXT_INSET = {
   left: 5,
   right: 9,
-  top: 18,
-  bottom: 27,
+  top: 31,
+  bottom: 28,
 } as const;
 
 /**
  * 正文区高度占**整个容器**高度的比例。
  *
- * 把几何串起来的核心常量，与 BUBBLE_TEXT_INSET **必须自洽**：
- *   正文区占容器 = 1 - top% - bottom% = 1 - 18% - 46% = 36%。
- * 这里直接由 insets 推出，避免两处数字各写一遍而漂移。
+ * 与 BUBBLE_TEXT_INSET **必须自洽**：1 - top% - bottom%。
+ * 正文区 = 容器 55%（上 18% + 下 27%），正文区**下方**才是按钮带。
  *
  * 正文区高度 = 容器高 × 该比例；而内容高度已由 `alignToBubbleTextHeight()`
  * 对齐到整数行高，因此正文区高度也是整数行高的倍数 —— 滚动时下边界落在
- * **行与行之间**，不会把最后一行从中间切断（实测踩过：155px 正文区配
+ * **行与行之间**，不会把最后一行从中间切断（实测踩过：正文区高 155px 配
  * 24.65px 行高，底边正好切在字中间，看起来像被裁掉）。
  */
 export const BUBBLE_BODY_TEXT_RATIO = 1 - (BUBBLE_TEXT_INSET.top + BUBBLE_TEXT_INSET.bottom) / 100;
 
 /**
+ * 关闭按钮（"知道了"）额外占用的高度。
+ *
+ * 按钮**不挤压正文区**：容器高度 = 正文区所需高度 + 按钮带高度，
+ * 按钮带按宠物高度等比（这样它随宠物缩放）。
+ * 设计值 ≈ 宠物高 × 0.13：宠物 288 时约 37px，放得下 26px 的按钮 + 上下留白。
+ */
+export const BUBBLE_BUTTON_BAND_RATIO = 0.13;
+
+/** 关闭按钮高度 = 字号 × 该系数，并夹在上下限之间。 */
+export const BUBBLE_BUTTON_HEIGHT_RATIO = 1.55;
+export const BUBBLE_BUTTON_HEIGHT_MIN = 20;
+export const BUBBLE_BUTTON_HEIGHT_MAX = 44;
+
+/** 计算关闭按钮的实际像素高度。 */
+export function resolveBubbleButton(fontSize: number): number {
+  return Math.round(
+    Math.min(
+      BUBBLE_BUTTON_HEIGHT_MAX,
+      Math.max(BUBBLE_BUTTON_HEIGHT_MIN, fontSize * BUBBLE_BUTTON_HEIGHT_RATIO),
+    ),
+  );
+}
+
+/**
  * 内容高度 -> 容器高度 的换算系数（**唯一的换算入口**）。
  *
- * 希望"正文区高度 == 所需内容高度"，于是 容器高 = 内容高 / 0.36。
- * 主体高度 = 容器 × BUBBLE_BODY_HEIGHT_RATIO（0.802），
- * 用于把"期望的主体高度"换算成内容高度的上下限。
+ * 正文区高度 = 容器高 × 正文占比（55%），希望它 == 所需内容高度，
+ * 于是 容器高 = 内容高 / 0.55。
+ * 主体高度 = 容器 × BUBBLE_BODY_HEIGHT_RATIO（0.75）。
  */
 export const BUBBLE_CONTENT_TO_CONTAINER = 1 / BUBBLE_BODY_TEXT_RATIO;
 
@@ -249,6 +277,13 @@ export interface BubbleLayout {
   /** 正文基础字号。 */
   readonly fontSize: number;
   /**
+   * 关闭按钮（"知道了"）的像素高度。
+   *
+   * 按钮**另加**在正文区下方（按钮带高度已计入 containerHeight），
+   * 不挤压正文。0 表示不显示按钮。
+   */
+  readonly buttonHeight: number;
+  /**
    * 本次布局是按"文本占多少行"算出来的（0 = 未提供行数，按最大高度）。
    *
    * Renderer 用它与自己实测的行数比较，决定要不要请求重新布局 ——
@@ -303,6 +338,12 @@ export interface BubbleLayoutInput {
    * 省略或 <= 0 表示"按最大高度"（初始布局、或文字区还没测出来时）。
    */
   readonly textLines?: number;
+  /**
+   * 是否显示"知道了"关闭按钮（默认 true）。
+   *
+   * 按钮是**另加**在正文区下方的一条按钮带，容器会相应加高，不挤压正文。
+   */
+  readonly showButton?: boolean;
   /**
    * 含气泡的窗口**最大高度**（通常传显示器工作区高度）。
    *
@@ -364,7 +405,17 @@ export function resolveBubbleLayout(input: BubbleLayoutInput): BubbleLayout {
     : 1;
 
   const finalBubbleHeight = shrink < 1 ? Math.max(1, Math.round(bubbleHeight * shrink)) : bubbleHeight;
-  const containerHeight = Math.round(bubbleContainerHeight(finalBubbleHeight));
+
+  /*
+   * 关闭按钮**另加**一条按钮带：不挤压正文区，容器相应加高。
+   * 按钮带高度按宠物高等比，因此按钮会随宠物一起缩放。
+   * 不显示按钮时（input.showButton === false）按钮带为 0。
+   */
+  const showButton = input.showButton !== false;
+  const buttonBand = showButton ? Math.round(petHeight * BUBBLE_BUTTON_BAND_RATIO) : 0;
+  const buttonHeight = showButton ? resolveBubbleButton(Math.max(BUBBLE_FONT_MIN, Math.round(fontSize * shrink))) : 0;
+
+  const containerHeight = Math.round(bubbleContainerHeight(finalBubbleHeight, buttonBand));
   const offsetX = Math.round(bubbleWidth * BUBBLE_OFFSET_X_RATIO);
 
   /*
@@ -402,6 +453,7 @@ export function resolveBubbleLayout(input: BubbleLayoutInput): BubbleLayout {
     offsetX,
     marginLeft,
     fontSize: Math.max(BUBBLE_FONT_MIN, Math.round(fontSize * shrink)),
+    buttonHeight,
     /** 本次布局对应的文本行数（Renderer 用它判断"要不要重算"）。 */
     textLines: typeof lines === 'number' && lines > 0 ? lines : 0,
     /*

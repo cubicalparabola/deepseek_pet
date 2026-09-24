@@ -111,6 +111,19 @@ export class RuntimeCapabilities {
     }
   }
 
+  /**
+   * 请求关闭气泡（用户在气泡上点了"知道了"）。
+   *
+   * 不复用 `send`：这是一次需要确认结果的调用（要拿到收起后的布局），
+   * 失败也不会静默 —— 静默会让按钮看起来"点了没反应"。
+   */
+  public hideBubble(): void {
+    if (!this.bridge) return;
+    void this.bridge.bubble.acknowledge().catch((error: unknown) => {
+      this.logger.warn('acknowledging bubble failed', { error });
+    });
+  }
+
   /** 当前尺寸 + 设置快照。 */
   public async getSettings(): Promise<PetSettingsState | null> {
     if (!this.bridge) return null;

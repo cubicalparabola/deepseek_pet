@@ -182,6 +182,9 @@ export class IpcManager {
       return this.deps.reportBubbleTextLines(text, lines);
     });
 
+    /* 用户点气泡上的"知道了" -> 与托盘「隐藏气泡」完全同一条实现 */
+    this.handle(IpcChannels.BubbleAcknowledge, () => this.deps.setBubble(null));
+
     /* ------------------------- 设置窗口专用通道 ------------------------- */
     /*
      * 这几个通道只被 `src/settings/` 那个普通窗口调用。

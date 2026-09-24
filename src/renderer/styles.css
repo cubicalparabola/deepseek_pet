@@ -140,8 +140,8 @@ body {
   /* 内缩比例与 shared/bubble.ts 的 BUBBLE_TEXT_INSET 保持一致 */
   left: 5%;
   right: 9%;
-  top: 18%;
-  bottom: 27%;
+  top: 31%;
+  bottom: 28%;
   /*
    * 短文本垂直居中：文字区比一句话高得多，贴顶会显得空荡。
    *
@@ -195,6 +195,55 @@ body {
   margin-inline: auto;
   width: fit-content;
   max-width: 100%;
+}
+
+/*
+ * "知道了"关闭按钮。
+ *
+ * 位置：**另加**在正文区下方的一条按钮带里（按钮带高度由主进程算进容器高度，
+ * 不挤压正文）。按钮带 = 容器 72%~84.5%（正文区底边 72% + 12.5% 按钮带）。
+ * 用 `top: 78.2%` + `translateY(-50%)` 让按钮在带内垂直居中。
+ *
+ * 水平居中且只占中间 50%：素材右下角的尾巴从容器约 84% 宽处开始，
+ * 按钮靠中间就不会与尾巴重叠。
+ *
+ * 高度由 Renderer 按布局下发值设置（随宠物缩放），这里只给外观。
+ */
+.pet-bubble-ack {
+  position: absolute;
+  left: 50%;
+  top: 78.2%;
+  transform: translate(-50%, -50%);
+  width: 50%;
+  min-width: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid rgba(74, 118, 190, 0.55);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #2f3a56;
+  font-family: inherit;
+  font-size: var(--bubble-font-size);
+  line-height: 1;
+  cursor: pointer;
+  /* 按钮要能点，必须允许指针事件（.pet-bubble-text 同理由） */
+  pointer-events: auto;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.pet-bubble-ack:hover {
+  background: rgba(255, 255, 255, 0.95);
+  border-color: rgba(58, 100, 172, 0.85);
+}
+
+.pet-bubble-ack:active {
+  background: rgba(226, 237, 252, 0.95);
+}
+
+.pet-bubble-ack[hidden] {
+  display: none;
 }
 
 /* 细滚动条：默认样式在透明窗口里太突兀；颜色调亮一点，长文本时更容易被注意到 */
