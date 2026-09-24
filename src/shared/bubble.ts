@@ -148,10 +148,10 @@ export const BUBBLE_MIN_SHRINK = 0.35;
  * 避免多个比例相乘绕错（实测因此反复算错过容器高度）。
  * 到上限后不再变高，多出来的部分由正文区内部滚动条承担。
  */
-/** 气泡**主体**高度上限（相对宠物高度）——用户要求约 1.2。 */
-export const BUBBLE_MAX_VISIBLE_RATIO = 1.2;
+/** 气泡**主体**高度上限（相对宠物高度）——与宠物一样高。 */
+export const BUBBLE_MAX_VISIBLE_RATIO = 1.0;
 /** 气泡**主体**高度下限（相对宠物高度）——约两行文字。 */
-export const BUBBLE_MIN_VISIBLE_RATIO = 0.45;
+export const BUBBLE_MIN_VISIBLE_RATIO = 0.4;
 
 /**
  * 内容高度上下限（相对宠物高度）。
