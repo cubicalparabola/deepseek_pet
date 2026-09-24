@@ -123,9 +123,10 @@ export const BUBBLE_BODY_RIGHT_PCT = (1246 / 1263) * 100;
 /**
  * 文字区相对**主体**左右边界的内缩（相对图宽百分比）。
  *   - 左 3%：与描边留一点距离；
- *   - 右 6%：滚动条约 8px，再多留一点避免文字顶到描边。
+ *   - 右 2.5%：滚动条就在这条边界上，再往右会顶到描边。
+ *     原来是 6%，用户反馈"文字和滚动条稍微往右移动一点就好"，故收到 2.5%。
  */
-export const BUBBLE_TEXT_INSET_FROM_BODY = { left: 3, right: 6 } as const;
+export const BUBBLE_TEXT_INSET_FROM_BODY = { left: 3, right: 2.5 } as const;
 
 /**
  * 正文区**上下留白**占正文区高度的比例（上下各留这么多）。
