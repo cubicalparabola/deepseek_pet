@@ -22,6 +22,7 @@ import {
   BUBBLE_LINE_HEIGHT,
   BUBBLE_TEXT_INSET_FROM_BODY,
   BUBBLE_TEXT_PADDING_RATIO,
+  BUBBLE_TEXT_TOP_GAP_RATIO,
 } from '../../shared/bubble';
 export interface BubbleViewOptions {
   /** 舞台根元素（CSS 变量写在它上面）。 */
@@ -109,11 +110,14 @@ export class BubbleView {
      * 实心区在容器里的范围：top = 容器高 × BUBBLE_BODY_TOP_PCT
      *                        bottom = 容器高 × BUBBLE_BODY_BOTTOM_PCT
      * 实心区内再分：正文区在上、按钮带在下。
+     *
+     * 正文区上边界额外再往下让 `BUBBLE_TEXT_TOP_GAP_RATIO`（占容器高）：
+     * 贴着实心区顶时首行文字紧贴描边，用户要求"顶部往下移动一点点"。
      */
     const bodyTop = Math.round(containerHeight * (BUBBLE_BODY_TOP_PCT / 100));
     const bodyBottom = Math.round(containerHeight * (BUBBLE_BODY_BOTTOM_PCT / 100));
     const buttonBand = Math.min(layout.buttonBand, Math.max(1, bodyBottom - bodyTop - 24));
-    const textTop = bodyTop;
+    const textTop = bodyTop + Math.round(containerHeight * BUBBLE_TEXT_TOP_GAP_RATIO);
     const textBottom = Math.max(textTop + 1, bodyBottom - buttonBand);
     const textAreaHeight = textBottom - textTop;
     const textPad = Math.round(textAreaHeight * BUBBLE_TEXT_PADDING_RATIO);

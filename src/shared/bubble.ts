@@ -137,6 +137,14 @@ export const BUBBLE_TEXT_INSET_FROM_BODY = { left: 3, right: 2.5 } as const;
 export const BUBBLE_TEXT_PADDING_RATIO = 0.16;
 
 /**
+ * 正文区上边界相对**实心区顶**再往下移多少（占容器高的比例）。
+ *
+ * 贴着实心区顶时首行文字紧贴描边，用户要求"顶部往下移动一点点"。
+ * 取 0.02（宠物 288 时约 6px）。
+ */
+export const BUBBLE_TEXT_TOP_GAP_RATIO = 0.02;
+
+/**
  * 正文区高度占**整个容器**高度的比例（近似值，仅用于反推容器高度）。
  *
  * = 1 - 左右无关的上下留白 ≈ 1 / (1 + 2×0.16)… 这里直接用实测的 0.55：
