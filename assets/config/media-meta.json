@@ -150,21 +150,21 @@
   "sleep-end.webm": {
     "width": 834,
     "height": 1112,
-    "duration": 2.71,
+    "duration": 4.21,
     "fps": 24,
     "alpha": true
   },
   "sleep-loop.webm": {
     "width": 834,
     "height": 1112,
-    "duration": 0.88,
+    "duration": 2.5,
     "fps": 24,
     "alpha": true
   },
   "sleep-start.webm": {
     "width": 834,
     "height": 1112,
-    "duration": 2.42,
+    "duration": 1.83,
     "fps": 24,
     "alpha": true
   },
