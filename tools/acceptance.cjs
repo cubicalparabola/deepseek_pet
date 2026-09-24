@@ -463,7 +463,8 @@ app.whenReady().then(async () => {
 
     anim.resetCooldowns();
     const cycles = [];
-    const sub = bus.on('animation:loop-cycle', (p) => { if (p.animationId === 'read') cycles.push(p.cycle); });
+    const cycleTimes = [];
+    const sub = bus.on('animation:loop-cycle', (p) => { if (p.animationId === 'read') { cycles.push(p.cycle); cycleTimes.push(Date.now()); } });
     let endEvent = null;
     const subEnd = bus.on('animation:end', (p) => { if (p.animationId === 'read') endEvent = p; });
 
@@ -490,7 +491,10 @@ app.whenReady().then(async () => {
     }
     sub.unsubscribe();
     subEnd.unsubscribe();
-    return { phaseStart, srcStart, phaseLoop, srcLoop, target, cycles, sawEndSrc, endEvent, phaseAfter: anim.getPersistentPhase(), current: anim.getCurrentAnimation() };
+    // 每轮之间的平均间隔（回归用：曾经 4 轮在同帧内计完，间隔≈0）
+    const totalMs = cycleTimes.length > 1 ? cycleTimes[cycleTimes.length - 1] - cycleTimes[0] : 0;
+    const cycleSpanMs = cycleTimes.length > 1 ? totalMs / (cycleTimes.length - 1) : 0;
+    return { phaseStart, srcStart, phaseLoop, srcLoop, target, cycles, cycleTimes, totalMs, cycleSpanMs, sawEndSrc, endEvent, phaseAfter: anim.getPersistentPhase(), current: anim.getCurrentAnimation() };
   })()`);
   record('持续动画起始阶段为 start', cycleRun.phaseStart === 'start' && String(cycleRun.srcStart).includes('-start'), JSON.stringify({ phase: cycleRun.phaseStart, src: cycleRun.srcStart }));
   record('开场播完自动进入 loop 阶段', cycleRun.phaseLoop === 'loop' && String(cycleRun.srcLoop).includes('-loop'), JSON.stringify({ phase: cycleRun.phaseLoop, src: cycleRun.srcLoop }));
@@ -498,6 +502,17 @@ app.whenReady().then(async () => {
     '循环段按 loopCount 精确计数',
     Array.isArray(cycleRun.cycles) && cycleRun.cycles.length === cycleRun.target && cycleRun.cycles[cycleRun.cycles.length - 1] === cycleRun.target,
     JSON.stringify({ target: cycleRun.target, cycles: cycleRun.cycles }),
+  );
+  /*
+   * 回归断言（真实 bug）：循环计数曾经在同一帧内连加 ——
+   * tick 每帧都判断"到片尾了吗"，而视频到片尾后会停留若干帧，
+   * 于是 4 轮在 20ms 内计完、立刻切收尾，表现为"循环时闪一下"。
+   * 正确行为：每轮必须间隔约一个循环段的时长。
+   */
+  record(
+    '循环计数每轮间隔一个循环段时长（回归：不再同帧连加）',
+    typeof cycleRun.cycleSpanMs === 'number' && cycleRun.cycleSpanMs > 400,
+    JSON.stringify({ target: cycleRun.target, totalMs: cycleRun.totalMs, avgPerCycleMs: cycleRun.cycleSpanMs }),
   );
   record('循环次数达到后播放 end 段', cycleRun.sawEndSrc === true, `endSrcSeen=${cycleRun.sawEndSrc}`);
   record('end 播完后动画结束并回到兜底 idle', Boolean(cycleRun.endEvent) && cycleRun.phaseAfter === null && cycleRun.current === 'idle', JSON.stringify({ end: cycleRun.endEvent, phase: cycleRun.phaseAfter, current: cycleRun.current }));
@@ -519,6 +534,8 @@ app.whenReady().then(async () => {
 
     const accepted = anim.endPersistent('acceptance-interrupt');
     const phaseRightAfter = anim.getPersistentPhase();
+    // 回归断言：请求结束的瞬间**不能**立刻跳到收尾（要先播完当前这一轮）
+    const jumpedImmediately = anim.getPersistentPhase() === 'end';
 
     let endEvent = null;
     const sub = bus.on('animation:end', (p) => { if (p.animationId === 'watch') endEvent = p; });
@@ -529,11 +546,36 @@ app.whenReady().then(async () => {
       if (srcOf().includes('-end')) sawEndSrc = true;
     }
     sub.unsubscribe();
-    return { phaseBefore, srcBefore, accepted, phaseRightAfter, sawEndSrc, endEvent, current: anim.getCurrentAnimation() };
+    return { phaseBefore, srcBefore, accepted, phaseRightAfter, jumpedImmediately, sawEndSrc, endEvent, current: anim.getCurrentAnimation() };
   })()`);
   record('无限循环的持续动画（watch）循环段无 loopCount', interruptRun.phaseBefore === 'loop' && String(interruptRun.srcBefore).includes('-loop'), JSON.stringify(interruptRun));
-  record('被打断时不立刻切断（先播完本轮，仍在 loop 阶段）', interruptRun.accepted === true && interruptRun.phaseRightAfter === 'loop', `phase=${interruptRun.phaseRightAfter}`);
+  record('被打断时不立刻切断（先播完本轮，仍在 loop 阶段）', interruptRun.accepted === true && interruptRun.phaseRightAfter === 'loop' && interruptRun.jumpedImmediately === false, `phase=${interruptRun.phaseRightAfter}`);
   record('打断后播放 end 段并结束', interruptRun.sawEndSrc === true && Boolean(interruptRun.endEvent) && interruptRun.current === 'idle', JSON.stringify({ endSrc: interruptRun.sawEndSrc, end: interruptRun.endEvent, current: interruptRun.current }));
+
+  /*
+   * 用户交互抢占：点击带来的反应动画必须**立刻**接管，
+   * 不能等持续动画把收尾段播完（watch-end 有 4.5 秒，等完就像"点不动"）。
+   */
+  const stealRun = await run(`(async () => {
+    const anim = window.petDebug.anim;
+    const bus = window.petDebug.bus;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    anim.resetCooldowns();
+    await anim.play('watch', { interrupt: 'force', reason: 'user-click:body-steal-test' });
+    for (let i = 0; i < 40 && anim.getPersistentPhase() !== 'loop'; i++) await wait(100);
+    const before = { animation: anim.getCurrentAnimation(), phase: anim.getPersistentPhase() };
+    // 模拟点击反应（renderer 用的就是 user-click:* 这个 reason 前缀 + priority 50）
+    const t0 = Date.now();
+    const result = await anim.play('stroke', { priority: 50, interrupt: 'auto', reason: 'user-click:body', source: 'user' });
+    const elapsedMs = Date.now() - t0;
+    await wait(300);
+    return { before, accepted: result.accepted, elapsedMs, after: anim.getCurrentAnimation(), phaseAfter: anim.getPersistentPhase() };
+  })()`);
+  record(
+    '用户点击可立刻打断持续动画（不等收尾段）',
+    stealRun.accepted === true && stealRun.after === 'stroke' && stealRun.elapsedMs < 1500,
+    JSON.stringify(stealRun),
+  );
 
   // 对一次性动画调用 endPersistent 必须是空操作
   const endOnOneShot = await run(`(async () => {

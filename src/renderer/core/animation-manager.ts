@@ -257,9 +257,26 @@ export class AnimationManager {
       }
     }
 
-    // 5) 抢占旧动画（旧动画发布 completed=false 的 animation:end）
+    /*
+     * 5) 抢占旧动画（旧动画发布 completed=false 的 animation:end）
+     *
+     * 持续动画的例外：如果抢占来自**用户交互**（点击/双击，reason 以 "user-" 开头），
+     * 就**立刻切换**，不等它把收尾段播完。
+     * 理由：收尾段可达 4 秒（watch-end 4.54s），让用户点一下等 4 秒才看到反应
+     * 会被判定为"点不动"。用户交互的响应速度优先于动作完整性。
+     * 非交互来源（行为/插件/AI）仍然走"先播完本轮再收尾"的完整流程。
+     */
     const interruptedId = current?.animation.id;
+    const userInitiated = typeof options.reason === 'string' && options.reason.startsWith('user-');
+    const interruptedWhileLooping =
+      current !== null && current.persistentPhase === 'loop' && current.endingRequested !== true;
+
     if (current) {
+      if (userInitiated && interruptedWhileLooping) {
+        this.logger.info('user interaction cuts persistent animation immediately', {
+          data: { from: current.animation.id, to: animationId, phase: current.persistentPhase },
+        });
+      }
       this.finishActive(false, 'interrupted');
     }
 
@@ -579,12 +596,20 @@ export class AnimationManager {
    * 为什么不用 `ended`：循环段设了 `loop=true`，Chromium 会无缝从头再来，
    * **永远不会**触发 `ended`。所以必须在它回到开头之前接管。
    *
-   * 每次"抓到片尾"记一轮循环：
-   * - 轮数达到 `segments.loopCount` -> 转去播 end；
-   * - 收到结束请求（被打断）-> 也转去播 end，但**先把当前这一轮播完**。
+   * ⚠️ 关键坑（实测踩过）：tick 是**每帧**跑的，而视频到达片尾后会在
+   * "接近 duration"这个位置停留若干帧。如果只判断 `currentTime >= duration - eps`
+   * 就 `cycle++`，同一轮会被重复计数 —— 实测 4 轮在 20ms 内全部计完，
+   * 于是立刻切到 end 段，看起来就是"循环时闪一下"。
+   *
+   * 因此必须记录"这一轮已经计过数"，并且**等到时间轴真正回绕之后**才允许计下一轮。
    */
   private armLoopEdgeWatch(playback: ActivePlayback): void {
     this.clearLoopEdgeWatch();
+    /** 上一次计数时的时间轴位置；null 表示还没计过。 */
+    let lastCycleAt = -1;
+    /** 是否已经"离开过片尾"（回绕成功），用于解锁下一轮计数。 */
+    let rewound = true;
+
     const tick = (): void => {
       this.loopEdgeFrame = null;
       const active = this.active;
@@ -593,9 +618,20 @@ export class AnimationManager {
 
       const video = this.layers.activeVideo;
       const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : this.loopSegmentDuration;
-      const nearEnd = duration > 0 && video.currentTime >= duration - 0.06;
+      if (!(duration > 0) || video.paused) {
+        this.loopEdgeFrame = window.requestAnimationFrame(tick);
+        return;
+      }
 
-      if (nearEnd && !video.paused) {
+      const atEdge = video.currentTime >= duration - 0.06;
+
+      if (!atEdge) {
+        // 已经离开片尾（说明成功回绕到了开头），解锁下一轮计数
+        rewound = true;
+      } else if (rewound && video.currentTime !== lastCycleAt) {
+        // 到达片尾，且这一轮尚未计过数 -> 计一轮
+        rewound = false;
+        lastCycleAt = video.currentTime;
         active.loopCycles += 1;
         const target = active.animation.segments?.loopCount;
         const reached = typeof target === 'number' && target > 0 && active.loopCycles >= target;
@@ -604,6 +640,9 @@ export class AnimationManager {
           animationId: active.animation.id,
           cycle: active.loopCycles,
           ...(typeof target === 'number' && target > 0 ? { target } : {}),
+        });
+        this.logger.debug('persistent loop cycle', {
+          data: { id: active.animation.id, cycle: active.loopCycles, target: target ?? 'infinite' },
         });
 
         if (reached || active.endingRequested) {
@@ -615,13 +654,12 @@ export class AnimationManager {
               reason: reached ? 'loop-count-reached' : 'end-requested',
             },
           });
+          // 这里就不再重排 rAF：由 playEnd 全权接管（它会切段并重装看门狗）
           void this.playEnd(playback);
           return;
         }
-        this.logger.debug('persistent loop cycle', {
-          data: { id: active.animation.id, cycle: active.loopCycles, target: target ?? 'infinite' },
-        });
       }
+
       this.loopEdgeFrame = window.requestAnimationFrame(tick);
     };
     this.loopEdgeFrame = window.requestAnimationFrame(tick);
