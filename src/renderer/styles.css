@@ -140,8 +140,8 @@ body {
   /* 内缩比例与 shared/bubble.ts 的 BUBBLE_TEXT_INSET 保持一致 */
   left: 5%;
   right: 9%;
-  top: 22%;
-  bottom: 30%;
+  top: 18%;
+  bottom: 27%;
   /*
    * 短文本垂直居中：文字区比一句话高得多，贴顶会显得空荡。
    *
