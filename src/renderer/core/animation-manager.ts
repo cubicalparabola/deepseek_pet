@@ -389,6 +389,18 @@ export class AnimationManager {
     return animationId === undefined || active.animation.id === animationId;
   }
 
+  /**
+   * 是否有持续动画在播，且它的优先级**不高于** `maxPriority`。
+   *
+   * 用途：用户点击的瞬时反应（priority 50/60）碰到走神/发呆类持续动画
+   * （priority 10~15）时，应该"先让它把收尾段播完"再播反应，而不是硬切。
+   */
+  public isPersistentPlayingWithin(maxPriority: number): boolean {
+    const active = this.active;
+    if (!active || active.persistentPhase === null) return false;
+    return active.priority <= maxPriority;
+  }
+
   /** 持续动画当前阶段；null = 当前不是持续动画。 */
   public getPersistentPhase(): PersistentPhase | null {
     return this.active?.persistentPhase ?? null;
@@ -1031,14 +1043,22 @@ export class AnimationManager {
       },
     });
 
+    /*
+     * **先回放排队项，再发 AnimationEnd**。
+     *
+     * renderer 在 `AnimationEnd` 上是**同步**处理，会接回兜底 idle
+     * （`playFallback` 带 `interrupt: 'force'`），那会把 `this.queue` 清掉。
+     * 若先 emit 再 flush，排队项就会被兜底 idle 顶掉、静默丢失。
+     * 先 flush 则排队项已经占住位置，renderer 看到"已有动画在播"就不会再抢。
+     */
+    this.flushQueue();
+
     this.eventBus.emit(PetEvents.AnimationEnd, {
       animationId: active.animation.id,
       completed,
       reason,
       source: active.source,
     });
-
-    this.flushQueue();
   }
 
   private flushQueue(): void {

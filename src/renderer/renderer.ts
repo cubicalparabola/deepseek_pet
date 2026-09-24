@@ -277,6 +277,16 @@ class PetApplication {
 
     // 动画结束 -> 回到 IDLE（“WebM 播放结束自动回到 IDLE”就实现在这里）
     this.eventBus.onFrom('App', PetEvents.AnimationEnd, (payload) => {
+      /*
+       * 优先接上"延后执行的点击反应"（点击持续动画时记下的那条）。
+       * 必须在这里、且在状态迁 IDLE 之前处理：状态一变 IDLE 就会触发
+       * `resumeFallbackLoop` 去接兜底 idle，反应会被它顶掉。
+       * 此时状态仍是 PLAYING，接上反应后状态自然保持 PLAYING，不必再迁 IDLE。
+       */
+      if (this.playPendingReactionAfterEnd()) {
+        this.pushTrayState();
+        return;
+      }
       if (payload.completed && (this.stateMachine.is('PLAYING') || this.stateMachine.is('SLEEPING'))) {
         this.stateMachine.request('IDLE', `animation-end:${payload.animationId}`, payload.source ?? 'system');
       }
@@ -407,6 +417,14 @@ class PetApplication {
   private recovering = false;
 
   /**
+   * 待播的点击反应（"先播持续动画的收尾段，再播这个"）。
+   *
+   * 由 `deferReactionUntilPersistentEnd` 写入，收尾段的 `AnimationEnd`
+   * 里由 `playPendingReactionAfterEnd` 消费。只存一条：用户连点只保留最后一次意图。
+   */
+  private pendingReaction: { animationId: string; priority: number; metadata: Record<string, unknown> } | null = null;
+
+  /**
    * 画面健康检查 + 自愈。
    *
    * 为什么需要它：`<video>` 偶发会停在 `readyState = 0`（有 src、没解码数据、
@@ -519,7 +537,14 @@ class PetApplication {
   /* 交互 -> Action Pipeline                                             */
   /* ------------------------------------------------------------------ */
 
-  private handleIntent(intent: InteractionIntent): void {
+  /**
+   * 交互意图入口（`InteractionManager` 的唯一回调）。
+   *
+   * 声明为 public 是为了让自动化验收能走**真实点击路径**（命中区域 -> 映射动画 ->
+   * 提交动作），而不是在测试里复刻一遍这段映射逻辑 —— 复刻过的断言曾经漏掉
+   * 真实 bug（菜单 equal-priority 那次）。
+   */
+  public handleIntent(intent: InteractionIntent): void {
     this.currentRegion = intent.region;
     if (intent.kind === 'region-enter') return;
 
@@ -527,6 +552,7 @@ class PetApplication {
 
     if (intent.kind === 'double-click') {
       this.logger.info('double click', { data: { region: intent.region } });
+      if (this.deferReactionUntilPersistentEnd('play', 60, { region: intent.region })) return;
       void this.execute({
         type: 'animation',
         animationId: 'play',
@@ -541,6 +567,20 @@ class PetApplication {
     this.logger.info('click', {
       data: { region: intent.region, nx: payload.nx.toFixed(2), ny: payload.ny.toFixed(2), animationId },
     });
+    /*
+     * 点击是**瞬时反应**：如果当前是一只低优先级的持续动画（发呆/看书/看着你…），
+     * 先让它把收尾段播完，再把反应动画接上 —— 而不是硬切掉它。
+     * 高优先级的持续动画（如 bomb 100）不受影响，仍然立刻让位。
+     */
+    if (
+      this.deferReactionUntilPersistentEnd(animationId, 50, {
+        region: intent.region,
+        nx: payload.nx,
+        ny: payload.ny,
+      })
+    ) {
+      return;
+    }
     void this.execute({
       type: 'animation',
       animationId,
@@ -549,6 +589,69 @@ class PetApplication {
       reason: `user-click:${intent.region}`,
       metadata: { region: intent.region, nx: payload.nx, ny: payload.ny },
     });
+  }
+
+  /**
+   * 点击反应遇到持续动画时：**先播它的收尾段，再把反应接上**。
+   *
+   * 为什么要这样（用户明确要求）：持续动画在 loop 阶段被点击时，原先是硬切 ——
+   * 收尾段完全被跳过，动作"断"得很突兀。现在改成两步：
+   *   1. `endPersistent()` 让它**立刻**进收尾段（不等本轮循环播完）；
+   *   2. 把点击反应记在 `pendingReaction`，等收尾段结束的 `AnimationEnd`
+   *      里直接接上（见 `wireManagers`），而不是接回 idle。
+   *
+   * 为什么不用动画管理器的 `interrupt: 'queue'`：那条路径要和"动画结束后接回
+   * 兜底 idle"抢同一时刻 —— `playFallback` 带 `interrupt: 'force'`，会把
+   * 排队项顶掉。而"结束后谁接上"本来就是 renderer 这一层的职责，放这里更直白，
+   * 也避免两个机制在同一 tick 里互相清空。
+   *
+   * 只对"优先级不高于 `maxPriority`"的持续动画生效：
+   * 瞬时反应不该让位于高优先级的动画（例如 `bomb` priority 100），
+   * 那种情况仍然走原来的立刻抢占。
+   *
+   * @returns true = 已改为"等收尾段播完再播"，调用方不要再提交抢占动作
+   */
+  private deferReactionUntilPersistentEnd(
+    animationId: string,
+    maxPriority: number,
+    metadata: Record<string, unknown>,
+  ): boolean {
+    if (!this.animationManager.isPersistentPlayingWithin(maxPriority)) return false;
+
+    const persisting = this.animationManager.getCurrentAnimation();
+    if (!this.animationManager.endPersistent('interaction-defer')) return false;
+
+    this.pendingReaction = { animationId, priority: maxPriority, metadata };
+    this.logger.info('click deferred until persistent end segment finishes', {
+      data: {
+        reaction: animationId,
+        persisting,
+        phase: this.animationManager.getPersistentPhase(),
+      },
+    });
+    return true;
+  }
+
+  /**
+   * 收尾段结束后接上待播的点击反应。
+   *
+   * @returns true = 已经接上（调用方不要再接回兜底 idle）
+   */
+  private playPendingReactionAfterEnd(): boolean {
+    const pending = this.pendingReaction;
+    if (!pending) return false;
+    this.pendingReaction = null;
+
+    this.logger.info('playing deferred click reaction', { data: { animationId: pending.animationId } });
+    void this.execute({
+      type: 'animation',
+      animationId: pending.animationId,
+      priority: pending.priority,
+      source: 'user',
+      reason: 'user-click:after-persistent-end',
+      metadata: pending.metadata,
+    });
+    return true;
   }
 
   /** 所有行为来源统一入口。 */

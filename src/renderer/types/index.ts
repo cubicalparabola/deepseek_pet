@@ -11,7 +11,7 @@ import type { AnimationManager } from '../core/animation-manager';
 import type { ActionManager } from '../core/action-manager';
 import type { BehaviorManager } from '../core/behavior-manager';
 import type { EventBus } from '../core/event-bus';
-import type { InteractionManager } from '../core/interaction-manager';
+import type { InteractionIntent, InteractionManager } from '../core/interaction-manager';
 import type { PluginHost } from '../core/plugin-host';
 import type { StateMachine } from '../core/state-machine';
 
@@ -50,6 +50,8 @@ declare global {
       debugHandles(): PetDebugHandles;
       /** 托盘 / 右键菜单选择动画的真实入口（验收脚本直接调用它，避免复刻逻辑）。 */
       handleMenuAnimation(animationId: string): void;
+      /** 点击/双击/悬停进入区域的真实入口（验收脚本直接调用它，避免复刻逻辑）。 */
+      handleIntent(intent: InteractionIntent): void;
       shutdown(): void;
     };
     /** 管理器只读引用（调试用）。 */

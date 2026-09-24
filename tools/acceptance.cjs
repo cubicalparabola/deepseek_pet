@@ -633,6 +633,96 @@ app.whenReady().then(async () => {
   );
 
   /*
+   * 点击遇到持续动画：**先播完收尾段，再播点击反应**（用户明确要求）。
+   *
+   * 旧行为是硬切 —— 收尾段完全被跳过，动作断得突兀。新行为两步：
+   *   1. endPersistent() 让它立刻进收尾段；
+   *   2. 点击反应按 interrupt:'queue' 排队，收尾段结束后接上。
+   *
+   * 走**真实点击入口** window.petApp.handleIntent(...)，不在测试里复刻
+   * 区域->动画的映射（复刻过的断言漏过真 bug）。
+   */
+  const clickDeferRun = await run(`(async () => {
+    const anim = window.petDebug.anim;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const payload = { button: 'left', x: 100, y: 100, nx: 0.5, ny: 0.5, region: 'body', detail: 1 };
+    anim.resetCooldowns();
+    anim.stop('click-defer-reset');
+    await wait(200);
+    await anim.play('watch', { interrupt: 'force', reason: 'click-defer-setup' });
+    for (let i = 0; i < 40 && anim.getPersistentPhase() !== 'loop'; i++) await wait(100);
+    const before = { animation: anim.getCurrentAnimation(), phase: anim.getPersistentPhase() };
+
+    window.petApp.handleIntent({ kind: 'click', region: 'body', payload });
+    // 立刻应进 end 段（不是硬切到 stroke）
+    let enteredEnd = false;
+    const t0 = Date.now();
+    for (let i = 0; i < 40 && !enteredEnd; i++) {
+      await wait(20);
+      if (anim.getPersistentPhase() === 'end') enteredEnd = true;
+    }
+    const enterEndMs = Date.now() - t0;
+    const midAnimation = anim.getCurrentAnimation();
+
+    // 收尾段播完后应自动接上点击反应（body -> stroke）
+    let reaction = null;
+    const t1 = Date.now();
+    while (Date.now() - t1 < 20000 && reaction === null) {
+      await wait(100);
+      const cur = anim.getCurrentAnimation();
+      if (cur !== null && cur !== 'watch') reaction = cur;
+    }
+    return { before, enteredEnd, enterEndMs, midAnimation, reaction, reactionAfterMs: Date.now() - t1 };
+  })()`);
+  record(
+    '点击持续动画：立刻进 end 段而不是硬切',
+    clickDeferRun.before?.phase === 'loop' &&
+      clickDeferRun.enteredEnd === true &&
+      clickDeferRun.midAnimation === 'watch' &&
+      clickDeferRun.enterEndMs < 1500,
+    `enterEndMs=${clickDeferRun.enterEndMs} mid=${clickDeferRun.midAnimation}`,
+  );
+  record(
+    '点击持续动画：收尾段播完后自动接上点击反应',
+    clickDeferRun.reaction === 'stroke',
+    `reaction=${clickDeferRun.reaction} afterMs=${clickDeferRun.reactionAfterMs}`,
+  );
+
+  /*
+   * 对照：**优先级更高的动画不受点击延迟影响**。
+   *
+   * 点击只是瞬时反应（priority 50/60），不该让位于高优先级动画：
+   * 门控条件是"持续动画的优先级 <= 反应优先级"，bomb（priority 100，一次性）
+   * 连持续动画都不是，因此既不延迟、点击也会被既有的优先级仲裁拒掉
+   * （lower-priority）—— 这是设计如此，不是缺陷；关键是**不能把 bomb 掐掉**。
+   */
+  const clickNoDeferRun = await run(`(async () => {
+    const anim = window.petDebug.anim;
+    const bus = window.petDebug.bus;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const payload = { button: 'left', x: 100, y: 100, nx: 0.5, ny: 0.5, region: 'body', detail: 1 };
+    anim.resetCooldowns();
+    anim.stop('no-defer-reset');
+    await wait(200);
+    const rejections = [];
+    const sub = bus.on('animation:rejected', (p) => rejections.push({ id: p.animationId, rejection: p.rejection }));
+    const started = await anim.play('bomb', { interrupt: 'force', reason: 'no-defer-setup', bypassCooldown: true });
+    const before = { animation: anim.getCurrentAnimation(), priority: anim.getCurrentPriority() };
+    window.petApp.handleIntent({ kind: 'click', region: 'body', payload });
+    await wait(500);
+    sub.unsubscribe();
+    return { started: started.accepted, before, after: anim.getCurrentAnimation(), rejections };
+  })()`);
+  record(
+    '高优先级动画（bomb 100）不被点击延迟或掐掉',
+    clickNoDeferRun.started === true &&
+      clickNoDeferRun.before?.priority === 100 &&
+      clickNoDeferRun.after === 'bomb' &&
+      (clickNoDeferRun.rejections ?? []).some((r) => r.rejection === 'lower-priority'),
+    JSON.stringify(clickNoDeferRun),
+  );
+
+  /*
    * 用户交互抢占：点击带来的反应动画必须**立刻**接管，
    * 不能等持续动画把收尾段播完（watch-end 有 4.5 秒，等完就像"点不动"）。
    */
