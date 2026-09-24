@@ -407,6 +407,10 @@ class PetApplication {
     // 只检查"有没有动画在播"是不够的 —— 缓冲可能停在 readyState=0 的
     // "看起来在播、其实没有画面"状态，因此这里直接检查**可见画面的健康度**。
     this.recoveryTimer = window.setTimeout(() => {
+      if (this.isVisuallyStuck()) {
+        this.healStuckAnimation(reason);
+        return;
+      }
       this.checkVideoHealth(reason);
     }, 600);
   }
@@ -466,16 +470,113 @@ class PetApplication {
   }
 
   /**
-   * 兜底看门狗：周期性确认 IDLE 状态下画面仍然可用。
+   * 是否"卡住"：**没有任何动画在播，但画面上停着一帧不动的缓冲**。
+   *
+   * 为什么单独判定它：`checkVideoHealth` 用的是 `isVideoRenderable()`（只要求
+   * `readyState >= 2` 且有尺寸）—— 停住的缓冲**完全满足**这个条件，
+   * 于是自愈不会触发，桌宠就永久冻在那一帧。
+   *
+   * 实测踩过的形态：点击 idle 播 stroke，若 stroke 被插件/行为中途抢占
+   * （发 `completed=false`，状态不迁 IDLE），兜底 idle 就再也接不回来 ——
+   * 可见缓冲会停在**播放中途**（实测 0.6s / 6.04s）且永久 paused。
+   * 注意"停在片尾"只是其中一种，不能只判片尾。
+   *
+   * 误报风险很低：正常交接窗口里动画管理器**已经有** active（新动画进入
+   * 加载中），而这里的第一个条件就是"没有 active"；延后执行的点击反应
+   * 那段刻意留白由 `pendingReaction` 排除。
+   */
+  private isVisuallyStuck(): boolean {
+    if (this.recovering) return false;
+    if (this.pendingReaction !== null) return false;
+    if (this.animationManager.getCurrentAnimation() !== null) return false;
+
+    const visible = this.layers.allVideos.filter(
+      (video) => video.classList.contains('layer-active') && video.readyState >= 2 && video.videoWidth > 0,
+    );
+    if (visible.length === 0) return false;
+
+    // 有画面却全都不在播 = 卡住（正在播的缓冲说明动画还在推进）
+    return visible.every((video) => video.paused);
+  }
+
+  /**
+   * 卡死自愈：把兜底循环接回来。
+   *
+   * 与 `checkVideoHealth` 的分工：那个负责"缓冲僵死（没有可用帧）"，
+   * 这个负责"有可用帧但没有动画在播"。两者的触发条件互斥。
+   */
+  private healStuckAnimation(reason: string): void {
+    if (this.recovering) return;
+    this.recovering = true;
+    this.recoveryAttempts += 1;
+    this.logger.warn('no active animation but a frozen frame is visible; resuming fallback', {
+      data: { reason, attempt: this.recoveryAttempts, state: this.stateMachine.get() },
+    });
+    void this.animationManager
+      .playFallback({ reason: `self-heal-stuck:${reason}`, source: 'system' })
+      .finally(() => {
+        this.recovering = false;
+      });
+  }
+
+  /**
+   * 手动跑一次兜底健康检查（看门狗用的就是这一条逻辑）。
+   *
+   * 公开是为了让自动化验收能**确定性地**驱动自愈，而不必等 2.5s 的定时器；
+   * 真实运行仍由 {@link startWatchdog} 的定时器调用。
+   */
+  public runHealthCheck(reason = 'manual'): void {
+    if (this.isVisuallyStuck()) {
+      this.healStuckAnimation(reason);
+      return;
+    }
+    if (this.stateMachine.is('IDLE')) this.checkVideoHealth(reason);
+  }
+
+  /**
+   * 自愈链路状态（只读，供自动化验收定位"为什么没自愈"）。
+   * 不参与任何业务逻辑。
+   */
+  public describeRecovery(): Record<string, unknown> {
+    const videos = this.layers.allVideos.map((video) => ({
+      id: video.id,
+      active: video.classList.contains('layer-active'),
+      readyState: video.readyState,
+      videoWidth: video.videoWidth,
+      paused: video.paused,
+      loop: video.loop,
+      currentTime: Number(video.currentTime.toFixed(2)),
+      duration: Number.isFinite(video.duration) ? Number(video.duration.toFixed(2)) : null,
+      src: String(video.currentSrc || video.src || '').split('/').pop() ?? '',
+    }));
+    return {
+      state: this.stateMachine.get(),
+      animation: this.animationManager.getCurrentAnimation(),
+      recovering: this.recovering,
+      recoveryAttempts: this.recoveryAttempts,
+      hasPendingReaction: this.pendingReaction !== null,
+      visuallyStuck: this.isVisuallyStuck(),
+      renderable: this.layers.isVideoRenderable(),
+      videos,
+    };
+  }
+
+  /**
+   * 兜底看门狗：周期性确认画面仍然可用。
    * 这是最后一道保险 —— 无论动画链路因为什么竞态丢掉了一次衔接，
    * 桌宠都会在几秒内自己恢复，而不是永久卡成一帧空白。
+   *
+   * ⚠️ 注意这里**不能**只在状态为 IDLE 时检查（旧实现就是这样，于是恰好漏掉了
+   * 最常见的卡死形态：状态停在 PLAYING、却没有任何动画在播）。
    */
   private startWatchdog(): void {
     if (this.watchdogTimer !== null) return;
     this.watchdogTimer = window.setInterval(() => {
-      if (this.stateMachine.is('IDLE')) {
-        this.checkVideoHealth('watchdog');
-      }
+      /*
+       * 顺序：先看"有可用帧但没动画在播"（状态无关），再看"缓冲僵死"（仅 IDLE）。
+       * 前者是更常见的卡死形态，且它的判定本身就排除了正常交接窗口。
+       */
+      this.runHealthCheck('watchdog');
     }, 2500);
     this.logger.info('video watchdog started');
   }

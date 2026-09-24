@@ -723,6 +723,97 @@ app.whenReady().then(async () => {
   );
 
   /*
+   * 卡死自愈：**没有任何动画在播、画面却停着一帧**时必须能接回兜底 idle。
+   *
+   * 复现的形态（用户反馈"idle 时再点击会卡住"）：点击 idle 播 stroke，
+   * 若 stroke 被插件/行为中途抢占（`completed=false`），状态不会迁回 IDLE，
+   * 于是 `resumeFallbackLoop` 永远不触发，桌宠就冻在 stroke 的最后一帧。
+   *
+   * 旧的看门狗只在**状态为 IDLE** 时检查，恰好漏掉这个最常见的卡死形态；
+   * 而且 `isVideoRenderable()` 对"停在收尾帧的缓冲"返回 true，也救不了。
+   * 现在用 `isVisuallyStuck()`（无动画在播 + 可见缓冲 paused 且已播到末尾）
+   * 独立判定，跑一次健康检查就应把 idle 接回来。
+   */
+  const stuckHealRun = await run(`(async () => {
+    const anim = window.petDebug.anim;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const visible = () => Array.from(document.querySelectorAll('#pet-stage video'))
+      .filter((v) => v.classList.contains('layer-active') && v.readyState >= 2);
+
+    anim.resetCooldowns();
+    anim.stop('stuck-setup');
+    await wait(300);
+    // 播一个反应动画
+    await anim.play('stroke', { interrupt: 'force', reason: 'stuck-setup', bypassCooldown: true });
+    await wait(600);
+    const playing = anim.getCurrentAnimation();
+
+    // 模拟"被抢占后没人接上"：直接停掉动画管理器，画面留在这一帧
+    anim.stop('simulated-interrupt');
+    /*
+     * 关键：在**同一个 tick 内**立刻断言卡死状态并跑健康检查。
+     *
+     * 不能先 await 再查：resumeFallbackLoop 里还有一道 600ms 的保险，
+     * 会抢先把兜底接回来，于是"看门狗能不能救"这件事就被掩盖了
+     * （第一版断言就是这样误判的）。
+     * 注意：本段在模板字符串里，注释中不能出现反引号。
+     */
+    const immediate = (() => {
+      const vids = Array.from(document.querySelectorAll('#pet-stage video'))
+        .filter((v) => v.classList.contains('layer-active') && v.readyState >= 2);
+      const before = window.petApp.describeRecovery();
+      window.petApp.runHealthCheck('acceptance-stuck-probe');
+      const after = window.petApp.describeRecovery();
+      return { pausedVisible: vids.length > 0 && vids.every((v) => v.paused), before, after };
+    })();
+
+    await wait(300);
+    const stuck = {
+      animation: anim.getCurrentAnimation(),
+      state: window.petDebug.state.get(),
+      visiblePaused: visible().length > 0 && visible().every((v) => v.paused),
+    };
+
+    let recovered = false;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 8000 && !recovered) {
+      await wait(150);
+      if (anim.getCurrentAnimation() === 'idle') recovered = true;
+    }
+    // 再确认画面真的在动（不是又冻住）
+    const tA = visible()[0] ? visible()[0].currentTime : -1;
+    await wait(500);
+    const tB = visible()[0] ? visible()[0].currentTime : -1;
+    return {
+      playing,
+      immediate: {
+        pausedVisible: immediate.pausedVisible,
+        stuckBefore: immediate.before.visuallyStuck,
+        stuckAfter: immediate.after.visuallyStuck,
+        attemptsAfter: immediate.after.recoveryAttempts,
+      },
+      stuck,
+      recovered,
+      recoveredMs: Date.now() - t0,
+      advancing: tB > tA,
+      tA,
+      tB,
+      finalAnimation: anim.getCurrentAnimation(),
+    };
+  })()`);
+  record(
+    '卡死自愈：无动画在播且画面停帧时接回兜底 idle',
+    stuckHealRun.playing === 'stroke' &&
+      stuckHealRun.immediate?.pausedVisible === true &&
+      stuckHealRun.immediate?.stuckBefore === true &&
+      stuckHealRun.immediate?.stuckAfter === false &&
+      stuckHealRun.immediate?.attemptsAfter === 1 &&
+      stuckHealRun.recovered === true &&
+      stuckHealRun.finalAnimation === 'idle',
+    JSON.stringify(stuckHealRun),
+  );
+
+  /*
    * 用户交互抢占：点击带来的反应动画必须**立刻**接管，
    * 不能等持续动画把收尾段播完（watch-end 有 4.5 秒，等完就像"点不动"）。
    */

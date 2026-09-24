@@ -52,6 +52,10 @@ declare global {
       handleMenuAnimation(animationId: string): void;
       /** 点击/双击/悬停进入区域的真实入口（验收脚本直接调用它，避免复刻逻辑）。 */
       handleIntent(intent: InteractionIntent): void;
+      /** 手动跑一次兜底健康检查（与看门狗同一逻辑，验收用）。 */
+      runHealthCheck(reason?: string): void;
+      /** 自愈链路状态（只读，验收定位用）。 */
+      describeRecovery(): Record<string, unknown>;
       shutdown(): void;
     };
     /** 管理器只读引用（调试用）。 */
