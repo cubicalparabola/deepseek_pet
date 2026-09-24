@@ -62,6 +62,15 @@ interface QueuedRequest {
   readonly options: PlayOptions;
 }
 
+/**
+ * 持续动画切段的交叉淡化时长（毫秒）。
+ *
+ * 三段素材是分开做的，衔接帧不同，硬切会有可见跳变（实测：逐帧录制无空帧、
+ * 两段 alpha 一致，纯粹是画面差异）。用一小段交叉淡化把跳变抹掉。
+ * 太短盖不住跳变，太长会看出"两个画面叠在一起"，140ms 是实测观感较自然的值。
+ */
+const SEGMENT_CROSSFADE_MS = 140;
+
 export class AnimationManager {
   private readonly logger: Logger;
   private readonly eventBus: EventBus;
@@ -512,7 +521,7 @@ export class AnimationManager {
     if (segments?.start) {
       playback.persistentPhase = 'start';
       this.logger.info('persistent start', { data: { id: playback.animation.id } });
-      await this.playSegment(playback, segments.start, false);
+      await this.playSegment(playback, segments.start, false, SEGMENT_CROSSFADE_MS);
       return;
     }
     await this.enterLoopPhase(playback);
@@ -533,7 +542,7 @@ export class AnimationManager {
       },
     });
 
-    await this.playSegment(playback, source, true);
+    await this.playSegment(playback, source, true, SEGMENT_CROSSFADE_MS);
     if (!this.isStillCurrent(playback)) return;
 
     /*
@@ -548,11 +557,22 @@ export class AnimationManager {
   /**
    * 播放持续动画的某一段素材。
    *
-   * 复用双缓冲换源：换源发生在**隐藏**的缓冲上，等它就绪后再交换可见性，
+   * 复用双缓冲换源：换源发生在**隐藏**的缓冲上，等它就绪后再切换可见性，
    * 因此段与段切换不会露出空白帧（沿用第一版修闪屏的机制）。
    * token 不变，所以 `isStillCurrent` 依然成立。
+   *
+   * ⚠️ 关于"切段还要交叉淡化"（实测结论）：
+   * 三段素材是分开做的，**衔接帧并不相同** —— start 的末帧与 loop 的首帧、
+   * loop 的末帧与 end 的首帧都不是同一画面。逐帧录制证明这里**没有空帧**
+   * （异常帧 0、两段 alpha 一致），所以用户看到的闪是**硬切造成的跳变**。
+   * 因此持续动画的切段默认走交叉淡化，把跳变抹掉。
    */
-  private async playSegment(playback: ActivePlayback, source: string, loop: boolean): Promise<void> {
+  private async playSegment(
+    playback: ActivePlayback,
+    source: string,
+    loop: boolean,
+    crossfadeMs = 0,
+  ): Promise<void> {
     const url = this.resolveAsset(source);
     this.layers.applyRenderHints(playback.animation.render);
     const active = this.layers.activeVideo;
@@ -577,6 +597,9 @@ export class AnimationManager {
     incoming.loop = loop;
     incoming.muted = true;
     incoming.playsInline = true;
+    // 清掉可能残留的过渡样式，避免上一次淡化的 transition 影响本次
+    incoming.style.transition = '';
+    incoming.style.opacity = '';
     this.layers.setVideoSourceHint(url);
     this.layers.setVideoSource(incoming, url);
 
@@ -584,6 +607,21 @@ export class AnimationManager {
     if (!this.isStillCurrent(playback)) return;
     await nextFrame();
     if (!this.isStillCurrent(playback)) return;
+
+    if (crossfadeMs > 0) {
+      /*
+       * 交叉淡化：新旧缓冲同时可见一小段，靠 opacity 过渡抹掉接缝跳变。
+       * 旧缓冲保持播放（不能 pause —— 定格比跳变更难看），淡化结束后再释放。
+       */
+      const outgoing = this.layers.crossfadeToSpare(crossfadeMs);
+      this.layers.showLayer('video');
+      await this.layers.playVideo();
+      window.setTimeout(() => {
+        outgoing.pause();
+        this.layers.releaseVideo(outgoing);
+      }, crossfadeMs + 40);
+      return;
+    }
 
     this.layers.commitVideoSwap();
     this.layers.showLayer('video');
@@ -687,7 +725,7 @@ export class AnimationManager {
     this.logger.info('persistent end', { data: { id: playback.animation.id, cycles: playback.loopCycles } });
 
     try {
-      await this.playSegment(playback, end, false);
+      await this.playSegment(playback, end, false, SEGMENT_CROSSFADE_MS);
     } catch (error) {
       this.logger.error('persistent end segment failed', { error, data: { id: playback.animation.id } });
       if (this.isStillCurrent(playback)) this.finishActive(false, 'end-segment-error');

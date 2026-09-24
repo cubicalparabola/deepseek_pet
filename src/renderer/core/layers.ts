@@ -80,9 +80,16 @@ export class PetLayers {
 
   /**
    * 把备用缓冲切为可见，同时隐藏原缓冲并清掉它的素材。
-   * 只有当新缓冲**已经可播**时才应该调用。
+   *
+   * **只有在需要"瞬时切换"时才应该调用** —— 它会立刻把旧缓冲从画面上撤掉，
+   * 因此两段内容不连续时会出现可见跳变（持续动画的 start->loop / loop->end
+   * 就是这种情况：两段素材的衔接帧并不相同）。
+   *
+   * 持续动画的切段请改用 {@link crossfadeToSpare}，让两段画面有一段重叠淡化。
+   *
+   * @param holdOutgoing true = 不释放旧缓冲（由调用方在淡出结束后自己释放）
    */
-  public commitVideoSwap(): void {
+  public commitVideoSwap(holdOutgoing = false): void {
     const incoming = this.spareVideo;
     const outgoing = this.activeVideo;
 
@@ -93,13 +100,65 @@ export class PetLayers {
 
     this.activeIndex = this.activeIndex === 0 ? 1 : 0;
 
-    // 清掉旧缓冲的素材，释放解码资源
+    if (!holdOutgoing) this.releaseVideo(outgoing);
+    else outgoing.dataset.hold = '1';
+  }
+
+  /**
+   * 交叉淡化到备用缓冲（持续动画切段专用）。
+   *
+   * 为什么需要它：三段素材（start/loop/end）是分开制作的，**衔接帧并不相同**，
+   * 硬切会有一次可见跳变。这里让新旧两个缓冲同时可见一小段时间，
+   * 靠 CSS opacity 过渡做交叉淡化，把跳变抹掉。
+   *
+   * @param fadeMs 淡化时长；0 表示退回瞬时切换
+   * @returns 旧缓冲（调用方需要在淡化结束后调用 `releaseVideo` 释放它）
+   */
+  public crossfadeToSpare(fadeMs: number): HTMLVideoElement {
+    const outgoing = this.activeVideo;
+    const incoming = this.spareVideo;
+
+    /*
+     * plus-lighter：让两层**相加**而不是普通 alpha 混合。
+     *
+     * 为什么需要：素材带 alpha，普通混合下"两个各 50% 不透明的画面"叠加起来
+     * 只有 75% 不透明 —— 交叉淡化期间会看出整体"变淡一下"。
+     * plus-lighter 保证过渡期间总不透明度不下降。
+     */
+    const blend = fadeMs > 0 ? 'plus-lighter' : '';
+    incoming.style.mixBlendMode = blend;
+    outgoing.style.mixBlendMode = blend;
+
+    incoming.style.transition = fadeMs > 0 ? `opacity ${fadeMs}ms linear` : '';
+    outgoing.style.transition = fadeMs > 0 ? `opacity ${fadeMs}ms linear` : '';
+
+    // 先让新缓冲进入"目标不透明"状态，再让旧的淡出
+    incoming.classList.add('layer-active');
+    outgoing.classList.remove('layer-active');
+    // 旧的虽然已移除 .layer-active，但它还在过渡中，需要保持播放（否则画面定格）
+    outgoing.dataset.hold = '1';
+
+    this.activeIndex = this.activeIndex === 0 ? 1 : 0;
+    return outgoing;
+  }
+
+  /** 释放某个缓冲的素材（清 src + load，回收解码资源）。 */
+  public releaseVideo(video: HTMLVideoElement): void {
+    delete video.dataset.hold;
+    // 清掉交叉淡化留下的过渡与混合模式，避免影响下一次直接显示
+    video.style.transition = '';
+    video.style.mixBlendMode = '';
     try {
-      outgoing.removeAttribute('src');
-      outgoing.load();
+      video.removeAttribute('src');
+      video.load();
     } catch (error) {
       this.logger.warn('releasing old video buffer failed', { error: describeError(error) });
     }
+  }
+
+  /** 该缓冲是否处于"淡化中、暂不释放"状态。 */
+  public isHeld(video: HTMLVideoElement): boolean {
+    return video.dataset.hold === '1';
   }
 
   /**
