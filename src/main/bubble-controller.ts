@@ -57,15 +57,24 @@ export interface BubbleControllerDeps {
 
 export class BubbleController {
   private readonly deps: BubbleControllerDeps;
-  private state: BubbleState = { visible: false, text: '' };
+  private state: BubbleState = { visible: false, text: '', ready: false };
   private layout: BubbleLayout;
   /**
    * 最近一次由 Renderer 测出的文本行数。
    *
    * 气泡高度按它贴合文本 —— 这是"气泡随文本长短变化"的输入。
-   * null 表示还没测出来（按最大高度渲染）。
+   * null 表示还没测出来（按最大高度渲染，且**不调整窗口、不显示气泡**）。
    */
   private textLines: number | null = null;
+  /**
+   * 是否正处于"首次测量中"（已请求显示、但行数还没回来）。
+   *
+   * 这段时间里窗口尺寸按旧布局保持不变、气泡也不画出来，
+   * 避免"先撑大再收缩"造成的闪烁（逐帧诊断实测过）。
+   */
+  private awaitingMeasure = false;
+  /** 测量兜底定时器：万一 Renderer 没回报，也要把气泡显示出来。 */
+  private measureFallback: ReturnType<typeof setTimeout> | null = null;
 
   public constructor(deps: BubbleControllerDeps) {
     this.deps = deps;
@@ -108,25 +117,32 @@ export class BubbleController {
   /**
    * 显示气泡（带文本）。
    *
-   * 文本变了要**重置行数**并重新调整窗口：行数是"气泡多高"的输入，
-   * 留着上一条文本的行数会让新文本用错高度（等 Renderer 回报后才纠正，
-   * 中间会闪一下）。所以这里先把行数清空（按最大高度渲染一次），
-   * Renderer 量出新行数后会回传，再收敛到贴合文本的高度。
+   * **首次显示（或文本变化）时先不调整窗口、也不显示气泡**：
+   * 此刻还不知道文本占几行，若照最大高度撑大窗口，会先渲染一帧很高的气泡、
+   * 等行数回报后再收缩 —— 用户看到"显示气泡时闪一下"（逐帧诊断实测：
+   * 窗口 resize 两次、气泡 419px 闪到 197px、宠物位置跳 400+px）。
+   *
+   * 因此这里只把布局按最大高度算好下发给渲染层（它需要宽度与字号来量行数），
+   * 状态标记 `ready: false` 让渲染层先不要画；等 `reportTextLines()` 回报后
+   * 再一次性定型并调整窗口。
    */
   public show(text: string): BubblePayload {
     const wasVisible = this.state.visible;
     const textChanged = text !== this.state.text;
     if (textChanged) this.textLines = null;
-    this.state = { visible: true, text };
 
-    /*
-     * 需要动窗口的三种情况：
-     *   - 之前是隐藏的（窗口要从"纯宠物"长到"含气泡"）；
-     *   - 文本变了且已经可见（气泡高度可能变，窗口跟着变）；
-     * 其余情况（同一文本重复 show）只刷新状态，不动窗口。
-     */
-    const needsResize = !wasVisible || textChanged;
-    this.applyLayout(needsResize ? this.deps.getPetSize() : null);
+    const needsMeasure = (!wasVisible || textChanged) && this.textLines === null;
+    this.state = { visible: true, text, ready: !needsMeasure };
+    this.awaitingMeasure = needsMeasure;
+
+    if (needsMeasure) {
+      /* 先不画、也不动窗口：只更新布局（渲染层要用宽度/字号量行数） */
+      this.scheduleMeasureFallback();
+      this.applyLayout(null);
+      return this.payload();
+    }
+
+    this.applyLayout(!wasVisible || textChanged ? this.deps.getPetSize() : null);
     return this.payload();
   }
 
@@ -145,16 +161,46 @@ export class BubbleController {
 
     this.deps.logger.debug('bubble text lines reported', {
       data: { lines, previous: this.textLines ?? null, textLength: text.length },
-    });    this.textLines = lines;
-    // 行数变了 -> 气泡高度变 -> 需要按宠物锚点重新调整窗口
+    });
+    this.textLines = lines;
+    this.clearMeasureFallback();
+    /*
+     * 首次测量完成：这一次才是"真正把窗口调成含气泡尺寸"。
+     * 之前窗口一直保持宠物尺寸、气泡也没画出来，因此不会"先撑大再收缩"。
+     */
+    const wasWaiting = this.awaitingMeasure;
+    this.awaitingMeasure = false;
+    this.state = { ...this.state, ready: true };
+    this.deps.logger.debug('bubble layout finalized', { data: { wasWaiting, lines } });
     this.applyLayout(this.deps.getPetSize());
     return this.payload();
+  }
+
+  /** 测量兜底：Renderer 若没回报，也要把气泡显示出来（否则永远不出现）。 */
+  private scheduleMeasureFallback(): void {
+    this.clearMeasureFallback();
+    this.measureFallback = setTimeout(() => {
+      this.measureFallback = null;
+      if (!this.state.visible || !this.awaitingMeasure) return;
+      this.deps.logger.warn('bubble text measure timed out; showing with max height');
+      this.awaitingMeasure = false;
+      this.state = { ...this.state, ready: true };
+      this.applyLayout(this.deps.getPetSize());
+    }, 400);
+  }
+
+  private clearMeasureFallback(): void {
+    if (this.measureFallback === null) return;
+    clearTimeout(this.measureFallback);
+    this.measureFallback = null;
   }
 
   /** 隐藏气泡（窗口收回宠物尺寸）。 */
   public hide(): BubblePayload {
     const wasVisible = this.state.visible;
-    this.state = { visible: false, text: this.state.text };
+    this.clearMeasureFallback();
+    this.awaitingMeasure = false;
+    this.state = { visible: false, text: this.state.text, ready: false };
     this.textLines = null;
     this.applyLayout(wasVisible ? this.deps.getPetSize() : null);
     return this.payload();

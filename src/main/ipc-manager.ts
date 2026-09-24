@@ -164,7 +164,7 @@ export class IpcManager {
       const record = asRecord(state);
       if (record === null) return this.deps.setBubble(null);
       const visible = asBoolean(record.visible, false);
-      return this.deps.setBubble({ visible, text: asString(record.text, '') });
+      return this.deps.setBubble({ visible, text: asString(record.text, ''), ready: false });
     });
 
     /*

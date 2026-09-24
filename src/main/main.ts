@@ -171,7 +171,7 @@ class DesktopPetApplication {
       reportBubbleTextLines: (text, lines) => {
         const controller = this.bubbleController;
         if (!controller) {
-          return { state: { visible: false, text: '' }, layout: resolveBubbleLayout({ petWidth: 1, petHeight: 1 }) };
+          return { state: { visible: false, text: '', ready: false }, layout: resolveBubbleLayout({ petWidth: 1, petHeight: 1 }) };
         }
         const payload = controller.reportTextLines(text, lines);
         this.refreshTray();
@@ -333,7 +333,8 @@ class DesktopPetApplication {
           this.ipcManager?.setAnimation(animationId);
         },
         onShowBubble: (text) => {
-          this.applyBubble({ visible: true, text });
+          /* ready 交给控制器按"是否需要等测量"决定，这里随便给个值 */
+          this.applyBubble({ visible: true, text, ready: false });
         },
         onHideBubble: () => {
           this.applyBubble(null);
@@ -515,7 +516,7 @@ class DesktopPetApplication {
     this.refreshTray();
     // 控制器缺失（极早调用）时返回一个保守的空布局，避免调用方拿到 null
     return payload ?? {
-      state: { visible: false, text: '' },
+      state: { visible: false, text: '', ready: false },
       layout: resolveBubbleLayout({ petWidth: 1, petHeight: 1 }),
     };
   }

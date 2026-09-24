@@ -252,6 +252,13 @@ export class BubbleView {
   public applyState(state: BubbleState): void {
     const visible = state.visible;
     this.element.hidden = !visible;
+    /*
+     * `ready === false` 表示布局还没定型（首次显示、行数还没量出来）。
+     * 这时**尺寸照常计算**（量行数需要宽度与字号）但**不画出来** ——
+     * 否则会先渲染一帧"按最大高度"的气泡，等行数回报后收缩，看起来就是闪一下
+     * （逐帧诊断实测：窗口 resize 两次、气泡 419px 闪到 197px、宠物跳 400+px）。
+     */
+    this.element.classList.toggle('pet-bubble-pending', visible && !state.ready);
     // 写**正文元素**而不是滚动容器：容器里还有正文这一层结构，不能被覆盖
     if (this.bodyElement.textContent !== state.text) {
       this.bodyElement.textContent = state.text;
