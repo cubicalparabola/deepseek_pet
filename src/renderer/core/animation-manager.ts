@@ -269,20 +269,17 @@ export class AnimationManager {
     /*
      * 5) 抢占旧动画（旧动画发布 completed=false 的 animation:end）
      *
-     * 持续动画的例外：如果抢占来自**用户交互**（点击/双击，reason 以 "user-" 开头），
-     * 就**立刻切换**，不等它把收尾段播完。
-     * 理由：收尾段可达 4 秒（watch-end 4.54s），让用户点一下等 4 秒才看到反应
-     * 会被判定为"点不动"。用户交互的响应速度优先于动作完整性。
-     * 非交互来源（行为/插件/AI）仍然走"先播完本轮再收尾"的完整流程。
+     * **一律立刻切断**，包括持续动画正处在收尾段（end）的情况：
+     * 用户明确要求"end 阶段被打断时立刻切回 idle 或播放打断它的动画"，
+     * 而收尾段最长可达 4.4s（watch-end），等它播完才让位会被判定为"点不动"。
+     * 持续动画主动结束的路径（endPersistent）也已经是立刻进 end 段，
+     * 因此这里不再需要按 reason 前缀区分"用户交互 / 自动化来源"。
      */
     const interruptedId = current?.animation.id;
-    const userInitiated = typeof options.reason === 'string' && options.reason.startsWith('user-');
-    const interruptedWhileLooping =
-      current !== null && current.persistentPhase === 'loop' && current.endingRequested !== true;
 
     if (current) {
-      if (userInitiated && interruptedWhileLooping) {
-        this.logger.info('user interaction cuts persistent animation immediately', {
+      if (current.persistentPhase !== null) {
+        this.logger.info('persistent animation cut immediately', {
           data: { from: current.animation.id, to: animationId, phase: current.persistentPhase },
         });
       }
@@ -329,17 +326,47 @@ export class AnimationManager {
    * - 没有 `end` 段：直接结束；
    * - 对**一次性动画**：空操作，返回 false（避免调用方误用）。
    */
+  /**
+   * 请求结束持续动画。
+   *
+   * 语义（按用户明确要求）：
+   * - **触发打断就立刻进 `end` 阶段**：不等当前这一轮循环播完。原来要等本轮
+   *   播完（watch-loop 2s）才切收尾，用户点一下要等两秒才看到反应，
+   *   判定为"点不动"；响应速度优先于动作完整性。
+   * - **在 `end` 阶段再次被打断 -> 立刻结束**（切回 idle / 让位给打断它的动画）：
+   *   收尾段最长可达 4.4s（watch-end），已经在收尾了就不该再拖。
+   *
+   * @returns true = 当前确实是持续动画且已受理；false = 不是持续动画（一次性动画请用 stop）
+   */
   public endPersistent(reason = 'requested'): boolean {
     const active = this.active;
     if (!active || active.persistentPhase === null) return false;
+
+    // 已经在收尾段：立刻收干净
+    if (active.persistentPhase === 'end') {
+      this.logger.info('persistent end interrupted; finishing immediately', {
+        data: { id: active.animation.id, reason, phase: active.persistentPhase },
+      });
+      /*
+       * 必须用 completed=true。
+       *
+       * renderer 只在 `completed === true` 时才把状态从 PLAYING 迁回 IDLE
+       * （renderer.ts 的 AnimationEnd 处理），而这条路径**没有任何新动画接替** ——
+       * 用 false 会让状态机永远停在 PLAYING：兜底 idle 接不回来，
+       * 画面冻结在收尾段的最后一帧直到用户下一次点击。
+       * 语义上也确实是"这次播放干净地收尾了"（用户主动要求提前结束），
+       * 与"被新动画抢占"（那条路径由新动画的 start 接管状态）不是一回事。
+       */
+      this.finishActive(true, `persistent-end-interrupted:${reason}`);
+      return true;
+    }
+
     if (active.endingRequested) return true;
+    active.endingRequested = true;
 
     this.logger.info('persistent end requested', {
       data: { id: active.animation.id, reason, phase: active.persistentPhase },
     });
-
-    if (active.persistentPhase === 'end') return true;
-    active.endingRequested = true;
 
     if (!active.animation.segments?.end) {
       // 没有收尾段：直接结束
@@ -347,12 +374,11 @@ export class AnimationManager {
       return true;
     }
 
-    // 开场段/循环段：等该段自然结束再转收尾（开场立刻转会很突兀）
-    if (active.persistentPhase === 'start') {
-      // 开场很短，等它 ended 即可，由 bindVideoEvents 驱动
-      return true;
-    }
-    // 循环段：等本轮播完（loopEdgeFrame 轮询会接管）
+    /*
+     * 无论当前在 start 还是 loop，都**立刻**切到收尾段。
+     * 切段会清掉循环段的边缘看门狗，因此不会再触发"本轮播完"那条路径。
+     */
+    void this.playEnd(active);
     return true;
   }
 
@@ -600,6 +626,8 @@ export class AnimationManager {
     // 清掉可能残留的过渡样式，避免上一次淡化的 transition 影响本次
     incoming.style.transition = '';
     incoming.style.opacity = '';
+    // 换代：此前尚未执行的延时释放作废（否则可能误伤这个缓冲）
+    const generation = this.layers.beginSegmentGeneration();
     this.layers.setVideoSourceHint(url);
     this.layers.setVideoSource(incoming, url);
 
@@ -617,6 +645,8 @@ export class AnimationManager {
       this.layers.showLayer('video');
       await this.layers.playVideo();
       window.setTimeout(() => {
+        // 这段淡化已经被后续切段顶掉：不要动缓冲，它可能已经在播新内容
+        if (!this.layers.isCurrentSegmentGeneration(generation)) return;
         outgoing.pause();
         this.layers.releaseVideo(outgoing);
       }, crossfadeMs + 40);
@@ -721,6 +751,7 @@ export class AnimationManager {
 
     this.clearLoopEdgeWatch();
     playback.persistentPhase = 'end';
+    // 进入收尾段即视为"结束请求已兑现"；此后若再被打断，由 endPersistent 立刻收干净
     playback.endingRequested = false;
     this.logger.info('persistent end', { data: { id: playback.animation.id, cycles: playback.loopCycles } });
 
@@ -983,6 +1014,11 @@ export class AnimationManager {
     this.active = null;
     this.clearCompletionWatchdog();
     this.clearLoopEdgeWatch();
+    /*
+     * 先做缓冲交接再暂停：持续动画可能在交叉淡化途中被打断，
+     * 此时可见缓冲已被清空，只 pause() 会让桌宠整只消失。
+     */
+    this.layers.settleAfterInterrupt();
     this.layers.pauseVideo();
 
     this.logger.info(`ended ${active.animation.id}`, {

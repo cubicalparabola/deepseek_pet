@@ -478,7 +478,8 @@ class PetApplication {
    * `Menu.buildFromTemplate` 并直接调用菜单项的 click 回调验证过：两者一致。）
    *
    * 行为：
-   * - 再次点击**正在播放的同一个动画** -> 结束它（持续动画播收尾段，其余直接停）；
+   * - 再次点击**正在播放的同一个动画** -> 结束它。持续动画立刻进收尾段
+   *   （收尾段中途再点则立刻收干净回 idle），其余直接停；
    * - 点了**其它**动画 -> 强制切换。
    */
   public handleMenuAnimation(animationId: string): void {
@@ -486,7 +487,7 @@ class PetApplication {
       this.logger.info('menu: same animation re-selected; ending it', {
         data: { animationId, persistent: this.animationManager.isPersistentPlaying(animationId) },
       });
-      // 持续动画走 endPersistent（先播完本轮再播收尾，更连贯）；其余直接停
+      // 持续动画走 endPersistent（立刻进收尾段 / 收尾段立刻收干净）；其余直接停
       if (!this.animationManager.endPersistent('menu-toggle')) {
         this.animationManager.stop('menu-toggle');
       }

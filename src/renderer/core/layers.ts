@@ -48,6 +48,16 @@ export class PetLayers {
   private currentClassName = '';
   /** 最近一次要播放的素材 URL（自愈重载用）。 */
   private currentVideoSourceHint = '';
+  /**
+   * 切段"换代"计数。
+   *
+   * 交叉淡化结束后要延时释放旧缓冲，而这段延时窗口内可能已经插入了新的切段
+   * （例如用户在收尾段播到一半时打断了它）。此时那个延时回调再按"上一个旧缓冲"
+   * 去 pause/release，就可能误伤**已经被新一段占用**的缓冲。
+   * 调用方在发起新切段前用 {@link beginSegmentGeneration} 递增它，
+   * 延时回调比对不上就直接放弃。
+   */
+  private segmentGeneration = 0;
 
   public constructor(options: StageOptions) {
     this.stage = options.stage;
@@ -159,6 +169,62 @@ export class PetLayers {
   /** 该缓冲是否处于"淡化中、暂不释放"状态。 */
   public isHeld(video: HTMLVideoElement): boolean {
     return video.dataset.hold === '1';
+  }
+
+  /** 进入新一次切段（让尚未执行的延时释放作废）。 */
+  public beginSegmentGeneration(): number {
+    this.segmentGeneration += 1;
+    return this.segmentGeneration;
+  }
+
+  /** {@link beginSegmentGeneration} 返回的代次是否仍然有效。 */
+  public isCurrentSegmentGeneration(generation: number): boolean {
+    return this.segmentGeneration === generation;
+  }
+
+  /** 当前可见缓冲是否正在播该素材（不要求画面已就绪）。 */
+  public isActiveSourceHint(source: string): boolean {
+    return this.currentVideoSourceHint === source;
+  }
+
+  /**
+   * 收尾交接：打断/结束持续动画时，保证**缓冲状态自洽**。
+   *
+   * 交叉淡化进行到一半被打断时，可见缓冲可能刚刚被 `releaseVideo` 清空
+   * （`releaseVideo` 会清 src、readyState 归 0），而另一个缓冲还握着画面。
+   * 这时只 `pause()` 会把画布留空 —— 用户看到的是"桌宠整只消失"。
+   * 因此：若可见缓冲已不可渲染而备用缓冲可用，就把可见性交还给它。
+   *
+   * 同时清掉**非可见缓冲**上残留的淡化样式（`data-hold` / `mix-blend-mode` /
+   * `transition`）：淡化的延时释放可能已被新一代切段作废，这些样式若留着，
+   * 下次复用这个缓冲时会带着 plus-lighter 混合模式播出来。
+   * 注意这里**不清 src** —— 缓冲上的画面要留着，随时可能被接管显示。
+   *
+   * @returns true = 发生了缓冲交还
+   */
+  public settleAfterInterrupt(): boolean {
+    const active = this.activeVideo;
+    const spare = this.spareVideo;
+    const activeOk = active.readyState >= 2 && active.videoWidth > 0;
+    const spareOk = spare.readyState >= 2 && spare.videoWidth > 0;
+
+    let swapped = false;
+    if (!activeOk && spareOk) {
+      this.logger.debug('settling video buffers after interrupt', {
+        data: { from: active.id, to: spare.id },
+      });
+      // 先让接管的缓冲可见，再撤掉空的：顺序反了会露出一帧空白
+      spare.classList.add('layer-active');
+      active.classList.remove('layer-active');
+      this.activeIndex = this.activeIndex === 0 ? 1 : 0;
+      swapped = true;
+    }
+
+    const hidden = this.spareVideo;
+    delete hidden.dataset.hold;
+    hidden.style.transition = '';
+    hidden.style.mixBlendMode = '';
+    return swapped;
   }
 
   /**

@@ -517,7 +517,7 @@ app.whenReady().then(async () => {
   record('循环次数达到后播放 end 段', cycleRun.sawEndSrc === true, `endSrcSeen=${cycleRun.sawEndSrc}`);
   record('end 播完后动画结束并回到兜底 idle', Boolean(cycleRun.endEvent) && cycleRun.phaseAfter === null && cycleRun.current === 'idle', JSON.stringify({ end: cycleRun.endEvent, phase: cycleRun.phaseAfter, current: cycleRun.current }));
 
-  // 被打断：循环中请求结束 -> 播完本轮 -> 播 end -> 结束
+  // 被打断：立刻进收尾段 -> end 播完 -> 结束
   const interruptRun = await run(`(async () => {
     const anim = window.petDebug.anim;
     const bus = window.petDebug.bus;
@@ -532,25 +532,105 @@ app.whenReady().then(async () => {
     const phaseBefore = anim.getPersistentPhase();
     const srcBefore = anim.getActiveSource();
 
+    const t0 = Date.now();
     const accepted = anim.endPersistent('acceptance-interrupt');
     const phaseRightAfter = anim.getPersistentPhase();
-    // 回归断言：请求结束的瞬间**不能**立刻跳到收尾（要先播完当前这一轮）
-    const jumpedImmediately = anim.getPersistentPhase() === 'end';
+    /*
+     * 回归断言（用户明确要求）：**触发打断就立刻进 end 阶段**。
+     * 旧行为是"等本轮循环播完再进收尾"（watch-loop 2s），用户点一下要等两秒
+     * 才看到反应，判定为"点不动"。
+     */
+    const enteredEndImmediately = anim.getPersistentPhase() === 'end';
+    const phaseLatencyMs = Date.now() - t0;
 
     let endEvent = null;
     const sub = bus.on('animation:end', (p) => { if (p.animationId === 'watch') endEvent = p; });
     let sawEndSrc = false;
-    const t0 = Date.now();
-    while (Date.now() - t0 < 30000 && !endEvent) {
+    const t1 = Date.now();
+    while (Date.now() - t1 < 30000 && !endEvent) {
       await wait(100);
       if (srcOf().includes('-end')) sawEndSrc = true;
     }
     sub.unsubscribe();
-    return { phaseBefore, srcBefore, accepted, phaseRightAfter, jumpedImmediately, sawEndSrc, endEvent, current: anim.getCurrentAnimation() };
+    return { phaseBefore, srcBefore, accepted, phaseRightAfter, enteredEndImmediately, phaseLatencyMs, sawEndSrc, endEvent, current: anim.getCurrentAnimation() };
   })()`);
   record('无限循环的持续动画（watch）循环段无 loopCount', interruptRun.phaseBefore === 'loop' && String(interruptRun.srcBefore).includes('-loop'), JSON.stringify(interruptRun));
-  record('被打断时不立刻切断（先播完本轮，仍在 loop 阶段）', interruptRun.accepted === true && interruptRun.phaseRightAfter === 'loop' && interruptRun.jumpedImmediately === false, `phase=${interruptRun.phaseRightAfter}`);
+  record(
+    '打断立刻进入 end 阶段（不等本轮循环播完）',
+    interruptRun.accepted === true && interruptRun.enteredEndImmediately === true && interruptRun.phaseRightAfter === 'end',
+    `phase=${interruptRun.phaseRightAfter} latency=${interruptRun.phaseLatencyMs}ms`,
+  );
   record('打断后播放 end 段并结束', interruptRun.sawEndSrc === true && Boolean(interruptRun.endEvent) && interruptRun.current === 'idle', JSON.stringify({ endSrc: interruptRun.sawEndSrc, end: interruptRun.endEvent, current: interruptRun.current }));
+
+  /*
+   * 收尾段（end）中途再次被打断 -> 必须**立刻**收干净（回 idle），
+   * 不能等 4.4 秒的收尾段播完。这是"end 阶段被打断应该立刻切回 idle"那条要求。
+   */
+  const endInterruptRun = await run(`(async () => {
+    const anim = window.petDebug.anim;
+    const bus = window.petDebug.bus;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    anim.resetCooldowns();
+    const endEvents = [];
+    const sub = bus.on('animation:end', (p) => endEvents.push({ id: p.animationId, completed: p.completed, reason: p.reason }));
+    await anim.play('watch', { interrupt: 'force', reason: 'end-interrupt-setup' });
+    for (let i = 0; i < 40 && anim.getPersistentPhase() !== 'loop'; i++) await wait(100);
+    anim.endPersistent('end-interrupt-step1');           // 立刻进 end
+    for (let i = 0; i < 40 && anim.getPersistentPhase() !== 'end'; i++) await wait(50);
+    const atEnd = { phase: anim.getPersistentPhase(), source: anim.getActiveSource() };
+
+    const t0 = Date.now();
+    const accepted = anim.endPersistent('end-interrupt-step2');   // 收尾段中途再打断
+    const latencyMs = Date.now() - t0;
+    const phaseAfter = anim.getPersistentPhase();
+    let gone = false;
+    while (Date.now() - t0 < 6000 && !gone) {
+      await wait(100);
+      if (anim.getCurrentAnimation() !== 'watch') gone = true;
+    }
+    /*
+     * 关键不变量：**兜底 idle 必须接回来**。
+     *
+     * 这条路径没有新动画接替，而 renderer 只在 AnimationEnd 的 completed === true
+     * 时才把状态迁回 IDLE；一旦这里发的是 completed=false，状态机会永远停在
+     * PLAYING，idle 再也不会循环（画面冻结在收尾帧）—— 实测踩过这个坑。
+     *
+     * 注意断言方式：不能只看"此刻的 state" —— idle 一旦接回来就会把状态又推回
+     * PLAYING（animation:start 无人接管的旧动画时会迁 IDLE）。因此这里查
+     * **迁移历史**里确实出现过 to=IDLE，并且动画确实回到了 idle。
+     * （本段代码在模板字符串里，注释中不能出现反引号。）
+     */
+    let idleBack = false;
+    for (let i = 0; i < 100 && !idleBack; i++) {
+      await wait(100);
+      if (anim.getCurrentAnimation() === 'idle') idleBack = true;
+    }
+    const history = window.petDebug.state.getHistory(30);
+    const sawIdleTransition = history.some((h) => h.to === 'IDLE' && String(h.reason).includes('animation-end:watch'));
+    sub.unsubscribe();
+    return { atEnd, accepted, latencyMs, phaseAfter, gone, idleBack, sawIdleTransition, currentAfter: anim.getCurrentAnimation(), endEvents };
+  })()`);
+  record(
+    'end 阶段被打断立刻收干净（不等收尾段播完）',
+    endInterruptRun.atEnd?.phase === 'end' &&
+      endInterruptRun.accepted === true &&
+      endInterruptRun.phaseAfter === null &&
+      endInterruptRun.gone === true &&
+      endInterruptRun.latencyMs < 1500,
+    JSON.stringify(endInterruptRun),
+  );
+  record(
+    '打断收尾段后兜底 idle 接回来（状态不卡在 PLAYING）',
+    endInterruptRun.idleBack === true && endInterruptRun.sawIdleTransition === true,
+    'idleBack=' +
+      endInterruptRun.idleBack +
+      ' sawIdleTransition=' +
+      endInterruptRun.sawIdleTransition +
+      ' currentAfter=' +
+      endInterruptRun.currentAfter +
+      ' watchEndEvents=' +
+      JSON.stringify((endInterruptRun.endEvents ?? []).filter((e) => e.id === 'watch')),
+  );
 
   /*
    * 用户交互抢占：点击带来的反应动画必须**立刻**接管，
