@@ -339,17 +339,29 @@ export class WindowManager {
    * 同样用 `setBounds`（而不是 `setSize`）：见 setPosition 的说明，
    * `setSize` 在透明无边框窗口上会顶大最小尺寸，导致只能变大不能变小。
    */
-  public setSize(width: number, height: number): void {
+  public setSize(width: number, height: number, petBottomOffset = 0): void {
     if (!this.exists()) return;
     const window = this.window as BrowserWindow;
     const targetWidth = Math.max(64, Math.round(width));
     const targetHeight = Math.max(64, Math.round(height));
     try {
-      const [x, y] = window.getPosition();
+      const [rawX, rawY] = window.getPosition();
+      /*
+       * 按参数补齐宠物信息后再收敛，保证**整只宠物**仍在工作区内。
+       * 不这样做的话，缩小窗口时宠物会被留在屏幕上方（实测 y=-105），
+       * 用户看到的是"桌宠不见了"。
+       */
+      const petHeight = Math.max(1, targetHeight - petBottomOffset);
+      const safe = this.clampToDisplays(
+        { x: rawX ?? 0, y: rawY ?? 0 },
+        { width: targetWidth, height: targetHeight },
+        targetHeight - petBottomOffset - petHeight,
+        petHeight,
+      );
       window.setMinimumSize(0, 0);
       window.setBounds({
-        x: x ?? 0,
-        y: y ?? 0,
+        x: safe.x,
+        y: safe.y,
         width: targetWidth,
         height: targetHeight,
       });
@@ -361,6 +373,81 @@ export class WindowManager {
         data: { targetWidth, targetHeight },
       });
     }
+  }
+
+  /**
+   * 扩大/缩小窗口，同时**保持宠物在屏幕上的位置不变**。
+   *
+   * 用途：显示对话气泡时窗口必须变大（气泡在宠物上方）。若直接沿用
+   * `setSize()`（左上角固定），窗口会向右下扩张 —— 宠物的脚会跟着往上跳一大截。
+   * 这里反过来做：以**宠物底边**为锚，让窗口水平居中、向**上**扩张。
+   *
+   * ⚠️ 锚点必须用"宠物底边"而不是"窗口底边"。
+   * 宠物在窗口里是**垂直居中偏下**的（上面是气泡、下面还有 padding），
+   * 有气泡时它并不贴着窗口底边。实测踩过的坑：用窗口底边做锚，
+   * 显示气泡时宠物没动，但**隐藏时宠物跳了 700 多像素**。
+   *
+   * 因此调用方要传"宠物底边距离窗口底边多少像素"（两个状态各一个值）。
+   *
+   * @param previousPetSize   调整前的宠物尺寸
+   * @param nextPetSize       调整后的宠物尺寸
+   * @param nextWindowSize    新的窗口尺寸
+   * @param previousPetBottomOffset 调整前：宠物底边到窗口底边的距离
+   * @param nextPetBottomOffset     调整后：宠物底边到窗口底边的距离
+   */
+  public setSizeAnchoredToPet(
+    previousPetSize: WindowSize,
+    nextPetSize: WindowSize,
+    nextWindowSize: WindowSize,
+    previousPetBottomOffset: number,
+    nextPetBottomOffset: number,
+  ): void {
+    if (!this.exists()) return;
+    const window = this.window as BrowserWindow;
+    const [currentX, currentY] = window.getPosition();
+    const current = this.canonicalSize();
+
+    // 宠物在窗口内水平居中 -> 新位置按"宠物中心不变"重算
+    const anchorCenterX = (currentX ?? 0) + current.width / 2;
+    const nextWidth = Math.max(64, Math.round(nextWindowSize.width));
+    const nextHeight = Math.max(64, Math.round(nextWindowSize.height));
+
+    /*
+     * 垂直：让宠物底边在屏幕上原地不动。
+     *   旧：宠物底边 = winY + winH - previousPetBottomOffset
+     *   新：宠物底边 = newY + nextH - nextPetBottomOffset
+     * 两者相等即可解出 newY。
+     */
+    const petBottomOnScreen = (currentY ?? 0) + current.height - previousPetBottomOffset;
+    const nextY = petBottomOnScreen - (nextHeight - nextPetBottomOffset);
+
+    const target = this.clampToDisplays(
+      {
+        x: this.quantizeToPixelGrid(Math.round(anchorCenterX - nextWidth / 2)),
+        y: this.quantizeToPixelGrid(Math.round(nextY)),
+      },
+      { width: nextWidth, height: nextHeight },
+      nextHeight - nextPetBottomOffset - nextPetSize.height,
+      nextPetSize.height,
+    );
+
+    this.logger.info('resizing window around pet anchor', {
+      data: {
+        previousPetSize: `${previousPetSize.width}x${previousPetSize.height}`,
+        nextPetSize: `${nextPetSize.width}x${nextPetSize.height}`,
+        nextWindowSize: `${nextWidth}x${nextHeight}`,
+        petBottomOffset: `${previousPetBottomOffset} -> ${nextPetBottomOffset}`,
+        from: `${currentX},${currentY}`,
+        to: `${target.x},${target.y}`,
+      },
+    });
+    this.moveWindow(window, target.x, target.y, nextWidth, nextHeight);
+    this.logicalSize = { width: nextWidth, height: nextHeight };
+  }
+
+  /** 当前记录的逻辑窗口尺寸（优先用记录值，避免 DIP 取整误差累积）。 */
+  public getSize(): WindowSize {
+    return this.canonicalSize();
   }
 
   public setAlwaysOnTop(value: boolean): void {
@@ -389,26 +476,65 @@ export class WindowManager {
     }
   }
 
-  /** 保证窗口至少有一部分落在某个显示器内。 */
-  private clampToDisplays(position: WindowPosition, size: WindowSize): WindowPosition {
+  /**
+   * 保证窗口内的**宠物**仍然可见（气泡允许露在屏幕外）。
+   *
+   * 优先级（实测教训）：
+   *   1. 宠物整只都在工作区内 -> 不动；
+   *   2. 宠物比工作区还高（scale 拉满时）-> 只能保证底部在工作区内；
+   *   3. 否则把宠物推回工作区。
+   *
+   * ⚠️ 不能只保证"宠物底边在工作区内"：显示气泡时窗口向上长高，
+   * 宠物会被推到屏幕上方（实测跑到了 y=-165），看起来就是"桌宠不见了"。
+   *
+   * @param petTopOffset 宠物顶边到窗口顶边的距离
+   * @param petHeight    宠物高度
+   */
+  private clampToDisplays(
+    position: WindowPosition,
+    size: WindowSize,
+    petTopOffset = 0,
+    petHeight = size.height,
+  ): WindowPosition {
     const margin = 60;
     try {
       const displays = screen.getAllDisplays();
+      const petTop = position.y + petTopOffset;
+      const petBottom = petTop + petHeight;
       const inside = displays.some((display) => {
         const area = display.workArea;
         return (
           position.x + size.width > area.x + margin &&
           position.x < area.x + area.width - margin &&
-          position.y + size.height > area.y + margin &&
-          position.y < area.y + area.height - margin
+          petBottom > area.y + margin &&
+          petTop < area.y + area.height - margin
         );
       });
       if (inside) return position;
+
       const primary = screen.getPrimaryDisplay().workArea;
-      return {
-        x: Math.min(Math.max(position.x, primary.x - size.width + margin), primary.x + primary.width - margin),
-        y: Math.min(Math.max(position.y, primary.y), primary.y + primary.height - margin),
-      };
+      const x = Math.min(
+        Math.max(position.x, primary.x - size.width + margin),
+        primary.x + primary.width - margin,
+      );
+
+      let y = position.y;
+      if (petHeight <= primary.height) {
+        /*
+         * 宠物能整只放下：把宠物完整推回工作区。
+         * 注意这里改的是"宠物"的位置，窗口（气泡）允许露到屏幕外。
+         */
+        if (petTop < primary.y) {
+          y = position.y + (primary.y - petTop);
+        } else if (petBottom > primary.y + primary.height) {
+          y = position.y + (primary.y + primary.height - petBottom);
+        }
+      } else {
+        // 宠物本身就比工作区高：只能保证底边可见（顶部必然溢出）
+        const maxY = primary.y + primary.height - petHeight - petTopOffset;
+        y = Math.min(position.y, maxY);
+      }
+      return { x, y };
     } catch {
       return position;
     }

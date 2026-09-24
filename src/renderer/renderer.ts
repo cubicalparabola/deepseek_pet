@@ -18,6 +18,7 @@ import type { DiscoveredPlugin } from '../shared/plugin-types';
 import type { PetState } from '../shared/state-types';
 import type { RuntimeInfo } from '../shared/ipc';
 import type { PetSizeInfo } from '../shared/pet-size';
+import { resolveBubbleLayout, type BubblePayload } from '../shared/bubble';
 import { createLoggerFactory } from '../shared/logging';
 import { EventBus } from './core/event-bus';
 import { AnimationManager } from './core/animation-manager';
@@ -27,6 +28,7 @@ import { BehaviorManager } from './core/behavior-manager';
 import { InteractionManager, type InteractionIntent, type PetRegion } from './core/interaction-manager';
 import { PluginHost } from './core/plugin-host';
 import { PetLayers } from './core/layers';
+import { BubbleView } from './core/bubble-view';
 import { RuntimeCapabilities, readBridge } from './core/runtime';
 
 /**
@@ -51,6 +53,8 @@ interface BootstrapPayload {
   readonly plugins: readonly DiscoveredPlugin[];
   readonly window: { readonly width: number; readonly height: number; readonly x: number; readonly y: number };
   readonly size?: PetSizeInfo;
+  /** 当前对话气泡状态与布局（可能在 Renderer 就绪前就已打开）。 */
+  readonly bubble?: BubblePayload;
 }
 
 function readBootstrap(): BootstrapPayload | null {
@@ -67,6 +71,7 @@ function requireElement<T extends HTMLElement = HTMLElement>(id: string): T {
 class PetApplication {
   private readonly stage: HTMLElement;
   private readonly layers: PetLayers;
+  private readonly bubble: BubbleView;
   private readonly runtime: RuntimeCapabilities;
   private readonly loggerFactory = createLoggerFactory({ level: 'debug' });
   private readonly logger = this.loggerFactory.create('App');
@@ -100,6 +105,12 @@ class PetApplication {
       videoB,
       image,
       logger: this.loggerFactory.create('Layers'),
+    });
+
+    this.bubble = new BubbleView({
+      stage: this.stage,
+      element: requireElement('pet-bubble'),
+      textElement: requireElement('pet-bubble-text'),
     });
 
     this.runtime = new RuntimeCapabilities({
@@ -226,6 +237,18 @@ class PetApplication {
       },
     });
 
+    /*
+     * 对话气泡：**宠物渲染尺寸由这里确定**。
+     *
+     * 显示气泡时窗口会变大，若宠物仍用 100% 就会跟着拉伸，所以宠物的像素尺寸
+     * 必须显式写成 CSS 变量。尺寸来自主进程（bootstrap.size），
+     * 这里只做落地；气泡本身多大也由主进程算好一起下发。
+     */
+    this.applyBubbleLayout(bootstrap?.bubble ?? null);
+    if (bootstrap?.bubble) {
+      this.bubble.applyState(bootstrap.bubble.state);
+    }
+
     this.eventBus.emit(PetEvents.AppReady, {
       version: bootstrap?.runtime.version ?? '0.0.0',
       platform: String(bootstrap?.runtime.platform ?? 'unknown'),
@@ -346,6 +369,13 @@ class PetApplication {
     this.runtime.onSizeChanged((size) => {
       this.handleSizeChanged(size);
     });
+    this.runtime.onBubble((payload) => {
+      this.applyBubbleLayout(payload);
+      this.bubble.applyState(payload.state);
+      this.logger.info('bubble updated', {
+        data: { visible: payload.state.visible, textLength: payload.state.text.length },
+      });
+    });
     this.runtime.pluginBridge()?.onReloadRequested(() => {
       void this.pluginHost.reloadAll(this.plugins);
     });
@@ -365,7 +395,27 @@ class PetApplication {
         clampedByDisplay: size.clampedByDisplay,
       },
     });
+    /*
+     * 宠物尺寸变了 -> 气泡也要跟着缩放。
+     * 主进程随后会推一条气泡布局（含新的气泡尺寸），但在它到达之前
+     * 先用本地算出的布局顶上，避免出现"宠物已变大、气泡还是旧尺寸"的一帧。
+     */
+    this.applyBubbleLayout(null);
     this.pushTrayState();
+  }
+
+  /**
+   * 把气泡布局落到 DOM。
+   *
+   * @param payload 主进程下发的"状态 + 布局"；null 表示只按当前宠物尺寸重算布局
+   *                （用于尺寸变化后先顶上，不等 IPC 往返）
+   */
+  private applyBubbleLayout(payload: BubblePayload | null): void {
+    const size = this.currentSize;
+    const layout = payload?.layout
+      ?? (size ? resolveBubbleLayout({ petWidth: size.width, petHeight: size.height }) : null);
+    if (!layout) return;
+    this.bubble.applyLayout(layout);
   }
 
   /**
@@ -531,6 +581,22 @@ class PetApplication {
       return;
     }
     if (this.stateMachine.is('IDLE')) this.checkVideoHealth(reason);
+  }
+
+  /**
+   * 对话气泡的只读快照（验收断言用）。
+   *
+   * 气泡布局由**主进程**决定并下发，这里只报告渲染层的实际结果：
+   * 尺寸、字号、文字区是否出现滚动。三个需求（跟随缩放 / 长文本滚动 /
+   * 文字落在留白区内）都靠这份数据断言。
+   */
+  public describeBubble(): Record<string, unknown> {
+    const size = this.currentSize;
+    return {
+      ...this.bubble.describe(),
+      petSize: size ? { width: size.width, height: size.height } : null,
+      windowInner: { width: window.innerWidth, height: window.innerHeight },
+    };
   }
 
   /**

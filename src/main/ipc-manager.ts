@@ -20,6 +20,7 @@ import {
   type TrayStatePayload,
 } from '../shared/ipc';
 import type { PetSettingsState, PetSizeInfo } from '../shared/pet-size';
+import type { BubblePayload, BubbleState } from '../shared/bubble';
 import type { PetAction } from '../shared/action-types';
 import type { DiscoveredPlugin, PluginRecord } from '../shared/plugin-types';
 import type { Logger } from '../shared/logger';
@@ -43,6 +44,11 @@ export interface IpcManagerDependencies {
   /** 设置缩放系数，返回新快照。 */
   setScale(scale: number): PetSettingsState;
   setAlwaysOnTop(value: boolean): PetSettingsState;
+  /**
+   * 显示/隐藏对话气泡（null = 隐藏）。返回应用后的状态与布局。
+   * 托盘菜单与验收脚本共用这一条实现。
+   */
+  setBubble(state: BubbleState | null): BubblePayload;
   /** 设置窗口专用：应用尺寸并把最新状态推回设置窗口。 */
   setScaleFromSettingsWindow(scale: number): PetSettingsState;
   setAlwaysOnTopFromSettingsWindow(value: boolean): PetSettingsState;
@@ -141,6 +147,19 @@ export class IpcManager {
     this.handle(IpcChannels.SettingsSetAlwaysOnTop, (_event, value) =>
       this.deps.setAlwaysOnTop(asBoolean(value, true)),
     );
+
+    /* ---------------------------- 对话气泡 ------------------------------ */
+    /*
+     * 第一版不做自动触发，这个通道只用于"手动验证"：
+     * 托盘菜单的「对话气泡（测试）」与验收脚本走的是**同一个** deps.setBubble。
+     * 传 null 表示隐藏。
+     */
+    this.handle(IpcChannels.PetSetBubble, (_event, state) => {
+      const record = asRecord(state);
+      if (record === null) return this.deps.setBubble(null);
+      const visible = asBoolean(record.visible, false);
+      return this.deps.setBubble({ visible, text: asString(record.text, '') });
+    });
 
     /* ------------------------- 设置窗口专用通道 ------------------------- */
     /*
@@ -321,6 +340,11 @@ export class IpcManager {
   /** 通知 Renderer：尺寸发生变化。 */
   public notifySizeChanged(size: PetSizeInfo): void {
     this.broadcast(IpcChannels.CommandSizeChanged, size);
+  }
+
+  /** 通知 Renderer：对话气泡状态 / 布局变化（可能同时伴随窗口尺寸变化）。 */
+  public notifyBubble(payload: BubblePayload): void {
+    this.broadcast(IpcChannels.CommandBubble, payload);
   }
 
   public notifyShutdown(): void {

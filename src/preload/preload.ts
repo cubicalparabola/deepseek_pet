@@ -28,6 +28,7 @@ import type {
 } from '../shared/ipc';
 import type { PetAction, ActionResult } from '../shared/action-types';
 import type { PetSettingsState, PetSizeInfo } from '../shared/pet-size';
+import type { BubblePayload, BubbleState } from '../shared/bubble';
 import { ASSET_HOST, ASSET_SCHEME } from '../shared/protocol';
 import {
   SETTINGS_BOOTSTRAP_FLAG,
@@ -229,6 +230,8 @@ function buildPetBridge(): PetBridge {
         subscribe<string>(IpcChannels.CommandSetAnimation, handler),
       onSizeChanged: (handler: (size: PetSizeInfo) => void): Unsubscribe =>
         subscribe<PetSizeInfo>(IpcChannels.CommandSizeChanged, handler),
+      onBubble: (handler: (payload: BubblePayload) => void): Unsubscribe =>
+        subscribe<BubblePayload>(IpcChannels.CommandBubble, handler),
       onShutdown: (handler: () => void): Unsubscribe =>
         subscribe(IpcChannels.CommandShutdown, () => handler()),
     },
@@ -242,6 +245,11 @@ function buildPetBridge(): PetBridge {
         ipcRenderer.invoke(IpcChannels.SettingsSetAlwaysOnTop, value) as Promise<PetSettingsState>,
       onChanged: (handler: (state: PetSettingsState) => void): Unsubscribe =>
         subscribe<PetSettingsState>(IpcChannels.CommandSizeChanged, handler),
+    },
+
+    bubble: {
+      set: (state: BubbleState | null): Promise<BubblePayload> =>
+        ipcRenderer.invoke(IpcChannels.PetSetBubble, state) as Promise<BubblePayload>,
     },
 
     notifyAnimationChanged: (payload: AnimationChangedPayload): void =>

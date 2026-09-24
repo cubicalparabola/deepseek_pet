@@ -14,7 +14,7 @@
  * 主进程只负责系统能力，并把它们通过 preload + IPC 暴露出去。
  */
 
-import { app, dialog } from 'electron';
+import { app, dialog, screen } from 'electron';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -50,11 +50,13 @@ import { createFileSink } from './log-file-sink';
 import { SettingsStore } from './settings-store';
 import { SettingsWindowManager } from './settings-window-manager';
 import { FALLBACK_ASPECT_RATIO, resolvePetSize } from './pet-size';
+import { resolveBubbleLayout, type BubblePayload, type BubbleState } from '../shared/bubble';
 import { registerAssetProtocolHandler, registerAssetScheme } from './asset-protocol';
 import { IpcManager } from './ipc-manager';
 import { PluginManager } from './plugin-manager';
 import { TrayManager } from './tray-manager';
 import { WindowManager } from './window-manager';
+import { BubbleController } from './bubble-controller';
 
 class DesktopPetApplication {
   private config!: PetConfig;
@@ -66,6 +68,7 @@ class DesktopPetApplication {
   private settingsWindow: SettingsWindowManager | null = null;
   private ipcManager: IpcManager | null = null;
   private pluginManager: PluginManager | null = null;
+  private bubbleController: BubbleController | null = null;
 
   private animationManifest: AnimationManifest = {};
   private bootstrapData: PetBootstrap | null = null;
@@ -162,6 +165,8 @@ class DesktopPetApplication {
       getSettingsState: () => this.settingsState(),
       setScale: (scale) => this.applyScale(scale),
       setAlwaysOnTop: (value) => this.applyAlwaysOnTop(value),
+      // 对话气泡：托盘菜单与验收脚本共用这一条实现（null = 隐藏）
+      setBubble: (state) => this.applyBubble(state),
       // 设置窗口：只有它能改尺寸，且改动与托盘菜单共用同一条写盘路径
       setScaleFromSettingsWindow: (scale) => {
         const state = this.applyScale(scale);
@@ -261,6 +266,35 @@ class DesktopPetApplication {
   }
 
   private createTray(): void {
+    /*
+     * 对话气泡控制器：窗口尺寸与气泡布局必须在同一处决策
+     * （气泡在宠物上方，窗口不够大就会被裁掉）。见 main/bubble-controller.ts。
+     */
+    this.bubbleController = new BubbleController({
+      logger: this.loggerFactory.create('Bubble'),
+      getPetSize: () => {
+        const size = this.resolveWindowSize();
+        return { width: size.width, height: size.height };
+      },
+      hasWindow: () => this.windowManager?.exists() ?? false,
+      /*
+       * 含气泡的窗口高度上限 = 显示器工作区高度。
+       * 超限时气泡等比缩小 —— 否则窗口会被顶出屏幕、位置被 clamp 拉回，
+       * 宠物在屏幕上会一路漂移（实测踩过）。
+       */
+      getMaxWindowHeight: () => {
+        try {
+          return screen.getPrimaryDisplay().workArea.height;
+        } catch {
+          return Number.POSITIVE_INFINITY;
+        }
+      },
+      resizeWindow: (previousPet, nextPet, nextWindow, previousOffset, nextOffset) => {
+        this.windowManager?.setSizeAnchoredToPet(previousPet, nextPet, nextWindow, previousOffset, nextOffset);
+      },
+      notify: (payload) => this.ipcManager?.notifyBubble(payload),
+    });
+
     this.trayManager = new TrayManager({
       config: this.config,
       logger: this.loggerFactory.create('TrayManager'),
@@ -287,6 +321,12 @@ class DesktopPetApplication {
         },
         onPlayAnimation: (animationId) => {
           this.ipcManager?.setAnimation(animationId);
+        },
+        onShowBubble: (text) => {
+          this.applyBubble({ visible: true, text });
+        },
+        onHideBubble: () => {
+          this.applyBubble(null);
         },
         onSetAlwaysOnTop: (value) => {
           this.applyAlwaysOnTop(value);
@@ -419,7 +459,7 @@ class DesktopPetApplication {
     const size = this.recomputeSize();
 
     if (this.windowManager?.exists()) {
-      this.windowManager.setSize(size.width, size.height);
+      this.windowManager.setSize(size.width, size.height, this.bubbleController?.getLayout().petBottomOffset ?? 0);
       const targetX = before.x + (beforeSize.width - size.width) / 2;
       const targetY = before.y + (beforeSize.height - size.height) / 2;
       this.windowManager.setPosition(targetX, targetY);
@@ -434,6 +474,11 @@ class DesktopPetApplication {
       },
     });
 
+    /*
+     * 气泡要跟着宠物一起缩放：尺寸变了就重算气泡布局并再次调整窗口
+     * （上面刚把窗口设成"纯宠物"尺寸，这里会在其基础上再叠上气泡）。
+     */
+    this.bubbleController?.onPetSizeChanged({ width: beforeSize.width, height: beforeSize.height });
     this.ipcManager?.notifySizeChanged(size);
     this.refreshTray();
     return this.settingsState();
@@ -445,6 +490,24 @@ class DesktopPetApplication {
     this.logger.info('always-on-top setting updated', { data: { alwaysOnTop: value } });
     this.refreshTray();
     return this.settingsState();
+  }
+
+  /**
+   * 显示/隐藏对话气泡（`null` = 隐藏）。
+   *
+   * 气泡尺寸与窗口尺寸都在 `BubbleController` 里一体决策：
+   * 气泡在宠物上方，桌宠窗口是按宠物裁剪的透明窗口，不放大窗口就会被裁掉。
+   */
+  private applyBubble(state: BubbleState | null): BubblePayload {
+    const payload = state === null
+      ? this.bubbleController?.hide()
+      : this.bubbleController?.show(state.text);
+    this.refreshTray();
+    // 控制器缺失（极早调用）时返回一个保守的空布局，避免调用方拿到 null
+    return payload ?? {
+      state: { visible: false, text: '' },
+      layout: resolveBubbleLayout({ petWidth: 1, petHeight: 1 }),
+    };
   }
 
   private createRuntimeInfo(): RuntimeInfo {
@@ -466,6 +529,11 @@ class DesktopPetApplication {
       plugins: this.pluginManager?.discoverPlugins() ?? [],
       window: { width: size.width, height: size.height, x: position.x, y: position.y },
       size,
+      /*
+       * 气泡状态随 bootstrap 一起下发：气泡可能在 Renderer 就绪前就已打开，
+       * 只靠 IPC 推送会漏掉那一次。
+       */
+      ...(this.bubbleController ? { bubble: this.bubbleController.payload() } : {}),
     };
   }
 
@@ -751,3 +819,4 @@ if (!gotLock) {
     application.requestQuit();
   });
 }
+

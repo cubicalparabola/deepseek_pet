@@ -14,6 +14,17 @@
 :root {
   --pet-width: 100%;
   --pet-height: 100%;
+  /*
+   * 宠物的**像素尺寸**：由 Renderer 按 PetSizeInfo 写入（见 core/bubble-view.ts）。
+   * 为什么不用百分比跟着窗口走：显示气泡时窗口会变大，而宠物在屏幕上必须原地不动，
+   * 因此宠物的渲染尺寸必须与窗口尺寸解耦（窗口多出来的部分给气泡）。
+   */
+  --pet-px-width: 0px;
+  --pet-px-height: 0px;
+  /* 气泡与宠物之间的空隙、窗口四周留白（与主进程的 BubbleLayout 一致） */
+  --bubble-gap: 0px;
+  --bubble-pad: 0px;
+  --bubble-font-size: 12px;
 }
 
 * {
@@ -52,6 +63,20 @@ body {
   height: 100%;
   overflow: hidden;
   background: transparent;
+  /* 上下两段：气泡在上，宠物在下；窗口四周留出 padding 给气泡外发光 */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  padding: var(--bubble-pad);
+  /*
+   * ⚠️ 必须是 content-box：全局 reset 把 `*` 设成了 border-box，
+   * 那样 padding 会从 `height: 100%` 里**扣**掉，内容区只剩 (窗口高 - 2×padding)，
+   * 而宠物固定为窗口高 -> 宠物会被挤压到上下各溢出 padding 像素并被 overflow 裁掉。
+   * 实测：216x288 窗口 + 9px padding 时宠物 offsetTop = -9，头顶和脚底各被切掉 9px。
+   * 改成 content-box 后 padding 加在 100% 之外，宠物与气泡都完整可见。
+   */
+  box-sizing: content-box;
   /* 整个舞台都是可交互区域（点击/拖拽由 InteractionManager 处理） */
   pointer-events: auto;
 }
@@ -61,12 +86,96 @@ body {
   opacity: 0;
 }
 
+/*
+ * 宠物容器：**固定像素尺寸**（不跟着窗口拉伸）。
+ * 贴底居中 —— 窗口向上扩张时宠物的脚不会移动。
+ */
+.pet-pet {
+  position: relative;
+  flex: 0 0 auto;
+  width: var(--pet-px-width);
+  height: var(--pet-px-height);
+}
+
 .pet-layer {
   position: absolute;
   inset: 0;
   width: var(--pet-width);
   height: var(--pet-height);
   pointer-events: none;
+  background: transparent;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 对话气泡                                                                    */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * 气泡本体：贴图 assets/bubble.png（近正方形，底部中央有一条指向宠物的尾巴）。
+ * 贴图按 100% 拉伸铺满，因此气泡尺寸完全由这里的宽高决定；
+ * 文字层用绝对定位压在中部的留白区里（四个内缩百分比由
+ * tools/measure-bubble.mjs 从素材实测得出，见 shared/bubble.ts）。
+ */
+.pet-bubble {
+  position: relative;
+  flex: 0 0 auto;
+  margin-bottom: var(--bubble-gap);
+  background-image: url('pet-asset://assets/bubble.png');
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  /* 气泡自身可滚动的是内部文字层，这里不需要 overflow */
+  overflow: hidden;
+}
+
+.pet-bubble[hidden] {
+  display: none;
+}
+
+.pet-bubble-text {
+  position: absolute;
+  /* 内缩比例与 shared/bubble.ts 的 BUBBLE_TEXT_INSET 保持一致 */
+  left: 5.4%;
+  right: 9.1%;
+  top: 4%;
+  bottom: 11.3%;
+  /*
+   * 短文本垂直居中：文字区比一句话高得多，贴顶会显得空荡、也偏离气泡视觉中心。
+   * 用 flex 而不是 `vertical-align` —— 后者对块级滚动容器无效。
+   * 长文本时内容自然撑满，居中不影响滚动。
+   */
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  /*
+   * 长文本滚动：内容超出文字区时出现滚动条。
+   * `overflow-y: auto`（而不是 scroll）—— 短文本不该无谓地显示滚动条。
+   */
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* 保留作者换行（气泡样本里有空行），同时允许自动折行 */
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  font-size: var(--bubble-font-size);
+  line-height: 1.45;
+  color: #2f3a56;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.7);
+  /* 文字区可交互（要能滚轮/拖滚动条），因此必须允许指针事件 */
+  pointer-events: auto;
+  scrollbar-width: thin;
+  text-align: left;
+}
+
+/* 细长滚动条：默认样式在透明窗口里太突兀 */
+.pet-bubble-text::-webkit-scrollbar {
+  width: 6px;
+}
+
+.pet-bubble-text::-webkit-scrollbar-thumb {
+  background: rgba(90, 130, 200, 0.45);
+  border-radius: 3px;
+}
+
+.pet-bubble-text::-webkit-scrollbar-track {
   background: transparent;
 }
 

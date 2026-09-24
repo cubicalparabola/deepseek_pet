@@ -12,6 +12,7 @@ import type { PetState } from './state-types';
 import type { DiscoveredPlugin, PluginRecord } from './plugin-types';
 import type { AnimationManifest } from './animation-types';
 import type { PetSettingsState, PetSizeInfo } from './pet-size';
+import type { BubblePayload, BubbleState } from './bubble';
 
 /* -------------------------------------------------------------------------- */
 /* 通道名                                                                      */
@@ -36,6 +37,8 @@ export const IpcChannels = {
   SettingsGet: 'pet:settings-get',
   SettingsSetScale: 'pet:settings-set-scale',
   SettingsSetAlwaysOnTop: 'pet:settings-set-always-on-top',
+  /** 显示/隐藏对话气泡（托盘菜单与验收脚本共用同一条实现）。 */
+  PetSetBubble: 'pet:set-bubble',
 
   /* 设置窗口（独立的小窗口，只暴露尺寸/置顶） */
   SettingsWindowShow: 'pet:settings-window-show',
@@ -74,6 +77,7 @@ export const IpcChannels = {
   CommandReloadPlugins: 'pet:command-reload-plugins',
   CommandSetAnimation: 'pet:command-set-animation',
   CommandSizeChanged: 'pet:command-size-changed',
+  CommandBubble: 'pet:command-bubble',
   CommandShutdown: 'pet:command-shutdown',
 } as const;
 
@@ -110,6 +114,13 @@ export interface PetBootstrap {
   readonly window: WindowSize & WindowPosition;
   /** 主进程解析出的尺寸信息（Renderer 不需要自己算宽高比与收敛）。 */
   readonly size?: PetSizeInfo;
+  /**
+   * 当前对话气泡状态与布局。
+   *
+   * 为什么放进 bootstrap：气泡可能在 Renderer 就绪**之前**就已经打开
+   * （例如主进程启动时带着状态），只靠 IPC 推送会漏掉这一次。
+   */
+  readonly bubble?: BubblePayload;
 }
 
 export interface PluginCodePayload {
@@ -221,12 +232,23 @@ export interface PluginBridgeAPI {
   onReloadRequested(handler: () => void): () => void;
 }
 
+/** 对话气泡 API（托盘菜单与验收脚本共用；第一版不做自动触发）。 */
+export interface BubbleAPI {
+  /**
+   * 显示气泡（text 为空串表示只显示空气泡）。
+   * 传 null 表示隐藏。
+   */
+  set(state: BubbleState | null): Promise<BubblePayload>;
+}
+
 export interface CommandAPI {
   onAction(handler: (action: PetAction) => void): () => void;
   onSetBehaviorPaused(handler: (paused: boolean) => void): () => void;
   onSetAnimation(handler: (animationId: string) => void): () => void;
   /** 尺寸变化（托盘/右键菜单/设置界面调整）时通知 Renderer。 */
   onSizeChanged(handler: (size: PetSizeInfo) => void): () => void;
+  /** 对话气泡状态/布局变化（含由它引起的窗口尺寸变化）。 */
+  onBubble(handler: (payload: BubblePayload) => void): () => void;
   onShutdown(handler: () => void): () => void;
 }
 
@@ -252,6 +274,8 @@ export interface PetBridge {
   readonly plugins: PluginBridgeAPI;
   readonly commands: CommandAPI;
   readonly settings: SettingsAPI;
+  /** 对话气泡（第一版只用于手动验证）。 */
+  readonly bubble: BubbleAPI;
   notifyAnimationChanged(payload: AnimationChangedPayload): void;
   notifyStateChanged(payload: StateChangedPayload): void;
   notifyBehaviorPaused(paused: boolean): void;

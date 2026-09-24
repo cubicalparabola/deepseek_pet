@@ -32,6 +32,14 @@ export interface TrayManagerCallbacks {
   onResetAnimation(): void;
   /** 播放指定动画（菜单里的快捷动作）。 */
   onPlayAnimation(animationId: string): void;
+  /**
+   * 显示对话气泡（测试入口）。
+   *
+   * 目前只做"跑通功能"，因此刻意不接行为/插件/AI 的触发机制，
+   * 先用托盘菜单手动验证：气泡是否跟随宠物大小、长文本能否滚动。
+   */
+  onShowBubble(text: string): void;
+  onHideBubble(): void;
   onSetAlwaysOnTop(value: boolean): void;
   onOpenSettings(): void;
   onQuit(): void;
@@ -44,6 +52,31 @@ export interface TrayManagerOptions {
 }
 
 const EMPTY_STATE: TrayStatePayload = {};
+
+/** 气泡测试样本：短句（验证排版）。 */
+const BUBBLE_SAMPLE_SHORT = '今天也一起加油吧！';
+
+/**
+ * 气泡测试样本：长文本（**专门用来验证滚动**）。
+ *
+ * 刻意写得超过气泡一屏能放下的量，这样一眼就能看出滚动条是否出现、
+ * 文字有没有溢出气泡的描边。
+ */
+const BUBBLE_SAMPLE_LONG = [
+  '欢迎回来～我是鲸鱼娘。',
+  '',
+  '这是一段用来测试对话气泡的长文本。气泡会随着桌宠的大小一起缩放：把设置里的滚动条拖大或拖小，气泡和文字都会按比例跟着变。',
+  '',
+  '当文字超过一屏时，气泡内部会出现滚动条，可以用鼠标滚轮或拖动滚动条查看后面的内容，文字不会溢出气泡的描边。',
+  '',
+  '下面是一些占位内容，用来把文本撑长：',
+  '一、气泡的尾巴指向桌宠的头顶；',
+  '二、气泡在桌宠上方，窗口会向上扩展，宠物的脚不会移动；',
+  '三、气泡宽度是宠物宽度的 1.25 倍；',
+  '四、文字区避开了气泡底部的尾巴位置。',
+  '',
+  '如果你能看到这一段，说明滚动已经到底了。谢谢测试！',
+].join('\n');
 
 export class TrayManager {
   private readonly options: TrayManagerOptions;
@@ -186,6 +219,23 @@ export class TrayManager {
     return items;
   }
 
+  /**
+   * 对话气泡测试子菜单。
+   *
+   * 第一版只跑通"显示/尺寸跟随/长文本滚动"，不做触发机制，
+   * 因此这里给两条固定样本（短文本、长文本）加一条隐藏：
+   * 长文本那条专门用来验证滚动条。
+   */
+  private buildBubbleSubmenu(): MenuItemConstructorOptions[] {
+    const callbacks = this.options.callbacks;
+    return [
+      { label: '显示短句', click: () => callbacks.onShowBubble(BUBBLE_SAMPLE_SHORT) },
+      { label: '显示长文（测滚动）', click: () => callbacks.onShowBubble(BUBBLE_SAMPLE_LONG) },
+      { type: 'separator' },
+      { label: '隐藏气泡', click: () => callbacks.onHideBubble() },
+    ];
+  }
+
   /** 托盘菜单（显示/隐藏、行为、尺寸、动画试放、插件、设置、退出）。 */
   private buildTrayMenu(): Menu {
     const visible = this.state.visible ?? true;
@@ -216,6 +266,7 @@ export class TrayManager {
       { type: 'separator' },
       { label: '播放动画（测试）', submenu: this.buildAnimationSubmenu() },
       { label: '恢复默认动画', click: () => callbacks.onResetAnimation() },
+      { label: '对话气泡（测试）', submenu: this.buildBubbleSubmenu() },
       { type: 'separator' },
       { label: '暂停行为', enabled: !paused, click: () => callbacks.onToggleBehavior() },
       { label: '恢复行为', enabled: paused, click: () => callbacks.onToggleBehavior() },
@@ -261,6 +312,7 @@ export class TrayManager {
       { label: '插件', submenu: pluginItems },
       { label: '播放动画（测试）', submenu: this.buildAnimationSubmenu() },
       { label: '恢复默认动画', click: () => callbacks.onResetAnimation() },
+      { label: '对话气泡（测试）', submenu: this.buildBubbleSubmenu() },
       { type: 'separator' },
       ...this.buildSizeItems(),
       { label: '显示桌宠', enabled: !visible, click: () => callbacks.onShow() },

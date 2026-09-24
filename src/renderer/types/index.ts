@@ -7,6 +7,8 @@
 
 import type { PetBridge } from '../../shared/ipc';
 import type { DiscoveredPlugin } from '../../shared/plugin-types';
+import type { PetSizeInfo } from '../../shared/pet-size';
+import type { BubblePayload } from '../../shared/bubble';
 import type { AnimationManager } from '../core/animation-manager';
 import type { ActionManager } from '../core/action-manager';
 import type { BehaviorManager } from '../core/behavior-manager';
@@ -24,6 +26,10 @@ export interface BootstrapPayload {
     readonly x: number;
     readonly y: number;
   };
+  /** 主进程解析出的尺寸信息（宠物像素尺寸是气泡布局的输入）。 */
+  readonly size?: PetSizeInfo;
+  /** 当前对话气泡状态与布局（可能在 Renderer 就绪前就已打开）。 */
+  readonly bubble?: BubblePayload;
 }
 
 /** 调试句柄（仅开发期使用，见 renderer.ts 的 debugHandles()）。 */
@@ -56,6 +62,8 @@ declare global {
       runHealthCheck(reason?: string): void;
       /** 自愈链路状态（只读，验收定位用）。 */
       describeRecovery(): Record<string, unknown>;
+      /** 对话气泡的只读快照（验收断言用）。 */
+      describeBubble(): Record<string, unknown>;
       shutdown(): void;
     };
     /** 管理器只读引用（调试用）。 */

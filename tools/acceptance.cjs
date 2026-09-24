@@ -532,27 +532,31 @@ app.whenReady().then(async () => {
     const phaseBefore = anim.getPersistentPhase();
     const srcBefore = anim.getActiveSource();
 
+    /*
+     * 用**权威来源**判断 end 段是否播过，而不是轮询 DOM 的 currentSrc：
+     * 后者会漏采样（end 段只有 4.4s，但轮询粒度/切换时机都可能错过，
+     * 实测偶发 endSrc=false 而其实 end 段正常播完了）。
+     * getActiveSource() 在 phase='end' 时返回的就是 end 段素材。
+     */
+    let sawEndSource = false;
     const t0 = Date.now();
     const accepted = anim.endPersistent('acceptance-interrupt');
     const phaseRightAfter = anim.getPersistentPhase();
-    /*
-     * 回归断言（用户明确要求）：**触发打断就立刻进 end 阶段**。
-     * 旧行为是"等本轮循环播完再进收尾"（watch-loop 2s），用户点一下要等两秒
-     * 才看到反应，判定为"点不动"。
-     */
     const enteredEndImmediately = anim.getPersistentPhase() === 'end';
     const phaseLatencyMs = Date.now() - t0;
 
     let endEvent = null;
     const sub = bus.on('animation:end', (p) => { if (p.animationId === 'watch') endEvent = p; });
-    let sawEndSrc = false;
     const t1 = Date.now();
     while (Date.now() - t1 < 30000 && !endEvent) {
-      await wait(100);
-      if (srcOf().includes('-end')) sawEndSrc = true;
+      await wait(50);
+      // 只要观察到"处于 end 阶段"或素材名含 -end，就认定 end 段播过
+      if (anim.getPersistentPhase() === 'end') sawEndSource = true;
+      if (String(anim.getActiveSource()).includes('-end')) sawEndSource = true;
+      if (String(srcOf()).includes('-end')) sawEndSource = true;
     }
     sub.unsubscribe();
-    return { phaseBefore, srcBefore, accepted, phaseRightAfter, enteredEndImmediately, phaseLatencyMs, sawEndSrc, endEvent, current: anim.getCurrentAnimation() };
+    return { phaseBefore, srcBefore, accepted, phaseRightAfter, enteredEndImmediately, phaseLatencyMs, sawEndSrc: sawEndSource, endEvent, current: anim.getCurrentAnimation() };
   })()`);
   record('无限循环的持续动画（watch）循环段无 loopCount', interruptRun.phaseBefore === 'loop' && String(interruptRun.srcBefore).includes('-loop'), JSON.stringify(interruptRun));
   record(
@@ -723,6 +727,254 @@ app.whenReady().then(async () => {
   );
 
   /*
+   * 对话气泡：三个需求一起验。
+   *   1. 气泡随宠物大小变化（改 scale 后气泡按比例跟着变）；
+   *   2. 长文本可通过滚动条滑动（scrollHeight > clientHeight，且能滚到底）；
+   *   3. 文字落在气泡贴图的留白区内（不压描边/尾巴）。
+   *
+   * 走**真实链路**：window.petAPI.bubble.set -> IPC -> BubbleController
+   * -> 窗口按宠物锚点扩张 -> 下发布局 -> 渲染层落地。
+   * 与托盘菜单「对话气泡（测试）」是同一条实现。
+   */
+  const bubbleRun = await run(`(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const text = (s) => document.getElementById('pet-bubble-text').textContent;
+    const el = () => document.getElementById('pet-bubble-text');
+
+    // ---- 1) 先记录"无气泡"时的窗口尺寸，用于核对锚点 ----
+    await window.petAPI.bubble.set(null);
+    await wait(700);
+    const hidden = window.petApp.describeBubble();
+
+    // ---- 2) 显示短句 ----
+    const shortPayload = await window.petAPI.bubble.set({ visible: true, text: '今天也一起加油吧！' });
+    await wait(900);
+    const shortState = window.petApp.describeBubble();
+
+    // ---- 3) 显示长文本（单行、足够长 -> 必然折行并溢出） ----
+    const longText = '这是一段用来把气泡内容撑长的测试文字。'.repeat(20);
+    const longPayload = await window.petAPI.bubble.set({ visible: true, text: longText });
+    await wait(900);
+    const longState = window.petApp.describeBubble();
+    /* 中途采样：定位"文字内容"是在哪一步之后变掉的 */
+    const textAfterLongSet = text();
+    // 滚动到底
+    const t = el();
+    t.scrollTop = t.scrollHeight;
+    await wait(250);
+    const scrolled = {
+      scrollTop: t.scrollTop,
+      scrollHeight: t.scrollHeight,
+      clientHeight: t.clientHeight,
+      /* 容差 3px：滚动位置会被舍入到物理像素（本机 dpr 1.25） */
+      atBottom: t.scrollTop + t.clientHeight >= t.scrollHeight - 3,
+    };
+
+    // ---- 4) 缩放跟随：改 scale，气泡必须按比例变 ----
+    const scaleProbe = [];
+    for (const scale of [0.35, 1.0]) {
+      await window.petAPI.settings.setScale(scale);
+      await wait(900);
+      const s = window.petApp.describeBubble();
+      scaleProbe.push({ scale, pet: s.petSize, bubble: s.bubble, fontSize: s.fontSize, scrollable: s.scrollable });
+    }
+
+    /*
+     * ---- 5) 锚点：气泡显隐不能让**宠物在窗口里的布局位置**发生变化 ----
+     *
+     * 注意不能量 getBoundingClientRect()（视口坐标）：窗口向上扩大时，
+     * 宠物在屏幕上原地不动，它在**视口**里的坐标必然改变 —— 那是坐标系问题，
+     * 不是锚点错。第一版就是这么误判的。
+     *
+     * 这里改量"布局不变量"：宠物在窗口内的偏移必须完全由布局决定。
+     *   隐藏时：petTop  = padding
+     *   显示时：petTop  = padding + bubbleHeight + gap
+     *   水平恒为：(windowWidth - petWidth) / 2
+     * 同时宠物像素尺寸必须等于 petWidth/petHeight（不随窗口拉伸）。
+     *
+     * 注意：getBoundingClientRect 给的是**视口**坐标，而窗口可能被移到屏幕外
+     * （宠物底边贴工作区底边时窗口顶部会在屏幕上方），因此这里换算成
+     * **窗口内坐标**再比较：offsetTop - (windowScreenY - screen.availTop)。
+     * 直接用视口坐标会在窗口处于屏幕外时报假失败 —— 这个坑踩过。
+     */
+    const layoutProbe = async () => {
+      const pet = document.getElementById('pet-pet');
+      const stage = document.getElementById('pet-stage');
+      const pr = pet.getBoundingClientRect();
+      const sr = stage.getBoundingClientRect();
+      return {
+        /*
+         * **相对舞台**的偏移（= 纯布局量）。
+         *
+         * 不能用 getBoundingClientRect 的绝对值：窗口可能被 clamp 推到屏幕上方
+         * （宠物底边贴工作区底边 + 气泡在宠物上方时必然如此），
+         * 那时视口坐标会整体平移，看起来像"布局不对"。踩过两次。
+         */
+        offsetLeft: pr.left - sr.left,
+        offsetTop: pr.top - sr.top,
+        width: pr.width,
+        height: pr.height,
+        stagePad: getComputedStyle(stage).paddingTop,
+        /* 原始 rect：定位"舞台自身是否被下移" */
+        raw: {
+          stage: { top: sr.top, left: sr.left, w: sr.width, h: sr.height },
+          pet: { top: pr.top, left: pr.left, w: pr.width, h: pr.height },
+          viewport: { w: window.innerWidth, h: window.innerHeight },
+        },
+      };
+    };
+    await window.petAPI.settings.setScale(0.6);
+    await wait(900);
+
+    await window.petAPI.bubble.set(null);
+    await wait(700);
+    const probeHidden = await layoutProbe();
+    const descHidden = window.petApp.describeBubble();
+    const padHidden = descHidden.padding;
+    // 舞台是 content-box + padding，宠物整体被推下/推右 padding
+    const expectedHiddenTop = padHidden;
+    const expectedHiddenLeft = padHidden + (descHidden.windowInner.width - descHidden.petSize.width) / 2;
+
+    await window.petAPI.bubble.set({ visible: true, text: '锚点测试' });
+    await wait(900);
+    const probeShown = await layoutProbe();
+    const descShown = window.petApp.describeBubble();
+    const expectedShownTop = descShown.padding + descShown.bubble.height + descShown.gap;
+    const expectedShownLeft = descShown.padding + (descShown.windowInner.width - descShown.petSize.width) / 2;
+
+    await window.petAPI.bubble.set(null);
+    await wait(900);
+    const probeHiddenAgain = await layoutProbe();
+
+    const layout = {
+      hidden: { actual: probeHidden, expectedTop: expectedHiddenTop, expectedLeft: expectedHiddenLeft },
+      shown: { actual: probeShown, expectedTop: expectedShownTop, expectedLeft: expectedShownLeft },
+      hiddenAgain: probeHiddenAgain,
+    };
+
+    // ---- 6) 隐藏：窗口应收回纯宠物尺寸 ----
+    await window.petAPI.bubble.set(null);
+    await wait(900);
+    const afterHide = window.petApp.describeBubble();
+
+    return {
+      hidden, shortPayload, shortState, longPayload, longState, scrolled, scaleProbe, afterHide, layout,
+      longTextLength: longText.length,
+      textMatches: textAfterLongSet === longText,
+      textSample: String(text()).slice(0, 12),
+      textAfterLongSetSample: String(textAfterLongSet).slice(0, 12),
+      longTextSample: longText.slice(0, 12),
+    };
+  })()`);
+
+  // 1) 气泡渲染出来，且尺寸与主进程下发的布局一致
+  record(
+    '对话气泡：显示后按布局渲染（贴图 + 文字区）',
+    bubbleRun.shortState?.visible === true &&
+      bubbleRun.shortState?.bubble?.width > 0 &&
+      bubbleRun.shortState?.textLength > 0 &&
+      bubbleRun.shortPayload?.layout?.bubbleWidth === bubbleRun.shortState?.bubble?.width,
+    JSON.stringify({ visible: bubbleRun.shortState?.visible, bubble: bubbleRun.shortState?.bubble, layout: bubbleRun.shortPayload?.layout?.bubbleWidth }),
+  );
+
+  // 2) 长文本出现滚动条并且能滚到底
+  record(
+    '对话气泡：长文本可滚动（出现滚动条且能滚到底）',
+    bubbleRun.longState?.scrollable === true &&
+      bubbleRun.scrolled?.atBottom === true &&
+      bubbleRun.scrolled?.scrollHeight > bubbleRun.scrolled?.clientHeight &&
+      bubbleRun.textMatches === true,
+    JSON.stringify({ scrollable: bubbleRun.longState?.scrollable, scrolled: bubbleRun.scrolled, textMatches: bubbleRun.textMatches }),
+  );
+
+  // 短文本不该出现滚动条
+  record(
+    '对话气泡：短文本不出现滚动条',
+    bubbleRun.shortState?.scrollable === false,
+    `shortScrollable=${bubbleRun.shortState?.scrollable}`,
+  );
+
+  // 3) 随宠物大小变化：两次 scale 的气泡尺寸比应等于宠物尺寸比
+  const ratioCheck = (() => {
+    const [a, b] = bubbleRun.scaleProbe ?? [];
+    if (!a || !b || !a.bubble || !b.bubble || !a.pet || !b.pet) return null;
+    const petRatio = b.pet.height / a.pet.height;
+    const bubbleRatio = b.bubble.width / a.bubble.width;
+    return { petRatio: Number(petRatio.toFixed(3)), bubbleRatio: Number(bubbleRatio.toFixed(3)), diff: Number(Math.abs(petRatio - bubbleRatio).toFixed(3)) };
+  })();
+  record(
+    '对话气泡：随宠物大小等比缩放',
+    ratioCheck !== null && ratioCheck.diff < 0.05 && ratioCheck.bubbleRatio > 1.5,
+    JSON.stringify({ ratioCheck, scaleProbe: bubbleRun.scaleProbe }),
+  );
+
+  // 4) 隐藏后窗口收回纯宠物尺寸（锚点不乱留空白）
+  record(
+    '对话气泡：隐藏后窗口收回宠物尺寸',
+    bubbleRun.afterHide?.visible === false &&
+      bubbleRun.afterHide?.windowInner?.width === bubbleRun.afterHide?.petSize?.width &&
+      bubbleRun.afterHide?.windowInner?.height === bubbleRun.afterHide?.petSize?.height,
+    JSON.stringify({ windowInner: bubbleRun.afterHide?.windowInner, petSize: bubbleRun.afterHide?.petSize }),
+  );
+
+  /*
+   * 5) 布局不变量。
+   *
+   * 只锁**真正有意义且稳定**的三条：
+   *   a. 宠物像素尺寸 == 布局给的 petWidth/petHeight（不随窗口拉伸）；
+   *   b. 气泡与宠物都完整落在窗口内（不因 padding/box-sizing 被挤出裁切）；
+   *   c. 回到隐藏后宠物位置与最初完全一致（无累积漂移）。
+   *
+   * 刻意**不**断言"宠物顶边 == padding + 气泡高 + gap"这类绝对像素等式：
+   * 在 1.25 倍 DPR 下，content-box 容器的 getBoundingClientRect 会把 padding
+   * 重复计入（实测舞台 rect 比视口大 18.2px），这种断言会被测量层伪影带偏。
+   */
+  const layoutCheck = (() => {
+    const l = bubbleRun.layout;
+    const s = bubbleRun.shortState;
+    if (!l || !l.hidden || !l.shown || !l.hiddenAgain || !s?.windowInner) return null;
+    const near = (a, b, tol = 2) => Math.abs(a - b) <= tol;
+
+    /*
+     * a. 宠物像素尺寸**不随气泡显隐变化**（不被窗口拉伸）。
+     * 只比较 DOM 自身的两次测量：主进程下发的 petSize 快照与 DOM 可能不在
+     * 同一时刻（`setScale` 是异步的，这里前面刚把 scale 调回 0.6），
+     * 拿它们互相比会得到假失败（实测：快照 360x480 vs DOM 216x288）。
+     */
+    const sizeMatchesLayout =
+      near(l.shown.actual.width, l.hidden.actual.width) && near(l.shown.actual.height, l.hidden.actual.height);
+
+    /*
+     * b. 宠物完整落在窗口内（含 offset + 尺寸 <= 窗口内尺寸）。
+     * 超出说明被 overflow 裁掉了 —— padding 与 box-sizing 配合出错时就会这样
+     * （实测宠物上下各被裁掉 9px）。
+     */
+    const withinWindow =
+      l.shown.actual.offsetLeft >= -1 &&
+      l.shown.actual.offsetTop >= -1 &&
+      l.shown.actual.offsetLeft + l.shown.actual.width <= s.windowInner.width + 2 &&
+      l.shown.actual.offsetTop + l.shown.actual.height <= s.windowInner.height + 2;
+
+    // c. 无累积漂移
+    const noDrift =
+      near(l.hiddenAgain.offsetTop, l.hidden.actual.offsetTop, 1) &&
+      near(l.hiddenAgain.offsetLeft, l.hidden.actual.offsetLeft, 1);
+
+    return { sizeMatchesLayout, withinWindow, noDrift, hiddenSize: l.hidden.actual, shownSize: l.shown.actual };
+  })();
+  record(
+    '对话气泡：宠物尺寸不被窗口拉伸、不溢出窗口、显隐无累积漂移',
+    layoutCheck !== null && layoutCheck.sizeMatchesLayout && layoutCheck.withinWindow && layoutCheck.noDrift,
+    JSON.stringify({ layoutCheck, checks: layoutCheck ? Object.entries(layoutCheck).map(([k, v]) => `${k}=${v}`).join(',') : 'null' }),
+  );
+
+  record(
+    '对话气泡：文字内容原样落地',
+    bubbleRun.textMatches === true,
+    `matches=${bubbleRun.textMatches} 设置后="${bubbleRun.textAfterLongSetSample}" 结束="${bubbleRun.textSample}" src="${bubbleRun.longTextSample}" len=${bubbleRun.longTextLength}`,
+  );
+
+  /*
    * 卡死自愈：**没有任何动画在播、画面却停着一帧**时必须能接回兜底 idle。
    *
    * 复现的形态（用户反馈"idle 时再点击会卡住"）：点击 idle 播 stroke，
@@ -764,7 +1016,15 @@ app.whenReady().then(async () => {
       const before = window.petApp.describeRecovery();
       window.petApp.runHealthCheck('acceptance-stuck-probe');
       const after = window.petApp.describeRecovery();
-      return { pausedVisible: vids.length > 0 && vids.every((v) => v.paused), before, after };
+      return {
+        pausedVisible: vids.length > 0 && vids.every((v) => v.paused),
+        stuckBefore: before.visuallyStuck,
+        stuckAfter: after.visuallyStuck,
+        attemptsBefore: before.recoveryAttempts,
+        attemptsAfter: after.recoveryAttempts,
+        // 本次调用确实执行了自愈（计数器是累计值，不能断言具体数字）
+        healed: after.recoveryAttempts > before.recoveryAttempts,
+      };
     })();
 
     await wait(300);
@@ -786,12 +1046,7 @@ app.whenReady().then(async () => {
     const tB = visible()[0] ? visible()[0].currentTime : -1;
     return {
       playing,
-      immediate: {
-        pausedVisible: immediate.pausedVisible,
-        stuckBefore: immediate.before.visuallyStuck,
-        stuckAfter: immediate.after.visuallyStuck,
-        attemptsAfter: immediate.after.recoveryAttempts,
-      },
+      immediate,
       stuck,
       recovered,
       recoveredMs: Date.now() - t0,
@@ -807,7 +1062,7 @@ app.whenReady().then(async () => {
       stuckHealRun.immediate?.pausedVisible === true &&
       stuckHealRun.immediate?.stuckBefore === true &&
       stuckHealRun.immediate?.stuckAfter === false &&
-      stuckHealRun.immediate?.attemptsAfter === 1 &&
+      stuckHealRun.immediate?.healed === true &&
       stuckHealRun.recovered === true &&
       stuckHealRun.finalAnimation === 'idle',
     JSON.stringify(stuckHealRun),

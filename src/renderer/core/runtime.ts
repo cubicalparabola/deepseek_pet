@@ -12,6 +12,7 @@ import type { PetBridge, TrayStatePayload } from '../../shared/ipc';
 import type { PetAction } from '../../shared/action-types';
 import type { PluginRecord } from '../../shared/plugin-types';
 import type { PetSettingsState, PetSizeInfo } from '../../shared/pet-size';
+import type { BubblePayload } from '../../shared/bubble';
 import type { Logger } from '../../shared/logger';
 import { PetError } from '../../shared/errors';
 
@@ -86,6 +87,12 @@ export class RuntimeCapabilities {
   public onSizeChanged(handler: (size: PetSizeInfo) => void): () => void {
     if (!this.bridge) return () => undefined;
     return this.bridge.commands.onSizeChanged(handler);
+  }
+
+  /** 对话气泡状态 / 布局变化（含随之而来的窗口尺寸变化）。 */
+  public onBubble(handler: (payload: BubblePayload) => void): () => void {
+    if (!this.bridge) return () => undefined;
+    return this.bridge.commands.onBubble(handler);
   }
 
   /** 当前尺寸 + 设置快照。 */
