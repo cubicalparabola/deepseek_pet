@@ -51,6 +51,7 @@ import {
 } from '../shared/growth';
 import {
   BROWSER_APPS,
+  TERMINAL_PROCESSES,
   URL_SCENE_RULES,
   appKind,
   capturePermission,
@@ -63,6 +64,7 @@ import {
   isPlanEnabled,
   isQuietHour,
   isSensitive,
+  isTerminalProcess,
   isUrlLike,
   learnHabit,
   matchesAppName,
@@ -71,11 +73,14 @@ import {
   normalizeWindowTitle,
   parseSceneFixes,
   planIntervention,
+  redactTerminalSecrets,
   refineScene,
   refineSceneByUrl,
   refineSceneByWindow,
   safeHost,
   sceneLabel,
+  stripAnsiEscape,
+  tailTerminalText,
   topSceneAtHour,
   withoutOwnWindows,
 } from '../shared/perception';
@@ -1135,6 +1140,12 @@ class PetApplication {
       readonly describeWindowContext: typeof describeWindowContext;
       readonly withoutOwnWindows: typeof withoutOwnWindows;
       readonly BROWSER_APPS: typeof BROWSER_APPS;
+      /** 终端文本（"终端里到底在跑什么"的证据）：只有这些进程才读，且先打码再截尾。 */
+      readonly TERMINAL_PROCESSES: typeof TERMINAL_PROCESSES;
+      readonly isTerminalProcess: typeof isTerminalProcess;
+      readonly stripAnsiEscape: typeof stripAnsiEscape;
+      readonly redactTerminalSecrets: typeof redactTerminalSecrets;
+      readonly tailTerminalText: typeof tailTerminalText;
     };
     readonly perceptionStatus: () => Promise<PerceptionStatus | null>;
     /**
@@ -1224,6 +1235,11 @@ class PetApplication {
         describeWindowContext,
         withoutOwnWindows,
         BROWSER_APPS,
+        TERMINAL_PROCESSES,
+        isTerminalProcess,
+        stripAnsiEscape,
+        redactTerminalSecrets,
+        tailTerminalText,
       },
       perceptionStatus: async () => {
         const bridge = this.runtime.perception();

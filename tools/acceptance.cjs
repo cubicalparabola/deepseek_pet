@@ -2280,7 +2280,7 @@ app.whenReady().then(async () => {
    */
   await run(`(async () => {
     await window.petAPI.ai.setSettings({ enabled: false, chat: false, memory: false, emotion: false, diary: false });
-    await window.petAPI.perception.setSettings({ screen: false, behavior: false, camera: false, habits: false });
+    await window.petAPI.perception.setSettings({ screen: false, behavior: false, camera: false, habits: false, terminalText: false, windowContext: false });
     await window.petAPI.growth.setSettings({ palace: false, reflection: false, policyAdapt: false });
     return true;
   })()`);
@@ -2320,7 +2320,7 @@ app.whenReady().then(async () => {
   /* 后面的用例需要记忆与情绪是开的：改回来（感知与成长也要一起恢复） */
   await run(`(async () => {
     await window.petAPI.ai.setSettings({ enabled: true, chat: true, memory: true, emotion: true, diary: true });
-    await window.petAPI.perception.setSettings({ screen: true, behavior: true, camera: true, habits: true });
+    await window.petAPI.perception.setSettings({ screen: true, behavior: true, camera: true, habits: true, terminalText: true, windowContext: true });
     await window.petAPI.growth.setSettings({ palace: true, reflection: true, policyAdapt: true });
     return true;
   })()`);
@@ -3170,6 +3170,69 @@ app.whenReady().then(async () => {
       windowPrivacy.ttl >= 5000 &&
       windowPrivacy.hasStatusField === true,
     JSON.stringify(windowPrivacy),
+  );
+
+  /*
+   * 终端文本（用户要求："能拿到终端文本就用它辅助；拿不到就完全不对终端做特化"）。
+   *
+   * 可行性由真机探针证明（`tools/probe-terminal-text.ps1`：Windows Terminal 把缓冲区文本
+   * 暴露在**子元素**的 `TextPattern` 上，一个窗口能取到 46 万字符）。这里钉住**可测的那一半**：
+   * 只读终端类进程、去 ANSI、给密钥打码、只取尾部 —— 全是纯函数，逐条断言。
+   */
+  const terminalHelpers = await run(`(() => {
+    const model = window.petDebug.perception;
+    const raw = '\\u001b[32mPS E:\\\\ds_pet>\\u001b[0m npm run acceptance\\r\\n' +
+      'dsh web: http://127.0.0.1:3080/?token=vKct9IIXmOIapucS0nbobkG58oIUdzKPZvLIlUtStwQ\\n' +
+      'api_key=sk-abcdefghijklmnop\\n' +
+      'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\\n' +
+      'done in 12s';
+    const cleaned = model.stripAnsiEscape(raw);
+    const redacted = model.redactTerminalSecrets(cleaned);
+    const long = Array.from({ length: 50 }, (_, i) => 'line-' + i).join('\\n');
+    return {
+      processes: model.TERMINAL_PROCESSES.length,
+      isTerminal: model.isTerminalProcess('WindowsTerminal'),
+      isTerminalExe: model.isTerminalProcess('powershell.exe'),
+      isBrowser: model.isTerminalProcess('msedge'),
+      ansiRemoved: !cleaned.includes('\\u001b'),
+      tokenRedacted: !redacted.includes('vKct9IIXmOIapucS0nbobkG58oIUdzKPZvLIlUtStwQ'),
+      apiKeyRedacted: !redacted.includes('sk-abcdefghijklmnop'),
+      bearerRedacted: !redacted.includes('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9'),
+      keepsMeaning: redacted.includes('npm run acceptance') && redacted.includes('done in 12s'),
+      tailLines: model.tailTerminalText(long, { maxLines: 10, maxChars: 5000 }).split('\\n').length,
+      firstTailLine: model.tailTerminalText(long, { maxLines: 10, maxChars: 5000 }).split('\\n')[0],
+      tailChars: model.tailTerminalText('x'.repeat(5000), { maxLines: 30, maxChars: 1200 }).length,
+    };
+  })()`);
+  record(
+    '感知：终端文本只读终端进程、去 ANSI、给密钥打码、只取尾部（拿得到就用它辅助判断）',
+    terminalHelpers.processes >= 10 &&
+      terminalHelpers.isTerminal === true &&
+      terminalHelpers.isTerminalExe === true &&
+      terminalHelpers.isBrowser === false &&
+      terminalHelpers.ansiRemoved === true &&
+      terminalHelpers.tokenRedacted === true &&
+      terminalHelpers.apiKeyRedacted === true &&
+      terminalHelpers.bearerRedacted === true &&
+      terminalHelpers.keepsMeaning === true &&
+      terminalHelpers.tailLines === 10 &&
+      terminalHelpers.firstTailLine === 'line-40' &&
+      terminalHelpers.tailChars === 1200,
+    JSON.stringify(terminalHelpers),
+  );
+  const terminalSettings = await run(`(async () => {
+    const status = await window.petAPI.perception.status();
+    return {
+      enabled: status.settings.terminalText,
+      state: status.terminalText.state,
+      keptChars: status.terminalText.keptChars,
+    };
+  })()`);
+  record(
+    '感知：终端文本默认开启，且状态可审计（她到底读到没有、发了多少字）',
+    terminalSettings.enabled === true &&
+      ['idle', 'non-terminal', 'no-text', 'captured', 'withheld', 'backing-off'].includes(terminalSettings.state),
+    JSON.stringify(terminalSettings),
   );
   /* 优先级：用户规则 > 网址 > 窗口 > 应用名 */
   const scenePriority = await run(`(() => {

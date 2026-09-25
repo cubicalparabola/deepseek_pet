@@ -961,6 +961,82 @@ export function isSensitive(
   return matchesSensitiveKeywords(text, keywords);
 }
 
+/**
+ * 终端类进程名（**只有这些进程才会去读缓冲区文本**）。
+ *
+ * 为什么要单独列一份：读终端缓冲区是本模块最"深"的一次读取（里面就是用户敲过的
+ * 命令与输出，实测还出现过密钥），所以范围必须收得很紧 —— 不在名单里的进程一律不碰。
+ * 与 `PROCESS_SCENE_RULES` 里那条"终端 → terminal"保持一致（那边是判场景，这边是决定要不要读文本）。
+ */
+export const TERMINAL_PROCESSES: readonly string[] = [
+  'windowsterminal', 'windowsterminalpreview', 'conhost', 'cmd', 'powershell', 'pwsh',
+  'wezterm', 'wezterm-gui', 'alacritty', 'mintty', 'tabby', 'xshell', 'putty', 'termius',
+];
+
+/** 这个进程名是不是终端（大小写不敏感、允许带 `.exe`）。 */
+export function isTerminalProcess(name: string): boolean {
+  const normalized = (name ?? '').trim().toLowerCase().replace(/\.exe$/, '');
+  if (normalized === '') return false;
+  return TERMINAL_PROCESSES.includes(normalized);
+}
+
+/**
+ * 去掉终端文本里的 ANSI 转义序列（颜色、光标控制、OSC 标题等）。
+ *
+ * 终端缓冲区拿到的是**带控制字符的原文**，直接塞进提示词既占 token 又会干扰模型
+ * （`\u001b[0m` 这种在模型眼里就是乱码）。只做文本清理，不做任何语义改动。
+ */
+export function stripAnsiEscape(text: string): string {
+  return (text ?? '')
+    // OSC：ESC ] ... BEL 或 ESC \
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, '')
+    // CSI：ESC [ 参数 中间 终止
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    // 其余单字符转义（ESC 后跟一个字符）与回车
+    .replace(/\u001b[@-Z\\-_]/g, '')
+    .replace(/\r/g, '');
+}
+
+/**
+ * 给终端文本里的**密钥/令牌打码**（在读之前就挡住，别指望模型"不要复述"）。
+ *
+ * 为什么必须有这一道：实测终端缓冲区里真的躺着
+ * `dsh web: http://127.0.0.1:3080/?token=vKct...` 这种地址 ——
+ * 我们只想要"他在终端里干什么"，不想要"他手里有什么凭据"。
+ * 打码是**纯文本替换**，宁可多打一点（长串一律打掉），也不要漏。
+ */
+export function redactTerminalSecrets(text: string): string {
+  return (text ?? '')
+    // 显式键值：token=xxx / password: xxx / api_key=xxx / Authorization: Bearer xxx
+    .replace(
+      /\b(token|access[_-]?token|refresh[_-]?token|password|passwd|pwd|secret|api[_-]?key|apikey|authorization|bearer|cookie|session[_-]?id)\b\s*[:=]?\s*\S{4,}/gi,
+      '$1=***',
+    )
+    // 常见前缀令牌
+    .replace(/\b(sk|pk|ghp|gho|ghu|ghs|glpat|xox[baprs])[-_][A-Za-z0-9_-]{8,}/g, '***')
+    .replace(/\bAKIA[0-9A-Z]{12,}\b/g, '***')
+    // 长随机串（base64 / hex / JWT 片段）：32 位以上一律打掉
+    .replace(/\b[A-Za-z0-9_\-+/]{32,}={0,2}\b/g, '***');
+}
+
+/**
+ * 取终端文本的**尾部**（最近发生了什么）并限长。
+ *
+ * 为什么只取尾部：实测一个终端缓冲区能有 46 万字符（整段 scrollback），
+ * 既没必要也不安全；用户此刻在做什么，全在最后几屏里。
+ *
+ * @param maxLines 最多保留的行数（默认 30）
+ * @param maxChars 最多保留的字符数（默认 1200）
+ */
+export function tailTerminalText(text: string, options?: { readonly maxLines?: number; readonly maxChars?: number }): string {
+  const maxLines = Math.max(1, options?.maxLines ?? 30);
+  const maxChars = Math.max(80, options?.maxChars ?? 1200);
+  const lines = (text ?? '').split('\n');
+  const tail = lines.slice(-maxLines).join('\n').trim();
+  if (tail.length <= maxChars) return tail;
+  return tail.slice(tail.length - maxChars).trim();
+}
+
 /** 当前是否能采集；不能时给出人类可读原因（UI 直接显示）。 */
 export function capturePermission(settings: PerceptionSettings): { allowed: boolean; reason: string } {
   if (settings.privacyMode) return { allowed: false, reason: '隐私模式开启中（一键停止一切采集）' };

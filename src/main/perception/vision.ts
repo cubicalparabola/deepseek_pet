@@ -97,12 +97,16 @@ export class VisionAnalyzer {
    *   传了就作为额外的一张图附在同一次请求里（多几十 token，但换来最可靠的网页线索）
    * @param windowContext 可选的**窗口上下文文本**（最上层窗口 + 打开的窗口列表）——
    *   这是比像素更具体的证据，直接以文本形式给出
+   * @param evidence 可选的**终端文本证据**（前台正好是终端时，从缓冲区尾部读到的真实文本）。
+   *   它是"终端里在跑什么"最可靠的一路；`forceSensitive` 表示文本里命中了敏感词、
+   *   调用方已经**整段拦下**，这次观察必须按私人内容处理。
    */
   public async analyzeScene(
     imageBase64: string,
     mimeType = 'image/jpeg',
     addressBar?: { readonly dataBase64: string; readonly mimeType: string } | null,
     windowContext?: string | null,
+    evidence?: { readonly terminalText: string | null; readonly forceSensitive: boolean } | null,
   ): Promise<SceneAnalysis | null> {
     const client = this.options.getClient();
     if (!client) return null;
@@ -123,6 +127,31 @@ export class VisionAnalyzer {
         parts.push({
           type: 'text',
           text: `另外，这是系统层面的窗口信息（比你从像素里猜的更可靠，请优先参考它来判断 app 与 scene）：\n${windowContext}`,
+        });
+      }
+      /*
+       * 终端文本：**最可靠的一路内容证据**。
+       *
+       * 为什么要给：终端整屏都是文字，整屏缩到 640 宽后字符只有几像素，模型读不出来
+       * 就只能顺着"黑底白字像代码"猜（用户实测的误判）。这段文本是从终端缓冲区尾部
+       * 真实读到的（只读 UIA，见 `terminal-text.ts`），判断"在终端里做什么"时以它为准。
+       *
+       * ⚠️ 两点约束都写进提示词：**不要复述原文**（命令、路径、参数）—— 我们只要"在做什么"；
+       * 也不必因为画面看不清就含糊（有文本就该说得准）。这一段**不引入任何兜底话**，
+       * `activity` 字段的规则不变。
+       */
+      const terminalText = evidence?.terminalText ?? '';
+      if (terminalText.trim() !== '') {
+        parts.push({
+          type: 'text',
+          text: [
+            '这是**最上层终端窗口里真实最近的输出**（从缓冲区尾部读到的文本，比从像素里认字可靠得多）：',
+            '```text',
+            terminalText,
+            '```',
+            '判断"用户在用终端做什么"时**以它为准**（不用再靠画面猜）。',
+            '只概括在做什么（例如"在跑验收脚本"、"在看 git 日志"），**不要复述里面的命令、路径、参数或任何像密钥的串**。',
+          ].join('\n'),
         });
       }
       const result = await client.complete({
@@ -176,8 +205,11 @@ export class VisionAnalyzer {
         // 两道闸：模型判定 + 关键词命中。
         // 关键词要扫 **app / activity / 网址 / 最上层窗口标题** —— 窗口标题恰恰是
         // 文档名出现的地方（"工资表.xlsx"），漏掉它就等于漏掉最该拦的一路。
+        // 第三道来自终端文本：那段文本命中敏感词时调用方会 `forceSensitive`
+        // （并且**已经把文本拦下不发了**），这里必须照样按私人内容处理。
         sensitive:
           modelSensitive ||
+          evidence?.forceSensitive === true ||
           matchesSensitiveKeywords(`${app} ${activity} ${storedUrl} ${foreground?.title ?? ''}`, keywords),
         focus: parsed?.focus === 'deep' || parsed?.focus === 'shallow' ? parsed.focus : 'unknown',
         summary: '',
@@ -212,6 +244,8 @@ export class VisionAnalyzer {
    * @param addressBar 可选的地址栏横条：有了网址，"在哪个网站做什么"会答得更准。
    *   与整屏一样，用完即弃。
    * @param windowContext 可选的窗口上下文文本（最上层窗口 + 打开的窗口列表）。
+   * @param terminalText 可选的终端文本证据（前台是终端时，缓冲区尾部的真实文本）——
+   *   只作为**证据**加进提示词；返回值仍然是自由文本，不引入任何契约或兜底话。
    */
   public async view(
     mode: PerceptionViewMode,
@@ -219,6 +253,7 @@ export class VisionAnalyzer {
     mimeType = 'image/jpeg',
     addressBar?: { readonly dataBase64: string; readonly mimeType: string } | null,
     windowContext?: string | null,
+    terminalText?: string | null,
   ): Promise<PerceptionViewResult> {
     const client = this.options.getClient();
     if (!client) {
@@ -241,6 +276,19 @@ export class VisionAnalyzer {
       }
       if (typeof windowContext === 'string' && windowContext.trim() !== '') {
         parts.push({ type: 'text', text: `系统层面的窗口信息（比你从像素里猜的更可靠）：\n${windowContext}` });
+      }
+      if (typeof terminalText === 'string' && terminalText.trim() !== '') {
+        parts.push({
+          type: 'text',
+          text: [
+            '这里是**最上层终端窗口里真实最近的输出**（从缓冲区尾部读到的）：',
+            '```text',
+            terminalText,
+            '```',
+            '回答时以它为准（终端里在跑什么，看它就不会猜错）；',
+            '但只概括在做什么，**不要复述里面的命令、路径、参数或任何像密钥的串**。',
+          ].join('\n'),
+        });
       }
       const result = await client.complete({
         messages: [

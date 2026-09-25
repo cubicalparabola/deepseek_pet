@@ -67,10 +67,15 @@ app.whenReady().then(async () => {
       hasAuth: !!document.getElementById('perception-camera-authorize'),
       hasView: !!document.getElementById('perception-view-scene'),
       hasLog: !!document.getElementById('perception-log-list'),
+      hasTerminalText: !!document.getElementById('perception-terminal-text'),
       mounted: !!document.querySelector('#perception-panel-root .perception-panel'),
     };
   })()`);
-  step('设置窗口的「环境与用户感知」面板已挂载', panel, panel.mounted && panel.sections >= 5 && panel.hasPrivacy && panel.hasAuth);
+  step(
+    '设置窗口的「环境与用户感知」面板已挂载（含终端文本开关）',
+    panel,
+    panel.mounted && panel.sections >= 5 && panel.hasPrivacy && panel.hasAuth && panel.hasTerminalText,
+  );
 
   /*
    * 2) + 3) **开关回显必须与主进程一致**。
@@ -134,8 +139,8 @@ app.whenReady().then(async () => {
   })()`);
   step(
     '面板：隐私模式一键停采（且状态由主进程回读驱动）',
-    privacy.after === true && privacy.capturing === false && privacy.viewRejected === true && privacy.restored === false,
     privacy,
+    privacy.after === true && privacy.capturing === false && privacy.viewRejected === true && privacy.restored === false,
   );
 
   /* 5) 摄像头授权：点按钮 -> 主进程状态变化 -> 撤销 */
@@ -183,8 +188,8 @@ app.whenReady().then(async () => {
   })()`);
   step(
     '面板：「看屏幕」在没配密钥时给出可读说明（不是错误码，按钮恢复可用）',
-    view.text.length > 0 && view.disabled === false && !/no-llm|NO_KEY/.test(view.text),
     view,
+    view.text.length > 0 && view.disabled === false && !/no-llm|NO_KEY/.test(view.text),
   );
 
   /* 7) 日志列表能刷新出来 */
