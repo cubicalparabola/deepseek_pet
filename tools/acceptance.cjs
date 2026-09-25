@@ -3129,6 +3129,52 @@ app.whenReady().then(async () => {
     JSON.stringify(closeUpSettings),
   );
   /*
+   * 「她不出现在自己的感知画面里」。
+   *
+   * `setContentProtection` 只挡**别的进程**的截屏；自家 `desktopCapturer` 照样截得到她
+   * （实测平均像素差 36，见 `tools/probe-self-capture.cjs`）。所以线上多了一步
+   * **把她的矩形涂掉**。这里钉两件可测的事：遮罩矩形按 DIP 换算正确（含越界夹取），
+   * 以及涂色函数真的只动那一块、其它像素一个不碰。
+   */
+  const selfMask = await run(`(() => {
+    const model = window.petDebug.perception;
+    const display = { width: 1536, height: 864 };
+    const image = { width: 1920, height: 1080 };
+    const rect = { x: 1296, y: 504, width: 216, height: 288 };
+    const maskRect = model.computeSelfMaskRect({ rect, display, image });
+    // 4x4 的小位图：涂中间 2x2，检查四角没被动过
+    const bitmap = new Uint8Array(4 * 4 * 4).fill(7);
+    const painted = model.fillBitmapRect(bitmap, { width: 4, height: 4 }, { x: 1, y: 1, width: 2, height: 2 }, { b: 1, g: 2, r: 3, a: 255 });
+    const at = (x, y) => Array.from(bitmap.slice((y * 4 + x) * 4, (y * 4 + x) * 4 + 4));
+    return {
+      maskRect,
+      outside: model.computeSelfMaskRect({ rect: { x: 9999, y: 9999, width: 100, height: 100 }, display, image }),
+      tiny: model.computeSelfMaskRect({ rect: { x: 10, y: 10, width: 4, height: 4 }, display, image }),
+      none: model.computeSelfMaskRect({ rect: null, display, image }),
+      painted,
+      corner: at(0, 0),
+      inside: at(1, 1),
+      clipped: model.computeSelfMaskRect({ rect: { x: -20, y: -20, width: 200, height: 200 }, display, image }),
+    };
+  })()`);
+  record(
+    '感知：桌宠自己从画面里被涂掉（setContentProtection 挡不住自家截图，实测过）',
+    selfMask.maskRect.x === 1620 &&
+      selfMask.maskRect.y === 630 &&
+      selfMask.maskRect.width === 270 &&
+      selfMask.maskRect.height === 360 &&
+      selfMask.clipped.x === 0 &&
+      selfMask.clipped.y === 0 &&
+      selfMask.outside === null &&
+      selfMask.tiny === null &&
+      selfMask.none === null &&
+      selfMask.painted === true &&
+      JSON.stringify(selfMask.corner) === JSON.stringify([7, 7, 7, 7]) &&
+      JSON.stringify(selfMask.inside) === JSON.stringify([1, 2, 3, 255]),
+    JSON.stringify(selfMask),
+  );
+
+  /*
    * 特写的裁剪矩形：这里是**坐标系容错**的关键（`GetWindowRect` 可能给逻辑坐标、
    * 也可能给物理像素），算错的后果是"裁到屏幕上不相干的一块"，比不裁更糟。
    * 三种情形都要钉死：逻辑坐标、物理坐标、两套都不像（→ 放弃这一路）。
