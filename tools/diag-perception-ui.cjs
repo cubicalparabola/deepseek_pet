@@ -73,7 +73,7 @@ app.whenReady().then(async () => {
   step('设置窗口的「环境与用户感知」面板已挂载', panel, panel.mounted && panel.sections >= 5 && panel.hasPrivacy && panel.hasAuth);
 
   /*
-   * 1.5) **开关回显必须与主进程一致**。
+   * 2) + 3) **开关回显必须与主进程一致**。
    *
    * 这条是"截图验收"抓出来的真实 bug：默认全开时面板上的复选框却是空的，
    * 状态行写着"正在采集" —— 自相矛盾的画面比功能坏了更伤信任。
@@ -111,7 +111,7 @@ app.whenReady().then(async () => {
     echo.itemCount === 4 && echo.duplicates.length === 0 && echo.withoutCheckbox === 0,
   );
 
-  /* 2) 隐私模式：点一下必须真的停采（读主进程状态确认） */
+  /* 4) 隐私模式：点一下必须真的停采（读主进程状态确认） */
   const privacy = await run(`(async () => {
     const box = document.getElementById('perception-privacy-mode');
     const before = await window.settingsAPI.perception.status();
@@ -138,7 +138,7 @@ app.whenReady().then(async () => {
     privacy,
   );
 
-  /* 3) 摄像头授权：点按钮 -> 主进程状态变化 -> 撤销 */
+  /* 5) 摄像头授权：点按钮 -> 主进程状态变化 -> 撤销 */
   const camera = await run(`(async () => {
     /*
      * 撤销授权在面板里会走 window.confirm 二次确认。
@@ -173,7 +173,7 @@ app.whenReady().then(async () => {
     camera,
   );
 
-  /* 4) 「看屏幕」按钮：没配密钥时要给出人话，不是空白/报错 */
+  /* 6) 「看屏幕」按钮：没配密钥时要给出人话，不是空白/报错 */
   const view = await run(`(async () => {
     const btn = document.getElementById('perception-view-scene');
     btn.click();
@@ -187,7 +187,7 @@ app.whenReady().then(async () => {
     view,
   );
 
-  /* 5) 日志列表能刷新出来 */
+  /* 7) 日志列表能刷新出来 */
   const log = await run(`(async () => {
     const btn = document.getElementById('perception-log-refresh');
     if (btn) { btn.click(); await new Promise((r) => setTimeout(r, 1200)); }
@@ -196,7 +196,7 @@ app.whenReady().then(async () => {
   })()`);
   step('面板：感知日志能列出来（可审计她看见了什么）', log, log.count >= 1);
 
-  /* 6) 场景纠正规则：面板上改完必须落到主进程（"浏览器被认成笔记软件"的兜底口子） */
+  /* 8) 场景纠正规则：面板上改完必须落到主进程（"浏览器被认成笔记软件"的兜底口子） */
   const fixes = await run(`(async () => {
     const before = await window.settingsAPI.perception.status();
     const input = document.getElementById('perception-scene-fixes');
@@ -218,7 +218,7 @@ app.whenReady().then(async () => {
     fixes.ok === true && fixes.after.includes('Chrome=browsing') && fixes.after.includes('MyWeirdApp=browsing'),
   );
 
-  /* 7) 窗口上下文：真机验证"最上层窗口 + 窗口列表"能读到（这是本轮新增的证据来源） */
+  /* 9) 窗口上下文：真机验证"最上层窗口 + 窗口列表"能读到（这是本轮新增的证据来源） */
   const windowCtx = await run(`(async () => {
     const before = await window.settingsAPI.perception.status();
     const sampled = await window.settingsAPI.perception.sampleNow();
@@ -237,7 +237,12 @@ app.whenReady().then(async () => {
     windowCtx.count >= 1 && windowCtx.foregroundTitle.length > 0 && windowCtx.backingOff === false,
   );
 
-  /* 8) 滚到感知面板并截图（肉眼验收排版） */
+  /*
+   * 截图：滚到感知面板，肉眼验收排版。
+   *
+   * ⚠️ 这一段**不是断言**，也没有包在 `step()` 里 —— 所以
+   * `build/perception-ui.json` 的 `steps.length` 是 9（9 个断言），截图排在它们之后。
+   */
   await run(`(() => {
     const target = document.getElementById('perception-panel-root');
     if (target) target.scrollIntoView({ block: 'start' });
