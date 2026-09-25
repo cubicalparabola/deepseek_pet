@@ -3262,7 +3262,7 @@ app.whenReady().then(async () => {
     palaceFile = { exists: false, bytes: 0 };
   }
   record(
-    '记忆宫殿：写成可读的 palace.md（时间轴 + 依据，用户可直接改）',
+    '记忆宫殿：写成可读的 palace.md（时间轴 + 依据的只读镜像）',
     palaceFile.exists === true && palaceFile.bytes > 40,
     `${palaceOps.markdownFile} bytes=${palaceFile.bytes}`,
   );

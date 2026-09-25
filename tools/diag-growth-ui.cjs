@@ -118,6 +118,32 @@ app.whenReady().then(async () => {
   })()`);
   step('记忆宫殿：点「让她回忆一下」有回应（状态行给出她说了什么）', recall, recall.ok === true && recall.disabled === false);
 
+  /* 3.5) 「钉住」-> 排到时间轴最前（这条曾经没有界面入口） */
+  const pinned = await run(`(async () => {
+    const status = await window.settingsAPI.growth.status();
+    const node = status.palace.nodes.find((item) => item.title === '一起过生日');
+    if (!node) return { ok: false, reason: 'node-missing' };
+    const button = document.getElementById('growth-pin-' + node.id);
+    if (!button) return { ok: false, reason: 'pin-button-missing' };
+    const before = status.palace.nodes[0]?.title ?? '';
+    button.click();
+    await new Promise((r) => setTimeout(r, 1400));
+    const after = await window.settingsAPI.growth.status();
+    const first = after.palace.nodes[0];
+    return {
+      ok: true,
+      before,
+      afterTitle: first ? first.title : '',
+      pinnedFlag: first ? first.pinned === true : false,
+      label: document.getElementById('growth-pin-' + node.id)?.textContent ?? '',
+    };
+  })()`);
+  step(
+    '记忆宫殿：点「钉住」把它排到时间轴最前（按钮文案随之变化）',
+    pinned,
+    pinned.ok === true && pinned.pinnedFlag === true && pinned.afterTitle === '一起过生日' && pinned.label.indexOf('取消') >= 0,
+  );
+
   /* 4) 删除（confirm 需要 stub） */
   const removed = await run(`(async () => {
     const nativeConfirm = window.confirm;
