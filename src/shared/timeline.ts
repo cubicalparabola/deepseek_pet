@@ -13,8 +13,6 @@ import { sceneLabel } from './perception';
 
 /** 两条观察最多间隔多久还算"同一段"（默认 90s = 3 倍采样间隔，容忍漏采一两次）。 */
 export const SEGMENT_GAP_MS = 90000;
-/** 一段短于这个时长就不单独成段（会并进相邻同场景段或丢掉）。 */
-export const MIN_SEGMENT_MINUTES = 1;
 
 /** 本地日期（`YYYY-MM-DD`）——跨天按用户时区切，不用 UTC。 */
 export function localDayOf(at: string | number | Date = Date.now()): string {
