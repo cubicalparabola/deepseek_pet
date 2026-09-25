@@ -660,7 +660,7 @@ export function mountGrowthPanel(root: HTMLElement, api: GrowthAPI, initial: Gro
     const detail = el('p', 'growth-memory-detail'); detail.textContent = node.detail.trim() === '' ? '（没有写下细节）' : node.detail;
 
     const actions = el('div', 'growth-actions');
-    actions.append(recallButton(node), removeButton(node));
+    actions.append(recallButton(node), pinButton(node), removeButton(node));
 
     card.append(emoji, head, detail);
     // 依据最多显示前 2 条：再多就不是"可核查"而是"流水账"了（依据来自对话原文，只进 textContent）
@@ -690,6 +690,25 @@ export function mountGrowthPanel(root: HTMLElement, api: GrowthAPI, initial: Gro
           return;
         }
         setPanelNote(`她想起了「${node.title}」：${text}`);
+      });
+    });
+    return button;
+  }
+
+  /**
+   * 「钉住 / 取消钉住」。
+   *
+   * 为什么要有这个按钮：`pinNode` 早就存在，但面板上只显示 📌 而没有入口 ——
+   * 想钉住某段经历只能手改 `nodes.json` 或自己调 IPC（文档评审抓到）。
+   * 钉住的节点会排在时间轴最前面，也就是"这段对我很重要"。
+   */
+  function pinButton(node: MemoryNode): HTMLButtonElement {
+    const button = makeButton(`growth-pin-${node.id}`, node.pinned ? '取消钉住' : '钉住', 'ghost');
+    button.addEventListener('click', () => {
+      withBusy(button, async () => {
+        const status = await withTimeout(api.pinNode(node.id, !node.pinned), REQUEST_TIMEOUT_MS, '钉住');
+        render(status);
+        flashNote(node.pinned ? '已取消钉住' : '已钉住（会排在时间轴最前面）');
       });
     });
     return button;
@@ -851,12 +870,15 @@ export function mountGrowthPanel(root: HTMLElement, api: GrowthAPI, initial: Gro
 
   palaceOpenButton.addEventListener('click', () => {
     withBusy(palaceOpenButton, async () => {
-      // 时间轴是只读镜像：用户也可以直接编辑 palace.md（删掉某段她就不再提它了）
+      /*
+       * ⚠️ `palace.md` 是 `nodes.json` 的**只读镜像**：想删某段经历必须在时间轴上点删除，
+       * 直接编辑 md 不会改变她记住的内容（这条说明早期写反了，文档评审抓到）。
+       */
       if (!(await api.openPalace())) {
         setPanelError('打开记忆宫殿文件失败');
         return;
       }
-      setPanelNote('已打开记忆宫殿文件（可以直接编辑）');
+      setPanelNote('已打开记忆宫殿文件（只读镜像；要改内容请在上面的时间轴上操作）');
     });
   });
 

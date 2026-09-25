@@ -19,7 +19,7 @@
  * 结果：build/acceptance.json
  */
 const { app, BrowserWindow } = require('electron');
-const { writeFileSync, mkdirSync, readFileSync, rmSync, readdirSync } = require('node:fs');
+const { writeFileSync, mkdirSync, readFileSync, rmSync, readdirSync, existsSync } = require('node:fs');
 const { join } = require('node:path');
 const { tmpdir } = require('node:os');
 

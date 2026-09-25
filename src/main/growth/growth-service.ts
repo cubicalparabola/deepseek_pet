@@ -106,6 +106,10 @@ export class GrowthService {
     this.nodes = [...loaded.nodes];
     this.policy = loaded.policy;
 
+    // `keepReflectionDays` 要真的生效：把超期的反思与反馈流水归档删掉（默认 180 天）。
+    // 之前这个设置只存在于类型与面板里，属于"面板承诺了但代码没做"（文档评审抓到）。
+    this.pruneOldReflections();
+
     // 第一次见面节点：装上她就该有一笔"起点"（用户可以在设置里改日期）
     if (this.settings.palace && !this.nodes.some((node) => node.kind === 'first-meet')) {
       this.addDrafts([
@@ -130,6 +134,15 @@ export class GrowthService {
   public dispose(): void {
     if (this.timer !== null) clearInterval(this.timer);
     this.timer = null;
+  }
+
+  /** 按 `keepReflectionDays` 清理超期反思（启动时一次；反思关掉时不动它的目录）。 */
+  private pruneOldReflections(now: number = Date.now()): void {
+    if (!this.settings.reflection) return;
+    const removed = this.store.pruneReflections(this.settings.keepReflectionDays, now);
+    if (removed > 0) {
+      this.store.logPolicyAdjustment([`按保留天数（${this.settings.keepReflectionDays} 天）清理了 ${removed} 个超期反思文件`], this.policy);
+    }
   }
 
   /** 每分钟检查：反馈窗口到期 + 到点反思 + 补写昨天。 */
@@ -263,8 +276,15 @@ export class GrowthService {
     this.emitStatus();
   }
 
-  /** 手动记一笔。 */
+  /** 手动记一笔（开关关掉时不写盘，并明确告诉用户为什么）。 */
   public addNode(input: { kind: MemoryNodeKind; title: string; detail: string }, now: number = Date.now()): GrowthStatus {
+    if (!this.settings.palace) {
+      // 与其它模块保持一致：开关关掉 = 不写盘。但**必须给出理由**，
+      // 否则用户点"保存"没反应会以为是坏的。
+      this.lastError = '记忆宫殿开关已关闭，这一笔没有写进去（设置 → 成长与反思）。';
+      this.emitStatus();
+      return this.status();
+    }
     const kind: MemoryNodeKind = (Object.keys(NODE_KINDS) as MemoryNodeKind[]).includes(input.kind) ? input.kind : 'manual';
     const title = input.title.trim().slice(0, 120);
     if (title === '') return this.status();
@@ -380,6 +400,12 @@ export class GrowthService {
    * 任何一步失败都只记 lastError，不让主进程受影响。
    */
   public async reflect(date: string, now: number = Date.now()): Promise<ReflectionEntry> {
+    if (!this.settings.reflection) {
+      // 开关关掉 = 不写反思文件（手动点"立刻反思"也一样，并给出理由）
+      this.lastError = '自我反思开关已关闭，这次没有写（设置 → 成长与反思）。';
+      this.emitStatus();
+      return this.store.readReflection(date) ?? this.emptyReflection(date);
+    }
     if (this.busy) {
       // 已经有一次在跑：等它写完再返回已存在的结果
       await new Promise((resolve) => setTimeout(resolve, 300));
@@ -560,7 +586,9 @@ export class GrowthService {
     const palace = {
       nodes: this.nodes,
       byMonth: groupByMonth(this.nodes),
-      updatedAt: this.store.getSettings().firstMeetAt,
+      // 最近一段经历的时间（不是"配置里的第一次见面日期" —— 那样会让 UI 显示一个
+      // 与内容无关的时间；这里用时间轴最新的一条）
+      updatedAt: this.nodes[0]?.at ?? '',
       dataDir: this.store.memoryDir,
       markdownFile: this.store.palacePath,
       stats: {

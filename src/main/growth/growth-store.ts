@@ -15,7 +15,7 @@
  * 所以每次调整都要留痕，并且能一键重置（见 GrowthService.resetPolicy）。
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type {
   GrowthSettings,
@@ -116,6 +116,44 @@ export class GrowthStore {
       this.policy.maxPerHourFactor === 1 &&
       Object.keys(this.policy.sceneFactors).length === 0
     );
+  }
+
+  /** 每条反思的保留天数（默认 180）—— 让 `keepReflectionDays` 真的起作用。 */
+  public readonly keepReflectionDays: number = 180;
+
+  /**
+   * 删掉超期的反思与反馈流水。
+   *
+   * 为什么敢删：反思是"当天感想"，长期价值已经在记忆宫殿的节点里沉淀过了；
+   * 留一堆 JSON 只会让目录越来越乱。归档动作会写进策略日志（可追溯到"哪几天被清了"）。
+   */
+  public pruneReflections(keepDays: number, now: number = Date.now()): number {
+    // 目录还不存在（从未反思过）就直接返回：这不是错误，不该在日志里刷一条
+    if (!existsSync(this.reflectionDir)) return 0;
+    const cutoff = new Date(now - Math.max(7, keepDays) * 86400000);
+    let removed = 0;
+    try {
+      for (const file of readdirSync(this.reflectionDir)) {
+        const matched = /^(\d{4}-\d{2}-\d{2})\.(json|md)$/.exec(file);
+        const day = matched?.[1];
+        if (!day) continue;
+        if (new Date(`${day}T00:00:00`).getTime() >= cutoff.getTime()) continue;
+        rmSync(join(this.reflectionDir, file), { force: true });
+        removed += 1;
+      }
+      for (const file of readdirSync(this.reflectionDir)) {
+        const matched = /^feedback-(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(file);
+        const day = matched?.[1];
+        if (!day) continue;
+        if (new Date(`${day}T00:00:00`).getTime() >= cutoff.getTime()) continue;
+        rmSync(join(this.reflectionDir, file), { force: true });
+        removed += 1;
+      }
+    } catch (error) {
+      this.logger.debug('pruning reflections failed', { error: describeError(error) });
+    }
+    if (removed > 0) this.logger.info('old reflections pruned', { data: { removed, keepDays } });
+    return removed;
   }
 
   /* ------------------------------------------------------------------ */

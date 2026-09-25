@@ -286,7 +286,9 @@ export function renderPalaceMarkdown(nodes: readonly MemoryNode[], daysTogether:
     '# 🧠 鲸鱼娘的记忆宫殿',
     '',
     `> 我们已经一起经历了 ${daysTogether} 天，这里有 ${nodes.length} 段被记下的经历。`,
-    '> 这份文件由桌宠自动维护，也可以直接编辑（删掉某段她就不再提它了）。',
+    '>',
+    '> ⚠️ 这份文件是**只读镜像**（由 nodes.json 生成）：直接编辑它**不会**改变她记住的内容。',
+    '> 想删掉某段经历，请在设置窗口的「记忆宫殿」里点删除，或编辑 `memory/nodes.json`。',
     '',
   ];
   let currentMonth = '';
