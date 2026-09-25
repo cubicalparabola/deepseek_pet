@@ -23,15 +23,6 @@ import { normalizeWindowTitle } from '../../shared/perception';
 export interface WindowSnapshot {
   /** 最上层（前台）窗口。 */
   readonly foreground: { readonly title: string; readonly process: string } | null;
-  /**
-   * 最上层窗口的屏幕矩形（用于截"窗口特写"，见 `ScreenCapture.grabWindowCloseUp`）。
-   *
-   * ⚠️ 坐标系：`powershell.exe` 默认是 **DPI 不感知** 的，`GetWindowRect` 返回的是
-   * Windows **虚拟化后的逻辑坐标**（＝Electron 的 DIP，通常在主屏上能直接对上）；
-   * 但也有环境会返回物理像素。所以这里**原样存下来**，由截图侧按"哪套坐标能用"判断
-   * （见 `grabWindowCloseUp` 里的容错），不在这一层猜。
-   */
-  readonly foregroundRect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | null;
   /** 可见的顶层窗口（按 Z 序，前台通常在最前）。 */
   readonly windows: readonly { readonly title: string; readonly process: string; readonly foreground: boolean }[];
   /** 这次枚举的时间（epoch ms）。 */
@@ -52,7 +43,7 @@ export interface WindowContextOptions {
   readonly failureBackoffMs?: number;
 }
 
-/** PowerShell 脚本（EnumWindows + 进程名 + 前台标记 + 前台窗口矩形，一次性输出 JSON）。 */
+/** PowerShell 脚本（EnumWindows + 进程名 + 前台标记，一次性输出 JSON）。 */
 const SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 # 必须显式设 UTF-8：中文窗口标题否则会以 GBK 写进 stdout（实测踩过）
@@ -64,15 +55,12 @@ using System.Runtime.InteropServices;
 using System.Text;
 public class PetWinEnum {
   public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
-  [StructLayout(LayoutKind.Sequential)]
-  public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
   public static List<string> Rows() {
     var list = new List<string>();
     EnumWindows((h, l) => {
@@ -92,16 +80,9 @@ public class PetWinEnum {
     uint pid; GetWindowThreadProcessId(h, out pid);
     return (long)pid;
   }
-  public static int[] ForegroundRect() {
-    var h = GetForegroundWindow();
-    RECT r;
-    if (h == IntPtr.Zero || !GetWindowRect(h, out r)) return new int[] { 0, 0, 0, 0 };
-    return new int[] { r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top };
-  }
 }
 "@
 $fg = [PetWinEnum]::Foreground()
-$fgr = [PetWinEnum]::ForegroundRect()
 $items = @()
 foreach ($row in [PetWinEnum]::Rows()) {
   $parts = $row.Split('|', 2)
@@ -112,15 +93,7 @@ foreach ($row in [PetWinEnum]::Rows()) {
     foreground = ([int]$parts[0] -eq $fg)
   }
 }
-# 输出结构：{ foreground: { pid, rect }, windows: [...] }
-# Depth 必须给够：默认 2 会把 rect 压成字符串
-[ordered]@{
-  foreground = [ordered]@{
-    pid = $fg
-    rect = [ordered]@{ x = $fgr[0]; y = $fgr[1]; width = $fgr[2]; height = $fgr[3] }
-  }
-  windows = $items
-} | ConvertTo-Json -Compress -Depth 5
+$items | ConvertTo-Json -Compress
 `;
 
 export class WindowContextProbe {
@@ -155,21 +128,7 @@ export class WindowContextProbe {
     try {
       const stdout = await runPowerShell(SCRIPT, this.options.timeoutMs ?? 8000);
       const parsed = JSON.parse(stdout.trim() === '' ? '[]' : stdout.trim()) as unknown;
-      /*
-       * 兼容三种形状（PowerShell 的 `ConvertTo-Json` 在单元素时会把数组压成对象，
-       * 而老版本脚本只输出一个裸数组）：
-       *   { foreground:{pid,rect}, windows:[...] }（现在的形状）
-       *   [ {...}, ... ]（老形状：只有窗口列表）
-       *   {...}（单个窗口被压成对象）
-       */
-      const rows = Array.isArray(parsed)
-        ? parsed
-        : typeof parsed === 'object' && parsed !== null && Array.isArray((parsed as Record<string, unknown>).windows)
-          ? ((parsed as Record<string, unknown>).windows as unknown[])
-          : typeof parsed === 'object' && parsed !== null && typeof (parsed as Record<string, unknown>).windows === 'object'
-            ? [((parsed as Record<string, unknown>).windows as unknown)]
-            : [parsed];
-      const foregroundRect = parseForegroundRect(parsed);
+      const rows = Array.isArray(parsed) ? parsed : [parsed];
       const windows = rows
         .map((row) => {
           if (typeof row !== 'object' || row === null) return null;
@@ -184,19 +143,13 @@ export class WindowContextProbe {
       const foregroundRow = windows.find((item) => item.foreground) ?? windows[0] ?? null;
       this.snapshot = {
         foreground: foregroundRow ? { title: foregroundRow.title, process: foregroundRow.process } : null,
-        foregroundRect,
         windows,
         at: Date.now(),
         fresh: true,
       };
       this.lastFailure = '';
       this.logger.debug('window context probed', {
-        data: {
-          windows: windows.length,
-          foreground: foregroundRow?.process ?? '',
-          rect: foregroundRect ? `${foregroundRect.width}x${foregroundRect.height}@${foregroundRect.x},${foregroundRect.y}` : 'none',
-          elapsedMs: Date.now() - startedAt,
-        },
+        data: { windows: windows.length, foreground: foregroundRow?.process ?? '', elapsedMs: Date.now() - startedAt },
       });
       return this.snapshot;
     } catch (error) {
@@ -218,34 +171,6 @@ export class WindowContextProbe {
   public get backingOff(): boolean {
     return Date.now() < this.failedUntil;
   }
-}
-
-/**
- * 从 PowerShell 输出里取最上层窗口的矩形。
- *
- * 只接受"看起来合法"的矩形：宽高必须为正且不超过 32K（脏数据一律当没有，
- * 让截图侧安静地跳过这一路，而不是拿一个乱七八糟的矩形去裁图）。
- */
-function parseForegroundRect(
-  parsed: unknown,
-): { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | null {
-  if (typeof parsed !== 'object' || parsed === null) return null;
-  const foreground = (parsed as Record<string, unknown>).foreground;
-  if (typeof foreground !== 'object' || foreground === null) return null;
-  const rect = (foreground as Record<string, unknown>).rect;
-  if (typeof rect !== 'object' || rect === null) return null;
-  const record = rect as Record<string, unknown>;
-  const value = (raw: unknown): number | null => {
-    const number = typeof raw === 'number' ? raw : Number(raw);
-    return Number.isFinite(number) ? Math.round(number) : null;
-  };
-  const x = value(record.x);
-  const y = value(record.y);
-  const width = value(record.width);
-  const height = value(record.height);
-  if (x === null || y === null || width === null || height === null) return null;
-  if (width < 120 || height < 80 || width > 32768 || height > 32768) return null;
-  return { x, y, width, height };
 }
 
 /** 跑一次 PowerShell 并返回 stdout（UTF-8）。 */

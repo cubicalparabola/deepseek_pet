@@ -120,8 +120,6 @@ export class PerceptionService {
   private lastIntervention: PerceptionStatus['lastIntervention'] = null;
   private interventionTimes: number[] = [];
   private lastError = '';
-  /** 最近一次真的截到"窗口特写"的尺寸与时间（状态里给面板/验收看）。 */
-  private lastCloseUp: PerceptionStatus['lastCloseUp'] = null;
   private cameraReady = false;
   /** 摄像头上次失败的时间（0 = 没失败过）；失败后按 CAMERA_RETRY_MS 退避重试。 */
   private cameraFailedAt = 0;
@@ -235,8 +233,6 @@ export class PerceptionService {
       app: foreground.process.slice(0, 60),
       activity: refined.reason.slice(0, 120),
       sensitive: false,
-      // 本地路径只有窗口标题，**看不见画面内容**：内容一律不落（readable=false 的含义）
-      readable: false,
       focus: 'unknown',
       summary: '',
       suggestion: '',
@@ -436,14 +432,7 @@ export class PerceptionService {
       if (frame) {
         // 地址栏横条：与整屏同一轮截取，只为让模型读出网址（读不到就整条不传）
         const addressBar = await this.capture.grabAddressBar();
-        /*
-         * 最上层窗口的**特写**：终端/编辑器整屏都是文字，整屏缩到 640 宽读不出来，
-         * 模型就只好猜（用户实测："终端里在跑什么"她瞎说）。按原分辨率补一张窗口特写，
-         * 文字才真的可读；拿不准的内容她不许回答（见 vision 的 contentReadable 闸门）。
-         */
-        const closeUp = await this.capture.grabWindowCloseUp(this.windows.current()?.foregroundRect ?? null);
-        if (closeUp) this.lastCloseUp = { at: new Date(now).toISOString(), width: closeUp.width, height: closeUp.height };
-        const analysis = await this.vision.analyzeScene(frame.dataBase64, frame.mimeType, addressBar, windowContext, closeUp);
+        const analysis = await this.vision.analyzeScene(frame.dataBase64, frame.mimeType, addressBar, windowContext);
         if (analysis) {
           observation = analysis.observation;
           this.lastObservation = observation;
@@ -452,8 +441,7 @@ export class PerceptionService {
           const label =
             `${sceneLabel(observation.scene)}${observation.app ? `（${observation.app}）` : ''}` +
             `${observation.url ? ` ${observation.url}` : ''}` +
-            `${observation.sensitive ? ' · 判定为私人内容' : ''}` +
-            `${observation.readable ? '' : ' · 内容未看清（只做分类）'}`;
+            `${observation.sensitive ? ' · 判定为私人内容' : ''}`;
           this.store.recordObservation(observation, label);
           if (this.settings.habits) {
             this.habits = learnHabit(this.habits, observation);
@@ -534,10 +522,7 @@ export class PerceptionService {
     const addressBar = await this.capture.grabAddressBar();
     // 按需"立刻看一次"要拿最新的窗口信息（并顺手刷新缓存）
     const windowContext = await this.windowContextText(true);
-    // 与周期采样同一条证据：最上层窗口的原分辨率特写（终端里的字靠它才读得清）
-    const closeUp = await this.capture.grabWindowCloseUp(this.windows.current()?.foregroundRect ?? null);
-    if (closeUp) this.lastCloseUp = { at: new Date().toISOString(), width: closeUp.width, height: closeUp.height };
-    const result = await this.vision.view(mode, frame.dataBase64, frame.mimeType, addressBar, windowContext, closeUp);
+    const result = await this.vision.view(mode, frame.dataBase64, frame.mimeType, addressBar, windowContext);
     if (result.ok) {
       this.store.log('observation', `「${viewModeLabel(mode)}」结果：${result.text.slice(0, 80)}`);
     }
@@ -656,11 +641,9 @@ export class PerceptionService {
           foregroundTitle: snapshot?.foreground?.title ?? '',
           foregroundProcess: snapshot?.foreground?.process ?? '',
           sample: list.slice(0, 5).map((item) => `${item.title}（${item.process || '未知'}）`),
-          foregroundRect: snapshot?.foregroundRect ?? null,
           backingOff: this.windows.backingOff,
         };
       })(),
-      lastCloseUp: this.lastCloseUp,
       dataDir: this.store.dataDir,
       lastError: this.lastError,
     };
@@ -680,7 +663,7 @@ export class PerceptionService {
       items.push({
         at: observation.at,
         kind: 'observation',
-        text: `${sceneLabel(observation.scene)}${observation.app ? `（${observation.app}）` : ''} ${observation.activity}${observation.readable ? '' : '（内容未看清）'}`.trim(),
+        text: `${sceneLabel(observation.scene)}${observation.app ? `（${observation.app}）` : ''} ${observation.activity}`.trim(),
       });
     }
     if (this.lastIntervention) {

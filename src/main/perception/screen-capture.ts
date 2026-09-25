@@ -10,12 +10,10 @@
  *    按 `display_id` 匹配主屏，匹配不上才退回第一个。
  * 3. **图像只在内存里存在一次调用**：本函数返回 base64 给视觉客户端，
  *    调用方用完即弃；磁盘上永远没有截图（见 observation-store 的说明）。
- *    **整屏、地址栏横条、窗口特写三类图都遵守这一条**。
  */
 
 import { desktopCapturer, screen } from 'electron';
 import type { PerceptionSettings } from '../../shared/perception-types';
-import { computeCloseUpCrop } from '../../shared/perception';
 import type { Logger } from '../../shared/logger';
 import { describeError } from '../../shared/errors';
 
@@ -138,89 +136,6 @@ export class ScreenCapture {
       };
     } catch (error) {
       this.logger.debug('address bar capture failed', { error: describeError(error) });
-      return null;
-    }
-  }
-
-  /**
-   * 截一张**最上层窗口的特写**（按原分辨率截，再裁到窗口区域）。
-   *
-   * 为什么需要：终端、编辑器这类窗口**整屏都是文字**，缩到 640 宽之后字符只有几像素，
-   * 视觉模型读不出来就只能"看着像代码"来猜 —— 用户实测到的误判（她瞎说终端里在干什么）
-   * 就是这么来的。把窗口那一块**按原分辨率**截下来单独给模型，文字才真的可读；
-   * 拿不准的内容就不许她回答（见 `gateUnreadableContent` 与提示词里的 `contentReadable`）。
-   *
-   * 坐标容错：`GetWindowRect` 来自 DPI 不感知的 PowerShell，多数情况下是**逻辑坐标**
-   * （与 Electron 的 DIP 同一套），但有的环境会给物理像素。这里按"哪套能落在屏幕内"
-   * 判断，两套都不像就直接放弃这一路（宁可没有特写，也不要裁错地方）。
-   *
-   * 这张图与整屏、地址栏横条一样：**只在本次请求的内存里活一次，永不落盘**。
-   *
-   * @param rect 最上层窗口矩形（来自 `WindowContextProbe`）；为空则返回 null
-   */
-  public async grabWindowCloseUp(
-    rect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | null,
-  ): Promise<CaptureResult | null> {
-    const settings = this.options.getSettings();
-    if (!settings.windowCloseUp || !rect) return null;
-    const startedAt = Date.now();
-    try {
-      const primary = screen.getPrimaryDisplay();
-      const displayWidth = primary.size.width;
-      const displayHeight = primary.size.height;
-      if (displayWidth <= 0 || displayHeight <= 0) return null;
-
-      /*
-       * 按**原分辨率**请求缩略图：这是"看得清文字"的前提。
-       * 上限用物理分辨率——再大也不会多出信息，只是白花时间和内存。
-       */
-      const scaleFactor = primary.scaleFactor > 0 ? primary.scaleFactor : 1;
-      const physicalWidth = Math.max(640, Math.round(displayWidth * scaleFactor));
-      const physicalHeight = Math.max(360, Math.round(displayHeight * scaleFactor));
-      const sources = await desktopCapturer.getSources({
-        types: ['screen'],
-        thumbnailSize: { width: physicalWidth, height: physicalHeight },
-        fetchWindowIcons: false,
-      });
-      const source = sources.find((item) => String(item.display_id) === String(primary.id)) ?? sources[0];
-      if (!source) return null;
-      let image = source.thumbnail;
-      if (image.isEmpty()) return null;
-
-      /*
-       * 裁剪矩形交给纯函数算（坐标系判断 + 夹取 + 太小就放弃），
-       * 它的三种情形都被验收逐条断言过（见 computeCloseUpCrop）。
-       */
-      const full = image.getSize();
-      const crop = computeCloseUpCrop({
-        rect,
-        display: { width: displayWidth, height: displayHeight },
-        scaleFactor,
-        image: { width: full.width, height: full.height },
-      });
-      if (!crop) {
-        this.logger.debug('window close-up skipped (rect unusable for this screen space)', { data: { rect } });
-        return null;
-      }
-
-      image = image.crop(crop);
-      if (image.isEmpty()) return null;
-
-      const targetWidth = Math.max(480, Math.min(2560, Math.round(settings.windowCloseUpWidth)));
-      if (image.getSize().width > targetWidth) {
-        image = image.resize({ width: targetWidth, quality: 'good' });
-      }
-      const jpeg = image.toJPEG(78);
-      const finalSize = image.getSize();
-      return {
-        dataBase64: jpeg.toString('base64'),
-        mimeType: 'image/jpeg',
-        width: finalSize.width,
-        height: finalSize.height,
-        elapsedMs: Date.now() - startedAt,
-      };
-    } catch (error) {
-      this.logger.debug('window close-up capture failed', { error: describeError(error) });
       return null;
     }
   }

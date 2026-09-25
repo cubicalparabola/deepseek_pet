@@ -54,11 +54,9 @@ import {
   URL_SCENE_RULES,
   appKind,
   capturePermission,
-  computeCloseUpCrop,
   describeWindowContext,
   emptyHabitProfile,
   gateIntervention,
-  gateUnreadableContent,
   habitPredictionText,
   inferUserState,
   isLateNight,
@@ -79,7 +77,6 @@ import {
   safeHost,
   sceneLabel,
   topSceneAtHour,
-  UNREADABLE_VIEW_TEXT,
   withoutOwnWindows,
 } from '../shared/perception';
 import { createLoggerFactory } from '../shared/logging';
@@ -1138,11 +1135,6 @@ class PetApplication {
       readonly describeWindowContext: typeof describeWindowContext;
       readonly withoutOwnWindows: typeof withoutOwnWindows;
       readonly BROWSER_APPS: typeof BROWSER_APPS;
-      /** 读不清就不许回答内容的闸门（用户要求："不确定的别回答"）。 */
-      readonly gateUnreadableContent: typeof gateUnreadableContent;
-      readonly UNREADABLE_VIEW_TEXT: typeof UNREADABLE_VIEW_TEXT;
-      /** 窗口特写的裁剪矩形（坐标系容错那块的风险最高，所以单独断言）。 */
-      readonly computeCloseUpCrop: typeof computeCloseUpCrop;
     };
     readonly perceptionStatus: () => Promise<PerceptionStatus | null>;
     /**
@@ -1232,9 +1224,6 @@ class PetApplication {
         describeWindowContext,
         withoutOwnWindows,
         BROWSER_APPS,
-        gateUnreadableContent,
-        UNREADABLE_VIEW_TEXT,
-        computeCloseUpCrop,
       },
       perceptionStatus: async () => {
         const bridge = this.runtime.perception();

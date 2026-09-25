@@ -14,7 +14,6 @@ const { join } = require('node:path');
 const { tmpdir } = require('node:os');
 
 const root = join(__dirname, '..');
-const { guardSingleInstance } = require('./lib/instance-guard.cjs');
 const dataDir = join(tmpdir(), 'desktop-pet-shot-data');
 process.env.DESKTOP_PET_AI_DATA_DIR = dataDir;
 try { rmSync(dataDir, { recursive: true, force: true }); } catch (error) { /* 忽略 */ }
@@ -22,8 +21,6 @@ mkdirSync(dataDir, { recursive: true });
 
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
-// 没有这一步：已有实例时 require(main.js) 会静默 app.quit()，截图会保持上一次的旧文件
-guardSingleInstance(app);
 require(join(root, 'dist', 'main', 'main.js'));
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));

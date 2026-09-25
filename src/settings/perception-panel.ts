@@ -214,9 +214,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   const dataDirReadout = makeReadout('数据目录');
   // 窗口上下文（"开着什么 / 最上层是哪个"）：判断"在用哪个应用"最具体的一路证据
   const windowReadout = makeReadout('窗口上下文');
-  // 窗口特写（终端/编辑器里的字靠它才读得清）：只在调模型那一轮才截，所以要留读数
-  const closeUpReadout = makeReadout('窗口特写');
-  for (const readout of [captureReadout, observationReadout, windowReadout, closeUpReadout, behaviorReadout, userStateReadout,
+  for (const readout of [captureReadout, observationReadout, windowReadout, behaviorReadout, userStateReadout,
     presenceReadout, interventionsReadout, quietReadout, lastErrorReadout, dataDirReadout]) {
     statusSection.appendChild(readout.row);
   }
@@ -365,26 +363,6 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   windowTtlInput.step = '5000';
   samplingSection.appendChild(fieldRow('perception-window-probe-ttl-ms', '窗口信息缓存（毫秒）', windowTtlInput,
     '默认 25000：窗口变化慢，没必要每次采样都重新枚举（枚举约 0.5 秒）。'));
-
-  /*
-   * 窗口特写：把最上层窗口那块**按原分辨率**再截一张给模型。
-   *
-   * 为什么需要：终端、编辑器整屏都是文字，整屏缩到 640 宽后字符只有几像素，
-   * 模型读不出来就只能"看着像代码"猜 —— 用户实测的误判就是这个原因。
-   * 代价是每轮多一张图（token 变多），所以给一个开关和宽度上限；
-   * 读不清时她**不许回答内容**（观察记录里会写"内容未看清"）。
-   */
-  const windowCloseUpInput = makeCheckbox('perception-window-close-up', '额外截「窗口特写」');
-  samplingSection.appendChild(checkRow(
-    '额外截「最上层窗口特写」（原分辨率截窗口那块，终端/编辑器里的文字才读得清；每轮多一张图）',
-    windowCloseUpInput,
-  ));
-  const windowCloseUpWidthInput = makeInput('number', 'perception-window-close-up-width', '窗口特写宽度');
-  windowCloseUpWidthInput.min = '480';
-  windowCloseUpWidthInput.max = '2560';
-  windowCloseUpWidthInput.step = '160';
-  samplingSection.appendChild(fieldRow('perception-window-close-up-width', '窗口特写宽度（像素）', windowCloseUpWidthInput,
-    '默认 1280。看不清终端里的字就调大（最多 2560）；这张图同样只在当次请求里用一次，不落盘。'));
 
   const cameraIntervalInput = makeInput('number', 'perception-camera-interval-ms', '摄像头采样间隔（毫秒）');
   cameraIntervalInput.min = '10000';
@@ -630,21 +608,6 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
         ? 'perception-readout-value perception-error-text' : 'perception-readout-value';
     }
 
-    /*
-     * 窗口特写：她"看清了吗"的另一半证据。
-     * 注意 `readable === false` 的观察是**正常的**（内容没看清、只做分类），
-     * 不是错误，所以只用弱化样式，不标红。
-     */
-    const closeUp = status.lastCloseUp;
-    if (closeUp === null) {
-      closeUpReadout.value.textContent = settings.windowCloseUp ? '还没截过（调模型时才截）' : '已关闭';
-      closeUpReadout.value.className = 'perception-readout-value perception-value-muted';
-    } else {
-      closeUpReadout.value.textContent = `${formatClock(closeUp.at)} · ${closeUp.width}×${closeUp.height}`
-        + (observation && !observation.readable ? '（这次内容没看清，只做分类）' : '');
-      closeUpReadout.value.className = 'perception-readout-value';
-    }
-
     behaviorReadout.value.textContent = `空闲 ${behavior.idleSeconds} 秒 · 本次连续 ${behavior.sessionMinutes} 分钟`
       + ` · 近一小时切换 ${behavior.switchesLastHour} 次`;
     userStateReadout.value.textContent = `${USER_STATE_LABELS[behavior.userState]}（${behavior.userState}）`
@@ -770,8 +733,6 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     setValue(windowLimitInput, String(settings.windowListLimit));
     setValue(windowTtlInput, String(settings.windowProbeTtlMs));
     if (!editing(windowContextInput)) windowContextInput.checked = settings.windowContext;
-    setValue(windowCloseUpWidthInput, String(settings.windowCloseUpWidth));
-    if (!editing(windowCloseUpInput)) windowCloseUpInput.checked = settings.windowCloseUp;
     setValue(cameraIntervalInput, String(settings.cameraIntervalMs));
     setValue(proactiveMinInput, String(settings.proactiveMinIntervalMs));
     setValue(proactiveMaxInput, String(settings.proactiveMaxPerHour));
@@ -881,7 +842,6 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     // 先读一遍只用来判断"有没有空/非数字"，错误提示要具体到这一步
     const fields = [
       numberValue(intervalInput), numberValue(widthInput), numberValue(urlWidthInput), numberValue(cameraIntervalInput),
-      numberValue(windowCloseUpWidthInput),
       numberValue(proactiveMinInput), numberValue(proactiveMaxInput), numberValue(longSessionInput),
       numberValue(lateNightInput), numberValue(quietStartInput), numberValue(quietEndInput),
     ];
@@ -894,7 +854,6 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     const ms = numberValue(intervalInput) ?? 0;
     const px = numberValue(widthInput) ?? 0;
     const urlPx = numberValue(urlWidthInput) ?? 0;
-    const closeUpPx = numberValue(windowCloseUpWidthInput) ?? 0;
     const winLimit = numberValue(windowLimitInput) ?? 0;
     const winTtl = numberValue(windowTtlInput) ?? 0;
     const camMs = numberValue(cameraIntervalInput) ?? 0;
@@ -913,8 +872,6 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
       windowContext: windowContextInput.checked,
       windowListLimit: clampInt(winLimit, 1, 24),
       windowProbeTtlMs: clampInt(winTtl, 5000, 600000),
-      windowCloseUp: windowCloseUpInput.checked,
-      windowCloseUpWidth: clampInt(closeUpPx, 480, 2560),
       cameraIntervalMs: clampInt(camMs, 10000, 3600000),
       proactiveMinIntervalMs: clampInt(proactiveMin, 60000, 86400000),
       proactiveMaxPerHour: clampInt(proactiveMax, 0, 60),
@@ -939,8 +896,6 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     { control: habitsInput, apply: (checked) => ({ habits: checked }) },
     { control: privacyInput, apply: (checked) => ({ privacyMode: checked }) },
     { control: hideInput, apply: (checked) => ({ hideFromCapture: checked }) },
-    // 窗口特写影响"她能不能看清内容"，勾选就立即生效（宽度那个数字框仍走"保存"）
-    { control: windowCloseUpInput, apply: (checked) => ({ windowCloseUp: checked }) },
   ];
 
   /**

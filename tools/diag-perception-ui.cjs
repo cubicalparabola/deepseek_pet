@@ -16,7 +16,6 @@ const { tmpdir } = require('node:os');
 
 const root = join(__dirname, '..');
 const outFile = join(root, 'build', 'perception-ui.json');
-const { guardSingleInstance } = require('./lib/instance-guard.cjs');
 
 /* 数据目录隔离：这个工具会改感知配置，不能污染用户真实设置 */
 const dataDir = join(tmpdir(), 'desktop-pet-diag-perception');
@@ -26,12 +25,6 @@ mkdirSync(dataDir, { recursive: true });
 
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
-// 没有这一步：已有实例时 require(main.js) 会静默 app.quit()，本脚本"跑过了"是假象
-guardSingleInstance(app, {
-  onBlocked: (message) => {
-    try { writeFileSync(outFile, JSON.stringify({ fatal: message, steps: [] }, null, 1), 'utf8'); } catch (error) { /* 忽略 */ }
-  },
-});
 require(join(root, 'dist', 'main', 'main.js'));
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -74,17 +67,10 @@ app.whenReady().then(async () => {
       hasAuth: !!document.getElementById('perception-camera-authorize'),
       hasView: !!document.getElementById('perception-view-scene'),
       hasLog: !!document.getElementById('perception-log-list'),
-      hasCloseUp: !!document.getElementById('perception-window-close-up'),
-      hasCloseUpWidth: !!document.getElementById('perception-window-close-up-width'),
       mounted: !!document.querySelector('#perception-panel-root .perception-panel'),
     };
   })()`);
   step('设置窗口的「环境与用户感知」面板已挂载', panel, panel.mounted && panel.sections >= 5 && panel.hasPrivacy && panel.hasAuth);
-  step(
-    '面板：「窗口特写」两个控件在（开关 + 宽度）——终端文字靠它才读得清',
-    panel,
-    panel.hasCloseUp && panel.hasCloseUpWidth,
-  );
 
   /*
    * 2) + 3) **开关回显必须与主进程一致**。
@@ -236,17 +222,12 @@ app.whenReady().then(async () => {
   const windowCtx = await run(`(async () => {
     const before = await window.settingsAPI.perception.status();
     const sampled = await window.settingsAPI.perception.sampleNow();
-    const rect = sampled.windowContext.foregroundRect;
     return {
       beforeCount: before.windowContext.count,
       count: sampled.windowContext.count,
       foregroundTitle: sampled.windowContext.foregroundTitle,
       foregroundProcess: sampled.windowContext.foregroundProcess,
       sample: sampled.windowContext.sample.slice(0, 3),
-      rect,
-      // 逻辑坐标（DIP）与物理像素两套都要比一遍："特写"能不能裁对就看它落在哪套里
-      screenSize: { width: window.screen.width, height: window.screen.height },
-      devicePixelRatio: window.devicePixelRatio,
       backingOff: sampled.windowContext.backingOff,
     };
   })()`);
@@ -255,35 +236,12 @@ app.whenReady().then(async () => {
     windowCtx,
     windowCtx.count >= 1 && windowCtx.foregroundTitle.length > 0 && windowCtx.backingOff === false,
   );
-  /*
-   * 这一条是"窗口特写"能不能工作的**真机前提**：必须真的拿到前台窗口矩形，
-   * 而且它得落在屏幕范围内（逻辑坐标或物理像素任意一套即可）。
-   * 拿到一个明显在屏幕外的矩形，特写就会被纯函数判成"没法裁"而放弃 ——
-   * 那时功能是"安静降级"，但我们会在这里先看见。
-   */
-  const rectInScreen = (() => {
-    const rect = windowCtx.rect;
-    if (!rect) return false;
-    const logical = { width: windowCtx.screenSize.width, height: windowCtx.screenSize.height };
-    const physical = {
-      width: Math.round(logical.width * windowCtx.devicePixelRatio),
-      height: Math.round(logical.height * windowCtx.devicePixelRatio),
-    };
-    const fits = (space) =>
-      rect.x >= -8 && rect.y >= -8 && rect.x + rect.width <= space.width + 8 && rect.y + rect.height <= space.height + 8;
-    return fits(logical) || fits(physical);
-  })();
-  step(
-    '感知面板：拿到最上层窗口矩形且落在屏幕内（窗口特写的前提；逻辑坐标/物理像素任一即可）',
-    windowCtx,
-    windowCtx.rect !== null && windowCtx.rect.width >= 160 && windowCtx.rect.height >= 120 && rectInScreen,
-  );
 
   /*
    * 截图：滚到感知面板，肉眼验收排版。
    *
-   * ⚠️ 这一段**不是断言**，也没有包在 `step()` 里 ——
-   * `build/perception-ui.json` 的 `steps.length` 等于上面的 `step()` 个数（不含本段）。
+   * ⚠️ 这一段**不是断言**，也没有包在 `step()` 里 —— 所以
+   * `build/perception-ui.json` 的 `steps.length` 是 9（9 个断言），截图排在它们之后。
    */
   await run(`(() => {
     const target = document.getElementById('perception-panel-root');

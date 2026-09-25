@@ -71,17 +71,6 @@ export interface PerceptionSettings {
   /** 地址栏横条的截取宽度（越大越清楚、越费一点 token；默认 1280）。 */
   readonly urlCaptureWidth: number;
   /**
-   * 是否额外截一张**最上层窗口的特写**（按原分辨率截窗口那块，再缩到 `windowCloseUpWidth`）。
-   *
-   * 为什么需要：终端/编辑器整屏都是文字，整屏缩到 640 宽后字符只有几像素，模型读不出来
-   * 就只好"看着像代码"猜 —— 用户实测的"她瞎说终端里在干什么"正是这么来的。
-   * 特写让文字真的可读；读不清时她**不许回答内容**（见 `contentReadable` 与
-   * `gateUnreadableContent`）。代价是每轮多一张图（默认宽 1280）。
-   */
-  readonly windowCloseUp: boolean;
-  /** 窗口特写的宽度上限（480~2560，默认 1280）。 */
-  readonly windowCloseUpWidth: number;
-  /**
    * 是否把**完整网址**（含路径与查询串）写进观察记录。
    *
    * 默认 false：只存域名（`github.com`）。查询串里常有搜索词等私人信息（
@@ -142,10 +131,6 @@ export const DEFAULT_PERCEPTION_SETTINGS: PerceptionSettings = {
   // 而代价只是每轮多一张几十 KB 的小图（且用完即弃，不落盘）。
   captureUrl: true,
   urlCaptureWidth: 1280,
-  // 窗口特写：默认开。它是"终端里到底在跑什么"这类误判的解药：
-  // 整屏 640 宽读不出字符，按原分辨率截窗口那块才读得出来。
-  windowCloseUp: true,
-  windowCloseUpWidth: 1280,
   // 默认只留域名：查询串里可能是搜索词、token 等私人信息
   storeFullUrl: false,
   // 窗口上下文：默认开。一次 EnumWindows 就能拿到"开着什么、最上层是哪个"，
@@ -181,8 +166,6 @@ export interface PerceptionSettingsPatch {
   readonly captureWidth?: number;
   readonly captureUrl?: boolean;
   readonly urlCaptureWidth?: number;
-  readonly windowCloseUp?: boolean;
-  readonly windowCloseUpWidth?: number;
   readonly storeFullUrl?: boolean;
   readonly windowContext?: boolean;
   readonly windowListLimit?: number;
@@ -227,15 +210,6 @@ export interface ScreenObservation {
   readonly windowTitle?: string;
   /** 是否判定为私人/敏感内容。 */
   readonly sensitive: boolean;
-  /**
-   * 这次她**到底看清了没有**。
-   *
-   * 为什么值得单列一个字段：看不清时 `activity` / `suggestion` 会被清空
-   * （见 `gateUnreadableContent`），日志里如果只有一条"命令行"，
-   * 复盘时分不清是"她没看清"还是"看清了但没什么可说"。
-   * 本地降级路径（只看窗口标题）永远是 false —— 那一文本就看不见画面内容。
-   */
-  readonly readable: boolean;
   /** 专注度：deep = 长时间同一件事，shallow = 频繁切换。 */
   readonly focus: 'deep' | 'shallow' | 'unknown';
   /** 屏幕内容摘要（3.2 开启时才有）。 */
@@ -343,25 +317,9 @@ export interface PerceptionStatus {
     readonly foregroundProcess: string;
     /** 前几条窗口标题（预览，最多 5 条）。 */
     readonly sample: readonly string[];
-    /**
-     * 最上层窗口的矩形（原始坐标，可能来自逻辑或物理坐标空间）。
-     *
-     * 暴露出来的唯一目的：让"窗口特写"这一路**能被真机验证**——
-     * 面板/诊断能看出"到底有没有拿到矩形、拿到的是多大一块"，
-     * 而不是只在裁错图的时候才发现。
-     */
-    readonly foregroundRect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | null;
     /** 探测是否处于失败退避（没有 PowerShell 等情况）。 */
     readonly backingOff: boolean;
   };
-  /**
-   * 最近一次**窗口特写**的尺寸与时间（`windowCloseUp` 关掉、或截取失败时为 null）。
-   *
-   * 为什么要在状态里留这一条：特写是"终端里的字能不能读清"的关键，
-   * 但它只在**调模型那一轮**才截，平时看不见。有了这条读数，
-   * 面板与验收都能回答"她到底有没有真的截到特写、多大一张"。
-   */
-  readonly lastCloseUp: { readonly at: string; readonly width: number; readonly height: number } | null;
   /** 数据目录（观察记录与习惯画像都在里面）。 */
   readonly dataDir: string;
   readonly lastError: string;
@@ -452,8 +410,6 @@ export function sanitizePerceptionSettings(
     captureWidth: num(record.captureWidth, fallback.captureWidth, 160, 1920),
     captureUrl: bool(record.captureUrl, fallback.captureUrl),
     urlCaptureWidth: num(record.urlCaptureWidth, fallback.urlCaptureWidth, 640, 3840),
-    windowCloseUp: bool(record.windowCloseUp, fallback.windowCloseUp),
-    windowCloseUpWidth: num(record.windowCloseUpWidth, fallback.windowCloseUpWidth, 480, 2560),
     storeFullUrl: bool(record.storeFullUrl, fallback.storeFullUrl),
     windowContext: bool(record.windowContext, fallback.windowContext),
     windowListLimit: num(record.windowListLimit, fallback.windowListLimit, 1, 24),
