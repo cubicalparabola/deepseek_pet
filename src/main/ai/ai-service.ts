@@ -118,18 +118,30 @@ export class AIService {
 
   public load(): void {
     this.config.load();
-    this.memory.load();
-    this.memory.setUserName(this.memory.getProfile().userName || this.settings.userName);
+    /*
+     * 记忆：**开关关着就不加载、不建目录、不写文件**。
+     *
+     * 为什么较真：需求要求"可配置开关"，那么关掉时就不该在用户磁盘上
+     * 留下痕迹 —— 否则第一次装上桌宠就会多出一个 memory/ 目录和一堆日志，
+     * 用户会以为"它一直在记我"。开关打开时才真正落盘（见 setSettings）。
+     */
+    if (this.settings.memory) {
+      this.memory.load();
+      this.memory.setUserName(this.memory.getProfile().userName || this.settings.userName);
+    }
     this.emotion.load();
+    // 日记同理：没打开就不建目录（load 只读索引，不 mkdir）
     this.diary.load();
     this.llm.updateConfig(this.settings.provider);
-    this.memory.recordEvent('system', 'AI 模块已加载', {
-      enabled: this.settings.enabled,
-      chat: this.settings.chat,
-      memory: this.settings.memory,
-      emotion: this.settings.emotion,
-      diary: this.settings.diary,
-    });
+    if (this.settings.memory) {
+      this.memory.recordEvent('system', 'AI 模块已加载', {
+        enabled: this.settings.enabled,
+        chat: this.settings.chat,
+        memory: this.settings.memory,
+        emotion: this.settings.emotion,
+        diary: this.settings.diary,
+      });
+    }
     this.emotion.startHeartbeat();
     this.diary.startScheduler();
     // 启动时补一次"昨天没写的日记"（程序不是 24 小时开着的）
@@ -191,6 +203,9 @@ export class AIService {
       this.memory.setUserName(patch.userName.trim());
     }
     if (after.memory && !before.memory) {
+      // 打开记忆系统时才真正开始落盘（加载 + 建目录 + 记一条系统事件）
+      this.memory.load();
+      if (after.userName.trim() !== '') this.memory.setUserName(after.userName.trim());
       this.memory.recordEvent('system', '记忆系统已开启');
     }
     if (after.emotion && !before.emotion) {
@@ -768,9 +783,9 @@ export class AIService {
     this.emitStatus();
   }
 
-  /** 记录一条自定义事件（controller 用）。 */
+  /** 记录一条自定义事件（controller 用）。记忆关闭时**不写盘**。 */
   public recordEvent(kind: MemoryEventKind, text: string, data?: Record<string, unknown>): void {
-    if (!this.settings.memory && kind !== 'system') return;
+    if (!this.settings.memory) return;
     this.memory.recordEvent(kind, text, data);
   }
 }

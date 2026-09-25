@@ -19,7 +19,7 @@
  * 结果：build/acceptance.json
  */
 const { app, BrowserWindow } = require('electron');
-const { writeFileSync, mkdirSync, readFileSync, rmSync } = require('node:fs');
+const { writeFileSync, mkdirSync, readFileSync, rmSync, readdirSync } = require('node:fs');
 const { join } = require('node:path');
 const { tmpdir } = require('node:os');
 
@@ -2225,6 +2225,23 @@ app.whenReady().then(async () => {
     JSON.stringify(aiInitial.aiMethods),
   );
   record('AI 数据目录可解析（记忆/日记落盘位置）', typeof aiInitial.dataDir === 'string' && aiInitial.dataDir.length > 0, aiInitial.dataDir);
+
+  /*
+   * "默认全关"必须真的**什么都不写**：数据目录在进程启动前被清空过，
+   * 桌宠已经跑了十几分钟（前面所有用例），此时目录里应当仍然空空如也。
+   * 这条断言是"关掉 = 与第一版一致"最硬的证据（不然用户会以为它一直在记他）。
+   */
+  let aiDirEntries = [];
+  try {
+    aiDirEntries = readdirSync(aiDataDir);
+  } catch (error) {
+    aiDirEntries = [`(读取失败: ${String(error)})`];
+  }
+  record(
+    'AI 默认全关时不产生任何用户数据文件（不建目录、不写记忆/日记）',
+    aiDirEntries.length === 0,
+    `entries=${JSON.stringify(aiDirEntries)}`,
+  );
 
   /* 2.3 情绪模型：纯函数直接断言（互动上涨 / 三档衰减 / token -> 饿） */
   const emotionModel = await run(`(() => {

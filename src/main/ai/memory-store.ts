@@ -350,7 +350,7 @@ export class MemoryStore {
     return { events, turns, facts: this.profile.facts.length };
   }
 
-  /** UI 用快照。 */
+  /** UI 用快照。**只读**：不建目录、不写文件（开关关着时不该留下任何痕迹）。 */
   public snapshot(): MemorySnapshot {
     this.rollDayIfNeeded();
     return {
@@ -400,14 +400,21 @@ export class MemoryStore {
     }
   }
 
-  /** 跨天时把内存缓存切到新的一天（长跑不能一直往昨天写）。 */
+  /**
+   * 跨天时把内存缓存切到新的一天（长跑不能一直往昨天写）。
+   *
+   * ⚠️ 只有"记忆系统真的加载过"（`this.today !== ''`）才写跨天分隔线：
+   * 否则设置界面的"只读快照"也会顺手创建 `memory/` 目录 ——
+   * 开关关着时在用户磁盘上留目录，会被理解成"它一直在记我"。
+   */
   private rollDayIfNeeded(): void {
     const key = todayKey();
     if (key === this.today) return;
+    const wasLoaded = this.today !== '';
     this.today = key;
     this.todayEvents = [];
     this.todayTurns = [];
-    this.appendLog(`\n## ${key}\n`);
+    if (wasLoaded) this.appendLog(`\n## ${key}\n`);
   }
 
   private readProfile(): MemoryProfile {

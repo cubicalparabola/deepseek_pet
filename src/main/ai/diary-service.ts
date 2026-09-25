@@ -79,7 +79,10 @@ export class DiaryService {
   }
 
   public load(): void {
-    this.ensureDir();
+    /*
+     * 只读索引，**不建目录**：日记开关关着时不该在磁盘上留下 diary/。
+     * 真正需要目录的地方（write / snapshot）自己会 mkdir。
+     */
     this.index = this.readIndex();
     this.logger.info('diary service loaded', { data: { dir: this.dir, entries: this.index.length } });
   }
@@ -92,9 +95,8 @@ export class DiaryService {
     return existsSync(this.entryFile(date));
   }
 
-  /** 列表（按日期倒序）。 */
+  /** 列表（按日期倒序）。**只读**：不建目录、不写索引。 */
   public snapshot(date: string = todayKey()): DiarySnapshot {
-    this.ensureDir();
     return {
       items: [...this.index].sort((a, b) => b.date.localeCompare(a.date)),
       dataDir: this.dir,
