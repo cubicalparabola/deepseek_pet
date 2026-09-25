@@ -252,9 +252,8 @@ export class ScreenCapture {
    * 把**桌宠自己**的那几块像素涂掉（`hideFromCapture` 打开时）。
    *
    * 为什么不能只靠 `setContentProtection`：那个 API 挡的是**别的进程**的截屏/录屏，
-   * 我们自己的 `desktopCapturer` 截出来照样有她（实测见 `tools/probe-self-capture.cjs`：
-   * 她那块"可见 vs 隐藏"的平均像素差 **46.89**，而同区域页面自身动画的噪声只有 **9.48**
-   * —— 信噪比 4.9 倍，不是巧合）。于是模型每帧都能在角落看到一只鲸鱼娘。
+   * 我们自己的 `desktopCapturer` 截出来照样有她（实测平均像素差 36，见
+   * `tools/probe-self-capture.cjs`）。于是模型每帧都能在角落看到一只鲸鱼娘。
    *
    * 做法：按窗口矩形把像素涂成**旁边一个像素的颜色**（不是纯黑）——
    * 一块与背景同色的补丁，比一个突兀的黑方块更不容易干扰模型。
