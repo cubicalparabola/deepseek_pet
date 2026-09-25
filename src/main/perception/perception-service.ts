@@ -48,10 +48,11 @@ import {
   isSensitive,
   isTerminalProcess,
   learnHabit,
-  matchesSensitiveKeywords,
   planIntervention,
   refineSceneByWindow,
   sceneLabel,
+  TERMINAL_ACTIVITY_TEXT,
+  terminalObservationFor,
   topSceneAtHour,
   describeWindowContext,
   withoutOwnWindows,
@@ -69,7 +70,6 @@ import { PerceptionSettingsStore } from './settings-store';
 import { ScreenCapture } from './screen-capture';
 import { VisionAnalyzer } from './vision';
 import { WindowContextProbe } from './window-context';
-import { TerminalTextProbe } from './terminal-text';
 
 export interface PerceptionServiceOptions {
   /** 数据根目录（`%APPDATA%\DesktopPet`）。 */
@@ -110,8 +110,6 @@ export class PerceptionService {
   private readonly vision: VisionAnalyzer;
   /** 窗口上下文（"开着什么 / 最上层是哪个"）。 */
   private readonly windows: WindowContextProbe;
-  /** 终端文本（"终端里到底在跑什么"）——只读、只取尾部、绝不落盘。 */
-  private readonly terminal: TerminalTextProbe;
 
   private timer: NodeJS.Timeout | null = null;
   private cameraTimer: NodeJS.Timeout | null = null;
@@ -125,10 +123,6 @@ export class PerceptionService {
   private lastIntervention: PerceptionStatus['lastIntervention'] = null;
   private interventionTimes: number[] = [];
   private lastError = '';
-  /** 终端文本这一路的状态（面板/验收可审计；终端文本本身不落盘）。 */
-  private terminalState: PerceptionStatus['terminalText'] = {
-    state: 'idle', process: '', rawLength: 0, keptChars: 0, at: '',
-  };
   private cameraReady = false;
   /** 摄像头上次失败的时间（0 = 没失败过）；失败后按 CAMERA_RETRY_MS 退避重试。 */
   private cameraFailedAt = 0;
@@ -156,12 +150,6 @@ export class PerceptionService {
       logger: options.logger,
       isEnabled: () => this.settings.windowContext && !this.settings.privacyMode,
       ttlMs: this.settings.windowProbeTtlMs,
-    });
-    this.terminal = new TerminalTextProbe({
-      logger: options.logger,
-      isEnabled: () => this.settings.terminalText && this.settings.screen && !this.settings.privacyMode,
-      // 只在前台是终端时才去读（读谁 = 用户此刻在看的那个终端）
-      getForegroundProcess: () => this.windows.current()?.foreground?.process ?? '',
     });
     this.behavior = buildBehaviorSnapshot({
       idleSeconds: 0,
@@ -277,48 +265,6 @@ export class PerceptionService {
   /** 习惯采样总数（成长模块判断"养成的习惯"用）。 */
   public habitSamples(): number {
     return this.habits.samples;
-  }
-
-  /**
-   * 终端文本证据（可能为 null；`forceSensitive` 表示"里面有敏感词，已整段拦下"）。
-   *
-   * 三条判断顺序很重要：
-   * 1. 开关 / 隐私模式 / 前台不是终端 → 直接 `non-terminal`，**一个字都不读**；
-   * 2. 读到了但命中敏感词 → `withheld`：**整段不发给模型**，并让这次观察按私人内容处理
-   *    （与敏感词在标题/网址里命中时的行为一致 —— 她该捂眼睛就捂眼睛）；
-   * 3. 正常读到 → `captured`，把尾部文本交给模型当证据。
-   *
-   * 终端文本**只在这一次调用里存在**：不写日志正文、不进观察记录、不落盘
-   * （状态里只留长度与进程名，用来回答"到底读到没有"）。
-   */
-  private async terminalEvidence(force = false): Promise<{ readonly terminalText: string | null; readonly forceSensitive: boolean }> {
-    const process = this.windows.current()?.foreground?.process ?? '';
-    if (!this.settings.terminalText || this.settings.privacyMode || !isTerminalProcess(process)) {
-      this.terminalState = { ...this.terminalState, state: 'non-terminal', process };
-      return { terminalText: null, forceSensitive: false };
-    }
-    const result = await this.terminal.probe(force);
-    if (!result) {
-      this.terminalState = {
-        ...this.terminalState,
-        state: this.terminal.backingOff ? 'backing-off' : 'no-text',
-        process,
-      };
-      return { terminalText: null, forceSensitive: false };
-    }
-    if (matchesSensitiveKeywords(result.text, this.settings.sensitivityKeywords)) {
-      this.terminalState = { ...this.terminalState, state: 'withheld', process, rawLength: result.rawLength };
-      this.logger.info('terminal text withheld (sensitive keywords)', { data: { process } });
-      return { terminalText: null, forceSensitive: true };
-    }
-    this.terminalState = {
-      state: 'captured',
-      process,
-      rawLength: result.rawLength,
-      keptChars: result.text.length,
-      at: new Date().toISOString(),
-    };
-    return { terminalText: result.text, forceSensitive: false };
   }
 
   /**
@@ -484,18 +430,39 @@ export class PerceptionService {
      */
     const windowContext = await this.windowContextText();
 
+    /*
+     * **前台是终端 → 直接给固定结论，不做内容分析**（需求原文：
+     * "如果是终端，那就直接表示正在使用控制台就可以了，不用分析做什么了"）。
+     *
+     * 三条收益都很实在：
+     * - 不读终端缓冲区（那里面是用户敲过的命令与输出，实测出现过 `?token=...`），隐私面最小；
+     * - 不截图、不调模型（`mode: 'local'`、`tokens: 0`），省一次请求，也少一份把屏幕发出去的风险；
+     * - 结论固定，就不会出现"看不清还硬猜"或"模型把预算花在思考过程里返回空内容"。
+     */
+    const foreground = this.windows.current()?.foreground ?? null;
+    if (foreground && isTerminalProcess(foreground.process)) {
+      const terminalObservation = terminalObservationFor(foreground.process, foreground.title, now);
+      observation = terminalObservation;
+      this.lastObservation = terminalObservation;
+      this.observations.push(terminalObservation);
+      if (this.observations.length > OBSERVATION_MEMORY) this.observations.shift();
+      this.store.recordObservation(terminalObservation, `${sceneLabel(terminalObservation.scene)}（${TERMINAL_ACTIVITY_TEXT}）`);
+      if (this.settings.habits) {
+        this.habits = learnHabit(this.habits, terminalObservation);
+        this.store.saveHabits(this.habits);
+      }
+      this.lastError = '';
+      this.decide(terminalObservation, now);
+      this.emitStatus();
+      return this.status();
+    }
+
     if (llmUsable) {
       const frame = await this.capture.grab();
       if (frame) {
         // 地址栏横条：与整屏同一轮截取，只为让模型读出网址（读不到就整条不传）
         const addressBar = await this.capture.grabAddressBar();
-        /*
-         * 终端文本：前台正好是终端时，把**缓冲区尾部**当作内容证据一起给模型。
-         * 这是"终端里到底在跑什么"从猜测变成证据的那一步（用户要求：拿得到就用）。
-         * 隐私与失败都在 `terminalEvidence()` 里处理：命中敏感词→整段不发且判定为私人内容。
-         */
-        const evidence = await this.terminalEvidence();
-        const analysis = await this.vision.analyzeScene(frame.dataBase64, frame.mimeType, addressBar, windowContext, evidence);
+        const analysis = await this.vision.analyzeScene(frame.dataBase64, frame.mimeType, addressBar, windowContext);
         if (analysis) {
           observation = analysis.observation;
           this.lastObservation = observation;
@@ -567,6 +534,22 @@ export class PerceptionService {
       return { ok: false, mode, text: `现在不能看屏幕：${permission.reason}`, scene: 'other', sensitive: false, tokens: 0, error: 'paused' };
     }
     /*
+     * 按需"看屏幕"永远先拿一份**最新**的窗口信息：
+     * 终端那条固定结论看它，模型的提示词也用它。
+     */
+    const windowContext = await this.windowContextText(true);
+    /*
+     * **前台是终端 → 直接给固定结论，连模型都不调**（需求原文：
+     * "如果是终端，那就直接表示正在使用控制台就可以了，不用分析做什么了"）。
+     * 放在"有没有密钥"之前：结论是固定的，没配密钥时也该答得出来。
+     */
+    const foregroundView = this.windows.current()?.foreground ?? null;
+    if (foregroundView && isTerminalProcess(foregroundView.process)) {
+      this.store.log('observation', `用户请求「${viewModeLabel(mode)}」：${TERMINAL_ACTIVITY_TEXT}`);
+      this.emitStatus();
+      return { ok: true, mode, text: TERMINAL_ACTIVITY_TEXT, scene: 'terminal', sensitive: false, tokens: 0, error: '' };
+    }
+    /*
      * 没接上大模型时给一句**温柔**的话，而不是把 HTTP 层的报错甩给用户。
      * 这条必须在截图之前判断：既省一次没意义的截屏，也避免日志里刷 "未配置 API Key"。
      */
@@ -583,11 +566,7 @@ export class PerceptionService {
      * 放在"确认能用大模型"之后取，避免白截一张图。
      */
     const addressBar = await this.capture.grabAddressBar();
-    // 按需"立刻看一次"要拿最新的窗口信息（并顺手刷新缓存）
-    const windowContext = await this.windowContextText(true);
-    // 前台正好是终端时，把缓冲区尾部一起给她看（同样只在这一次请求里存在）
-    const evidence = await this.terminalEvidence(true);
-    const result = await this.vision.view(mode, frame.dataBase64, frame.mimeType, addressBar, windowContext, evidence.terminalText);
+    const result = await this.vision.view(mode, frame.dataBase64, frame.mimeType, addressBar, windowContext);
     if (result.ok) {
       this.store.log('observation', `「${viewModeLabel(mode)}」结果：${result.text.slice(0, 80)}`);
     }
@@ -709,7 +688,6 @@ export class PerceptionService {
           backingOff: this.windows.backingOff,
         };
       })(),
-      terminalText: this.terminalState,
       dataDir: this.store.dataDir,
       lastError: this.lastError,
     };

@@ -51,6 +51,7 @@ import {
 } from '../shared/growth';
 import {
   BROWSER_APPS,
+  TERMINAL_ACTIVITY_TEXT,
   TERMINAL_PROCESSES,
   URL_SCENE_RULES,
   appKind,
@@ -73,14 +74,12 @@ import {
   normalizeWindowTitle,
   parseSceneFixes,
   planIntervention,
-  redactTerminalSecrets,
   refineScene,
   refineSceneByUrl,
   refineSceneByWindow,
   safeHost,
   sceneLabel,
-  stripAnsiEscape,
-  tailTerminalText,
+  terminalObservationFor,
   topSceneAtHour,
   withoutOwnWindows,
 } from '../shared/perception';
@@ -1140,12 +1139,16 @@ class PetApplication {
       readonly describeWindowContext: typeof describeWindowContext;
       readonly withoutOwnWindows: typeof withoutOwnWindows;
       readonly BROWSER_APPS: typeof BROWSER_APPS;
-      /** 终端文本（"终端里到底在跑什么"的证据）：只有这些进程才读，且先打码再截尾。 */
+      /**
+       * 终端（需求："如果是终端，直接表示正在使用控制台就行，不用分析做什么"）。
+       *
+       * 这一路是**固定结论**而不是内容理解：前台是终端类进程时，场景钉成 `terminal`、
+       * 文案固定，既不截图也不调模型。所以只暴露"进程判定 + 固定文案 + 观察构造函数"。
+       */
       readonly TERMINAL_PROCESSES: typeof TERMINAL_PROCESSES;
       readonly isTerminalProcess: typeof isTerminalProcess;
-      readonly stripAnsiEscape: typeof stripAnsiEscape;
-      readonly redactTerminalSecrets: typeof redactTerminalSecrets;
-      readonly tailTerminalText: typeof tailTerminalText;
+      readonly TERMINAL_ACTIVITY_TEXT: typeof TERMINAL_ACTIVITY_TEXT;
+      readonly terminalObservationFor: typeof terminalObservationFor;
     };
     readonly perceptionStatus: () => Promise<PerceptionStatus | null>;
     /**
@@ -1237,9 +1240,8 @@ class PetApplication {
         BROWSER_APPS,
         TERMINAL_PROCESSES,
         isTerminalProcess,
-        stripAnsiEscape,
-        redactTerminalSecrets,
-        tailTerminalText,
+        TERMINAL_ACTIVITY_TEXT,
+        terminalObservationFor,
       },
       perceptionStatus: async () => {
         const bridge = this.runtime.perception();

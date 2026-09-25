@@ -364,21 +364,6 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   samplingSection.appendChild(fieldRow('perception-window-probe-ttl-ms', '窗口信息缓存（毫秒）', windowTtlInput,
     '默认 25000：窗口变化慢，没必要每次采样都重新枚举（枚举约 0.5 秒）。'));
 
-  /*
-   * 终端文本：把"终端里到底在跑什么"从猜测变成证据。
-   *
-   * 为什么读：终端整屏都是文字，整屏缩到 640 宽后字符只有几像素，模型读不出来就只能
-   * 顺着"黑底白字像代码"猜（用户实测的误判）。而缓冲区文本拿得到（实测 Windows Terminal
-   * 把它暴露在子元素的 TextPattern 上，一个窗口能取到 46 万字符）。
-   * 隐私：只读**最上层**那个终端、只取**尾部**约 20 行、先给密钥打码、命中敏感词整段不发、
-   * 绝不落盘 —— 这些都写进提示里，用户才不会担心。
-   */
-  const terminalTextInput = makeCheckbox('perception-terminal-text', '读终端文本辅助判断');
-  samplingSection.appendChild(checkRow(
-    '读终端文本辅助判断（只读最上层终端窗口的缓冲区尾部约 20 行；先给密钥打码、命中敏感词整段不发、绝不落盘）',
-    terminalTextInput,
-  ));
-
   const cameraIntervalInput = makeInput('number', 'perception-camera-interval-ms', '摄像头采样间隔（毫秒）');
   cameraIntervalInput.min = '10000';
   cameraIntervalInput.step = '1000';
@@ -748,7 +733,6 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     setValue(windowLimitInput, String(settings.windowListLimit));
     setValue(windowTtlInput, String(settings.windowProbeTtlMs));
     if (!editing(windowContextInput)) windowContextInput.checked = settings.windowContext;
-    if (!editing(terminalTextInput)) terminalTextInput.checked = settings.terminalText;
     setValue(cameraIntervalInput, String(settings.cameraIntervalMs));
     setValue(proactiveMinInput, String(settings.proactiveMinIntervalMs));
     setValue(proactiveMaxInput, String(settings.proactiveMaxPerHour));
@@ -912,8 +896,6 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     { control: habitsInput, apply: (checked) => ({ habits: checked }) },
     { control: privacyInput, apply: (checked) => ({ privacyMode: checked }) },
     { control: hideInput, apply: (checked) => ({ hideFromCapture: checked }) },
-    // 终端文本这一路只在"前台正好是终端"时才动，所以勾选也立即生效
-    { control: terminalTextInput, apply: (checked) => ({ terminalText: checked }) },
   ];
 
   /**

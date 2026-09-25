@@ -316,7 +316,6 @@ function createDefaultPerceptionStatus(): PerceptionStatus {
     interventionsToday: 0,
     cameraReady: false,
     windowContext: { count: 0, foregroundTitle: '', foregroundProcess: '', sample: [], backingOff: false },
-    terminalText: { state: 'idle', process: '', rawLength: 0, keptChars: 0, at: '' },
     dataDir: '',
     lastError: '',
   };

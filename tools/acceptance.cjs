@@ -2280,7 +2280,7 @@ app.whenReady().then(async () => {
    */
   await run(`(async () => {
     await window.petAPI.ai.setSettings({ enabled: false, chat: false, memory: false, emotion: false, diary: false });
-    await window.petAPI.perception.setSettings({ screen: false, behavior: false, camera: false, habits: false, terminalText: false, windowContext: false });
+    await window.petAPI.perception.setSettings({ screen: false, behavior: false, camera: false, habits: false, windowContext: false });
     await window.petAPI.growth.setSettings({ palace: false, reflection: false, policyAdapt: false });
     return true;
   })()`);
@@ -2320,7 +2320,7 @@ app.whenReady().then(async () => {
   /* 后面的用例需要记忆与情绪是开的：改回来（感知与成长也要一起恢复） */
   await run(`(async () => {
     await window.petAPI.ai.setSettings({ enabled: true, chat: true, memory: true, emotion: true, diary: true });
-    await window.petAPI.perception.setSettings({ screen: true, behavior: true, camera: true, habits: true, terminalText: true, windowContext: true });
+    await window.petAPI.perception.setSettings({ screen: true, behavior: true, camera: true, habits: true, windowContext: true });
     await window.petAPI.growth.setSettings({ palace: true, reflection: true, policyAdapt: true });
     return true;
   })()`);
@@ -3173,66 +3173,55 @@ app.whenReady().then(async () => {
   );
 
   /*
-   * 终端文本（用户要求："能拿到终端文本就用它辅助；拿不到就完全不对终端做特化"）。
+   * 终端：**需求明确要求「直接说正在使用控制台，不用分析终端里在做什么」**。
    *
-   * 可行性由真机探针证明（`tools/probe-terminal-text.ps1`：Windows Terminal 把缓冲区文本
-   * 暴露在**子元素**的 `TextPattern` 上，一个窗口能取到 46 万字符）。这里钉住**可测的那一半**：
-   * 只读终端类进程、去 ANSI、给密钥打码、只取尾部 —— 全是纯函数，逐条断言。
+   * 所以这一路是"固定结论"而不是"内容理解"：前台是终端类进程时，场景钉成 `terminal`、
+   * `activity` 钉成固定文案、**既不截图也不调模型**（`mode: 'local'`、`tokens: 0`）。
+   * 这里钉三个可测的点：进程判定、固定文案、以及"不额外暴露设置项"（没有 terminalText 开关）。
    */
-  const terminalHelpers = await run(`(() => {
+  const terminalRule = await run(`(async () => {
     const model = window.petDebug.perception;
-    const raw = '\\u001b[32mPS E:\\\\ds_pet>\\u001b[0m npm run acceptance\\r\\n' +
-      'dsh web: http://127.0.0.1:3080/?token=vKct9IIXmOIapucS0nbobkG58oIUdzKPZvLIlUtStwQ\\n' +
-      'api_key=sk-abcdefghijklmnop\\n' +
-      'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\\n' +
-      'done in 12s';
-    const cleaned = model.stripAnsiEscape(raw);
-    const redacted = model.redactTerminalSecrets(cleaned);
-    const long = Array.from({ length: 50 }, (_, i) => 'line-' + i).join('\\n');
-    return {
-      processes: model.TERMINAL_PROCESSES.length,
-      isTerminal: model.isTerminalProcess('WindowsTerminal'),
-      isTerminalExe: model.isTerminalProcess('powershell.exe'),
-      isBrowser: model.isTerminalProcess('msedge'),
-      ansiRemoved: !cleaned.includes('\\u001b'),
-      tokenRedacted: !redacted.includes('vKct9IIXmOIapucS0nbobkG58oIUdzKPZvLIlUtStwQ'),
-      apiKeyRedacted: !redacted.includes('sk-abcdefghijklmnop'),
-      bearerRedacted: !redacted.includes('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9'),
-      keepsMeaning: redacted.includes('npm run acceptance') && redacted.includes('done in 12s'),
-      tailLines: model.tailTerminalText(long, { maxLines: 10, maxChars: 5000 }).split('\\n').length,
-      firstTailLine: model.tailTerminalText(long, { maxLines: 10, maxChars: 5000 }).split('\\n')[0],
-      tailChars: model.tailTerminalText('x'.repeat(5000), { maxLines: 30, maxChars: 1200 }).length,
-    };
-  })()`);
-  record(
-    '感知：终端文本只读终端进程、去 ANSI、给密钥打码、只取尾部（拿得到就用它辅助判断）',
-    terminalHelpers.processes >= 10 &&
-      terminalHelpers.isTerminal === true &&
-      terminalHelpers.isTerminalExe === true &&
-      terminalHelpers.isBrowser === false &&
-      terminalHelpers.ansiRemoved === true &&
-      terminalHelpers.tokenRedacted === true &&
-      terminalHelpers.apiKeyRedacted === true &&
-      terminalHelpers.bearerRedacted === true &&
-      terminalHelpers.keepsMeaning === true &&
-      terminalHelpers.tailLines === 10 &&
-      terminalHelpers.firstTailLine === 'line-40' &&
-      terminalHelpers.tailChars === 1200,
-    JSON.stringify(terminalHelpers),
-  );
-  const terminalSettings = await run(`(async () => {
+    const observation = model.terminalObservationFor('windowsterminal', 'PS E:\\\\ds_pet>', 1700000000000);
     const status = await window.petAPI.perception.status();
     return {
-      enabled: status.settings.terminalText,
-      state: status.terminalText.state,
-      keptChars: status.terminalText.keptChars,
+      isTerminal: model.isTerminalProcess('WindowsTerminal'),
+      isTerminalExe: model.isTerminalProcess('powershell.exe'),
+      isTerminalUpper: model.isTerminalProcess('WINDOWSTERMINAL'),
+      isBrowser: model.isTerminalProcess('msedge'),
+      isEmpty: model.isTerminalProcess(''),
+      text: model.TERMINAL_ACTIVITY_TEXT,
+      observation: {
+        scene: observation.scene,
+        activity: observation.activity,
+        mode: observation.mode,
+        tokens: observation.tokens,
+        suggestion: observation.suggestion,
+        app: observation.app,
+        windowTitle: observation.windowTitle,
+      },
+      hasTerminalTextSetting: Object.prototype.hasOwnProperty.call(status.settings, 'terminalText'),
+      hasTerminalTextStatus: Object.prototype.hasOwnProperty.call(status, 'terminalText'),
     };
   })()`);
   record(
-    '感知：终端文本默认开启，且状态可审计（她到底读到没有、发了多少字）',
-    terminalSettings.enabled === true &&
-      ['idle', 'non-terminal', 'no-text', 'captured', 'withheld', 'backing-off'].includes(terminalSettings.state),
-    JSON.stringify(terminalSettings),
+    '感知：前台是终端就直接给「正在使用控制台」（固定结论，不截图不调模型，也没有额外开关）',
+    terminalRule.isTerminal === true &&
+      terminalRule.isTerminalExe === true &&
+      terminalRule.isTerminalUpper === true &&
+      terminalRule.isBrowser === false &&
+      terminalRule.isEmpty === false &&
+      terminalRule.text === '正在使用控制台' &&
+      terminalRule.observation.scene === 'terminal' &&
+      terminalRule.observation.activity === '正在使用控制台' &&
+      terminalRule.observation.mode === 'local' &&
+      terminalRule.observation.tokens === 0 &&
+      terminalRule.observation.suggestion === '' &&
+      terminalRule.observation.app === 'windowsterminal' &&
+      // 注意：外层是普通 JS 字符串，一个反斜杠要写两次；写成四次会变成"两个反斜杠"而永远不等
+      terminalRule.observation.windowTitle === 'PS E:\\ds_pet>' &&
+      terminalRule.hasTerminalTextSetting === false &&
+      terminalRule.hasTerminalTextStatus === false,
+    JSON.stringify(terminalRule),
   );
   /* 优先级：用户规则 > 网址 > 窗口 > 应用名 */
   const scenePriority = await run(`(() => {

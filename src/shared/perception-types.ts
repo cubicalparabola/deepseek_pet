@@ -90,19 +90,6 @@ export interface PerceptionSettings {
   readonly windowListLimit: number;
   /** 窗口上下文的缓存时长（毫秒，默认 25000）。 */
   readonly windowProbeTtlMs: number;
-  /**
-   * 是否读**最上层终端窗口里的文本**作为判断依据。
-   *
-   * 为什么值得单独做一路：终端整屏都是文字，整屏缩到 640 宽后字符只有几像素，
-   * 视觉模型读不出来就只能顺着"黑底白字像代码"猜（用户实测的误判）。
-   * 而终端缓冲区文本**拿得到**（探针 `tools/probe-terminal-text.ps1`：Windows Terminal
-   * 把它暴露在子元素的 `TextPattern` 上，一个窗口能取到 46 万字符）。
-   *
-   * 隐私约束（每一条都有代码落点，见 `src/main/perception/terminal-text.ts`）：
-   * 只读**最上层**那个终端、只取**尾部**约 20 行、先去 ANSI 再给密钥打码、
-   * **绝不落盘**、命中敏感词就整段不发。
-   */
-  readonly terminalText: boolean;
   /** 摄像头采样间隔（毫秒）—— 比屏幕采样更稀，省电也省 token。 */
   readonly cameraIntervalMs: number;
   /** 用户是否已显式授权摄像头（默认 false，只能由界面上的按钮置为 true）。 */
@@ -151,9 +138,6 @@ export const DEFAULT_PERCEPTION_SETTINGS: PerceptionSettings = {
   windowContext: true,
   windowListLimit: 12,
   windowProbeTtlMs: 25000,
-  // 终端文本：默认开（用户明确要求"能拿到就用它辅助"）。它把"终端里到底在跑什么"
-  // 从猜测变成证据，而代价只有尾部约 20 行、且绝不落盘。
-  terminalText: true,
   cameraIntervalMs: 60000,
   // 唯一默认关闭的一项：摄像头必须用户显式授权（需求 3.5 原文）
   cameraAuthorized: false,
@@ -186,7 +170,6 @@ export interface PerceptionSettingsPatch {
   readonly windowContext?: boolean;
   readonly windowListLimit?: number;
   readonly windowProbeTtlMs?: number;
-  readonly terminalText?: boolean;
   readonly cameraIntervalMs?: number;
   readonly cameraAuthorized?: boolean;
   readonly proactiveMinIntervalMs?: number;
@@ -337,24 +320,6 @@ export interface PerceptionStatus {
     /** 探测是否处于失败退避（没有 PowerShell 等情况）。 */
     readonly backingOff: boolean;
   };
-  /**
-   * 终端文本这一路的可审计状态（"她到底读到没有 / 读到了多少 / 为什么没发"）。
-   *
-   * 为什么要在状态里留它：这一路只在"前台正好是终端"时才动，平时完全静默；
-   * 有了这条读数，用户与验收都能回答"她有没有真的读到终端、是不是被敏感词拦下了"，
-   * 而不用去猜（终端文本本身仍然一个字节都不落盘）。
-   */
-  readonly terminalText: {
-    readonly state: 'idle' | 'non-terminal' | 'no-text' | 'captured' | 'withheld' | 'backing-off';
-    /** 最近一次真的读到文本的进程名（没读到过就是空串）。 */
-    readonly process: string;
-    /** 缓冲区原始长度（说明"确实读到了东西"，但不落盘）。 */
-    readonly rawLength: number;
-    /** 实际留给模型的字符数（尾部截断 + 打码之后）。 */
-    readonly keptChars: number;
-    /** 最近一次读到的时间（ISO；没读到过就是空串）。 */
-    readonly at: string;
-  };
   /** 数据目录（观察记录与习惯画像都在里面）。 */
   readonly dataDir: string;
   readonly lastError: string;
@@ -449,7 +414,6 @@ export function sanitizePerceptionSettings(
     windowContext: bool(record.windowContext, fallback.windowContext),
     windowListLimit: num(record.windowListLimit, fallback.windowListLimit, 1, 24),
     windowProbeTtlMs: num(record.windowProbeTtlMs, fallback.windowProbeTtlMs, 5000, 600000),
-    terminalText: bool(record.terminalText, fallback.terminalText),
     cameraIntervalMs: num(record.cameraIntervalMs, fallback.cameraIntervalMs, 10000, 3600000),
     cameraAuthorized: bool(record.cameraAuthorized, fallback.cameraAuthorized),
     proactiveMinIntervalMs: num(record.proactiveMinIntervalMs, fallback.proactiveMinIntervalMs, 60000, 86400000),
