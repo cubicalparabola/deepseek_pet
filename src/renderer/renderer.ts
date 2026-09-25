@@ -55,10 +55,8 @@ import {
   appKind,
   capturePermission,
   computeCloseUpCrop,
-  computeSelfMaskRect,
   describeWindowContext,
   emptyHabitProfile,
-  fillBitmapRect,
   gateIntervention,
   gateUnreadableContent,
   habitPredictionText,
@@ -1145,9 +1143,6 @@ class PetApplication {
       readonly UNREADABLE_VIEW_TEXT: typeof UNREADABLE_VIEW_TEXT;
       /** 窗口特写的裁剪矩形（坐标系容错那块的风险最高，所以单独断言）。 */
       readonly computeCloseUpCrop: typeof computeCloseUpCrop;
-      /** 「她不出现在自己的感知画面里」：遮罩矩形 + 涂色（纯字节运算，可逐条断言）。 */
-      readonly computeSelfMaskRect: typeof computeSelfMaskRect;
-      readonly fillBitmapRect: typeof fillBitmapRect;
     };
     readonly perceptionStatus: () => Promise<PerceptionStatus | null>;
     /**
@@ -1240,8 +1235,6 @@ class PetApplication {
         gateUnreadableContent,
         UNREADABLE_VIEW_TEXT,
         computeCloseUpCrop,
-        computeSelfMaskRect,
-        fillBitmapRect,
       },
       perceptionStatus: async () => {
         const bridge = this.runtime.perception();

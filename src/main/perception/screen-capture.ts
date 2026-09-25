@@ -1,7 +1,7 @@
 /**
  * 屏幕截取（3.1）—— 用 Electron 自带的 `desktopCapturer`，不装任何原生依赖。
  *
- * 四个必须注意的点（都是实测/文档里踩过的）：
+ * 三个必须注意的点（都是实测/文档里踩过的）：
  *
  * 1. **`thumbnailSize` 不总是被尊重**：某些环境会返回全分辨率缩略图。
  *    因此这里拿到图之后再**自己 resize 一次**，保证交给视觉模型的图足够小
@@ -11,13 +11,11 @@
  * 3. **图像只在内存里存在一次调用**：本函数返回 base64 给视觉客户端，
  *    调用方用完即弃；磁盘上永远没有截图（见 observation-store 的说明）。
  *    **整屏、地址栏横条、窗口特写三类图都遵守这一条**。
- * 4. **桌宠自己要从画面里涂掉**：`setContentProtection` 只挡别的进程，
- *    自家 `desktopCapturer` 照样截得到她（`maskSelf`）。
  */
 
-import { desktopCapturer, nativeImage, screen } from 'electron';
+import { desktopCapturer, screen } from 'electron';
 import type { PerceptionSettings } from '../../shared/perception-types';
-import { computeCloseUpCrop, computeSelfMaskRect, fillBitmapRect } from '../../shared/perception';
+import { computeCloseUpCrop } from '../../shared/perception';
 import type { Logger } from '../../shared/logger';
 import { describeError } from '../../shared/errors';
 
@@ -30,24 +28,9 @@ export interface CaptureResult {
   readonly elapsedMs: number;
 }
 
-/** 一个屏幕矩形（Electron 的 `getBounds()` 口径：DIP）。 */
-export interface ScreenRect {
-  readonly x: number;
-  readonly y: number;
-  readonly width: number;
-  readonly height: number;
-}
-
 export interface ScreenCaptureOptions {
   readonly logger: Logger;
   readonly getSettings: () => PerceptionSettings;
-  /**
-   * 桌宠自己那些窗口的当前位置（DIP）——用来把她的像素从画面里**涂掉**。
-   *
-   * 为什么需要（实测见 `tools/probe-self-capture.cjs`）：`setContentProtection(true)`
-   * 只挡得住**别的进程**的截屏，我们自己 `desktopCapturer` 截出来的帧里她照样在。
-   */
-  readonly getSelfRects?: () => readonly ScreenRect[];
 }
 
 export class ScreenCapture {
@@ -57,47 +40,6 @@ export class ScreenCapture {
   public constructor(options: ScreenCaptureOptions) {
     this.options = options;
     this.logger = options.logger;
-  }
-
-  /**
-   * 截主屏一张图（**已经把自己涂掉**），三个入口共用。
-   *
-   * 为什么要有这个私有入口：遮罩必须发生在**任何裁剪之前**。
-   * 曾经在 `grabWindowCloseUp` 里"先裁窗口、再涂自己"——遮罩按整屏坐标算，
-   * 一旦前景窗口不在 (0,0)（比如终端只占屏幕右下角），涂的位置就整体偏掉，
-   * 她反而留在画面里。现在只有这一处会截屏，顺序不可能再写反。
-   *
-   * @param targetWidth 目标宽度（像素）；实际更大时会自己缩一次（见文件头注释 1）
-   */
-  private async capturePrimaryScreen(
-    targetWidth: number,
-    targetHeight: number,
-  ): Promise<{ readonly image: Electron.NativeImage; readonly primary: Electron.Display } | null> {
-    const sources = await desktopCapturer.getSources({
-      types: ['screen'],
-      thumbnailSize: { width: Math.max(160, Math.round(targetWidth)), height: Math.max(90, Math.round(targetHeight)) },
-      fetchWindowIcons: false,
-    });
-    if (sources.length === 0) {
-      this.logger.warn('screen capture returned no sources');
-      return null;
-    }
-    const primary = screen.getPrimaryDisplay();
-    const source = sources.find((item) => String(item.display_id) === String(primary.id)) ?? sources[0];
-    if (!source) return null;
-    let image = source.thumbnail;
-    if (image.isEmpty()) {
-      this.logger.warn('screen capture returned an empty thumbnail');
-      return null;
-    }
-    // 见文件头注释 1：自己再缩一次，别赌 thumbnailSize 生效
-    const size = image.getSize();
-    if (size.width > targetWidth) {
-      image = image.resize({ width: Math.max(160, Math.round(targetWidth)), quality: 'good' });
-    }
-    // 把自己涂掉（必须在缩放之后、任何裁剪之前：遮罩按"整屏像素"算）
-    image = this.maskSelf(image, primary.size);
-    return { image, primary };
   }
 
   /** 截一帧（失败返回 null，绝不抛给调用方）。 */
@@ -110,10 +52,31 @@ export class ScreenCapture {
       const aspect = primary.size.height > 0 ? primary.size.height / Math.max(1, primary.size.width) : 0.5625;
       const targetHeight = Math.max(90, Math.round(targetWidth * aspect));
 
-      const captured = await this.capturePrimaryScreen(targetWidth, targetHeight);
-      if (!captured) return null;
-      const jpeg = captured.image.toJPEG(72);
-      const finalSize = captured.image.getSize();
+      const sources = await desktopCapturer.getSources({
+        types: ['screen'],
+        thumbnailSize: { width: targetWidth, height: targetHeight },
+        fetchWindowIcons: false,
+      });
+      if (sources.length === 0) {
+        this.logger.warn('screen capture returned no sources');
+        return null;
+      }
+      const source =
+        sources.find((item) => String(item.display_id) === String(primary.id)) ?? sources[0];
+      if (!source) return null;
+
+      let image = source.thumbnail;
+      if (image.isEmpty()) {
+        this.logger.warn('screen capture returned an empty thumbnail');
+        return null;
+      }
+      // 见文件头注释 1：自己再缩一次，别赌 thumbnailSize 生效
+      const size = image.getSize();
+      if (size.width > targetWidth) {
+        image = image.resize({ width: targetWidth, quality: 'good' });
+      }
+      const jpeg = image.toJPEG(72);
+      const finalSize = image.getSize();
       return {
         dataBase64: jpeg.toString('base64'),
         mimeType: 'image/jpeg',
@@ -146,13 +109,23 @@ export class ScreenCapture {
       const aspect = primary.size.height > 0 ? primary.size.height / Math.max(1, primary.size.width) : 0.5625;
       const targetHeight = Math.max(160, Math.round(targetWidth * aspect));
 
-      const captured = await this.capturePrimaryScreen(targetWidth, targetHeight);
-      if (!captured) return null;
+      const sources = await desktopCapturer.getSources({
+        types: ['screen'],
+        thumbnailSize: { width: targetWidth, height: targetHeight },
+        fetchWindowIcons: false,
+      });
+      const source = sources.find((item) => String(item.display_id) === String(primary.id)) ?? sources[0];
+      if (!source) return null;
 
-      const full = captured.image.getSize();
+      let image = source.thumbnail;
+      if (image.isEmpty()) return null;
+      const size = image.getSize();
+      if (size.width > targetWidth) image = image.resize({ width: targetWidth, quality: 'good' });
+
+      const full = image.getSize();
       // 顶部 7%（至少 24px）：最大化浏览器下正好覆盖标签页 + 地址栏
       const stripHeight = Math.max(24, Math.round(full.height * 0.07));
-      const strip = captured.image.crop({ x: 0, y: 0, width: full.width, height: Math.min(stripHeight, full.height) });
+      const strip = image.crop({ x: 0, y: 0, width: full.width, height: Math.min(stripHeight, full.height) });
       if (strip.isEmpty()) return null;
       const jpeg = strip.toJPEG(80);
       const stripSize = strip.getSize();
@@ -200,15 +173,19 @@ export class ScreenCapture {
       /*
        * 按**原分辨率**请求缩略图：这是"看得清文字"的前提。
        * 上限用物理分辨率——再大也不会多出信息，只是白花时间和内存。
-       * 注意 `capturePrimaryScreen` 已经把桌宠自己涂掉了，且**发生在裁剪之前**
-       * （曾经写成"先裁窗口再涂"，前景窗口不在 (0,0) 时遮罩会整体偏掉）。
        */
       const scaleFactor = primary.scaleFactor > 0 ? primary.scaleFactor : 1;
       const physicalWidth = Math.max(640, Math.round(displayWidth * scaleFactor));
       const physicalHeight = Math.max(360, Math.round(displayHeight * scaleFactor));
-      const captured = await this.capturePrimaryScreen(physicalWidth, physicalHeight);
-      if (!captured) return null;
-      let image = captured.image;
+      const sources = await desktopCapturer.getSources({
+        types: ['screen'],
+        thumbnailSize: { width: physicalWidth, height: physicalHeight },
+        fetchWindowIcons: false,
+      });
+      const source = sources.find((item) => String(item.display_id) === String(primary.id)) ?? sources[0];
+      if (!source) return null;
+      let image = source.thumbnail;
+      if (image.isEmpty()) return null;
 
       /*
        * 裁剪矩形交给纯函数算（坐标系判断 + 夹取 + 太小就放弃），
@@ -246,68 +223,6 @@ export class ScreenCapture {
       this.logger.debug('window close-up capture failed', { error: describeError(error) });
       return null;
     }
-  }
-
-  /**
-   * 把**桌宠自己**的那几块像素涂掉（`hideFromCapture` 打开时）。
-   *
-   * 为什么不能只靠 `setContentProtection`：那个 API 挡的是**别的进程**的截屏/录屏，
-   * 我们自己的 `desktopCapturer` 截出来照样有她（实测平均像素差 36，见
-   * `tools/probe-self-capture.cjs`）。于是模型每帧都能在角落看到一只鲸鱼娘。
-   *
-   * 做法：按窗口矩形把像素涂成**旁边一个像素的颜色**（不是纯黑）——
-   * 一块与背景同色的补丁，比一个突兀的黑方块更不容易干扰模型。
-   * 图像依然只在内存里活一次，涂改也只发生在这份内存副本上。
-   *
-   * @param displaySize 主屏尺寸（DIP），用于把窗口矩形换算成图上像素
-   */
-  private maskSelf(image: Electron.NativeImage, displaySize: { readonly width: number; readonly height: number }): Electron.NativeImage {
-    const settings = this.options.getSettings();
-    if (!settings.hideFromCapture) return image;
-    const rects = this.options.getSelfRects?.() ?? [];
-    if (rects.length === 0) return image;
-    try {
-      const size = image.getSize();
-      if (size.width <= 0 || size.height <= 0) return image;
-      const targets = rects
-        .map((rect) => computeSelfMaskRect({ rect, display: displaySize, image: size }))
-        .filter((rect): rect is { x: number; y: number; width: number; height: number } => rect !== null);
-      if (targets.length === 0) return image;
-
-      const bitmap = image.toBitmap();
-      let painted = 0;
-      for (const rect of targets) {
-        const color = this.sampleEdgeColor(bitmap, size, rect);
-        if (fillBitmapRect(bitmap, size, rect, color)) painted += 1;
-      }
-      if (painted === 0) return image;
-      return nativeImage.createFromBitmap(bitmap, { width: size.width, height: size.height });
-    } catch (error) {
-      // 遮罩失败绝不能影响采集本身：顶多是"她出现在自己的画面里"（老行为）
-      this.logger.debug('self mask failed', { error: describeError(error) });
-      return image;
-    }
-  }
-
-  /** 取遮罩矩形右侧（越界则上方、再不行右下角）一个像素的颜色，作为填充色。 */
-  private sampleEdgeColor(
-    bitmap: Buffer,
-    size: { readonly width: number; readonly height: number },
-    rect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
-  ): { b: number; g: number; r: number; a: number } {
-    const fallback = { b: 32, g: 32, r: 32, a: 255 };
-    const candidates: readonly (readonly [number, number])[] = [
-      [rect.x + rect.width + 2, rect.y + Math.floor(rect.height / 2)],
-      [rect.x + Math.floor(rect.width / 2), rect.y - 2],
-      [rect.x - 2, rect.y + Math.floor(rect.height / 2)],
-    ];
-    for (const [x, y] of candidates) {
-      if (x < 0 || y < 0 || x >= size.width || y >= size.height) continue;
-      const index = (y * size.width + x) * 4;
-      if (index + 3 >= bitmap.length) continue;
-      return { b: bitmap[index] ?? 32, g: bitmap[index + 1] ?? 32, r: bitmap[index + 2] ?? 32, a: bitmap[index + 3] ?? 255 };
-    }
-    return fallback;
   }
 
   /**

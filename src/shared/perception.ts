@@ -1010,68 +1010,6 @@ export function computeCloseUpCrop(input: {
   return { x, y, width, height };
 }
 
-/**
- * 「让桌宠自己不出现在感知画面里」的遮罩矩形（纯函数）。
- *
- * 背景（实测，见 `tools/probe-self-capture.cjs`）：面板上写着"她不会出现在自己的感知画面里"，
- * 实现是 `setContentProtection(true)`（Windows `WDA_EXCLUDEFROMCAPTURE`）。
- * 但那个 API 挡的是**别的进程**的截屏/录屏 —— 我们自己 `desktopCapturer` 截出来的帧里，
- * 她**照样在**（实测：把桌宠藏起来前后截同一块，平均像素差 36）。
- * 于是模型每次都能在画面角落看到一只鲸鱼娘，既可能被写进描述，也可能干扰场景判断。
- *
- * 修法不是去赌 API，而是**在把图交给模型之前，把她的那块像素涂掉**：
- * 这里算"涂哪一块"（Electron 的 `getBounds()` 永远是 DIP，所以只按 DIP 换算），
- * `fillBitmapRect()` 负责涂。图仍然只在内存里活一次，不落盘。
- */
-export function computeSelfMaskRect(input: {
-  readonly rect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | null;
-  readonly display: { readonly width: number; readonly height: number };
-  readonly image: { readonly width: number; readonly height: number };
-}): { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | null {
-  const { rect, display, image } = input;
-  if (!rect || display.width <= 0 || display.height <= 0 || image.width <= 0 || image.height <= 0) return null;
-  if (rect.width < 8 || rect.height < 8) return null;
-  const pixelsPerDip = image.width / display.width;
-  const x = Math.max(0, Math.min(Math.round(rect.x * pixelsPerDip), image.width - 1));
-  const y = Math.max(0, Math.min(Math.round(rect.y * pixelsPerDip), image.height - 1));
-  const width = Math.min(Math.round(rect.width * pixelsPerDip), image.width - x);
-  const height = Math.min(Math.round(rect.height * pixelsPerDip), image.height - y);
-  if (width < 4 || height < 4) return null;
-  return { x, y, width, height };
-}
-
-/**
- * 把一块矩形涂成一个颜色（**BGRA** 就地修改，与 Electron `toBitmap()` 的字节序一致）。
- *
- * @returns 是否真的涂了（参数不合法返回 false，调用方据此决定"有没有遮到东西"）
- */
-export function fillBitmapRect(
-  bitmap: Uint8Array,
-  image: { readonly width: number; readonly height: number },
-  rect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
-  color: { readonly b: number; readonly g: number; readonly r: number; readonly a: number },
-): boolean {
-  if (image.width <= 0 || image.height <= 0) return false;
-  if (bitmap.length < image.width * image.height * 4) return false;
-  if (rect.width <= 0 || rect.height <= 0) return false;
-  const x0 = Math.max(0, Math.floor(rect.x));
-  const y0 = Math.max(0, Math.floor(rect.y));
-  const x1 = Math.min(image.width, Math.ceil(rect.x + rect.width));
-  const y1 = Math.min(image.height, Math.ceil(rect.y + rect.height));
-  if (x1 <= x0 || y1 <= y0) return false;
-  for (let y = y0; y < y1; y++) {
-    let index = (y * image.width + x0) * 4;
-    for (let x = x0; x < x1; x++) {
-      bitmap[index] = color.b;
-      bitmap[index + 1] = color.g;
-      bitmap[index + 2] = color.r;
-      bitmap[index + 3] = color.a;
-      index += 4;
-    }
-  }
-  return true;
-}
-
 /** 当前是否能采集；不能时给出人类可读原因（UI 直接显示）。 */
 export function capturePermission(settings: PerceptionSettings): { allowed: boolean; reason: string } {
   if (settings.privacyMode) return { allowed: false, reason: '隐私模式开启中（一键停止一切采集）' };

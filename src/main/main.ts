@@ -409,8 +409,6 @@ class DesktopPetApplication {
       onStatus: (status) => this.ipcManager?.notifyPerceptionStatus(status),
       requestCameraFrame: () => this.ipcManager?.requestCameraFrame(),
       onSettingsChanged: (settings) => this.applyCapturePrivacy(settings),
-      // 截图时把桌宠自己的像素涂掉（`setContentProtection` 挡不住自家 desktopCapturer）
-      getSelfRects: () => this.selfWindowRects(),
     });
     this.perception.load();
     this.perception.start();
@@ -458,38 +456,12 @@ class DesktopPetApplication {
   }
 
   /** 隐私相关的窗口副作用：要不要让自己从截屏/录屏里消失。 */  private applyCapturePrivacy(settings: { hideFromCapture: boolean }): void {
-    this.perception?.applyContentProtection(this.selfWindows(), settings.hideFromCapture);
-  }
-
-  /**
-   * 桌宠自己的窗口（桌宠本体 / 聊天 / 设置）。
-   *
-   * 两处用到，且**必须用同一份来源**：
-   * - `setContentProtection`：让别的进程的截屏/录屏里没有她；
-   * - `getSelfRects`：把她的像素从**我们自己**截的帧里涂掉（前者挡不住自家 capture，实测见
-   *   `tools/probe-self-capture.cjs`）。
-   */
-  private selfWindows(): Electron.BrowserWindow[] {
-    return [
+    const windows = [
       this.windowManager?.getWindow() ?? null,
       this.chatWindow?.getWindow() ?? null,
       this.settingsWindow?.getWindow() ?? null,
     ].filter((window): window is NonNullable<typeof window> => window !== null);
-  }
-
-  /** 可见窗口的当前位置（DIP）；隐藏的窗口不进遮罩（它本来就不在画面上）。 */
-  private selfWindowRects(): { x: number; y: number; width: number; height: number }[] {
-    const rects: { x: number; y: number; width: number; height: number }[] = [];
-    for (const window of this.selfWindows()) {
-      try {
-        if (window.isDestroyed() || !window.isVisible()) continue;
-        const bounds = window.getBounds();
-        if (bounds.width > 0 && bounds.height > 0) rects.push(bounds);
-      } catch (error) {
-        this.logger.debug('reading self window bounds failed', { error: describeError(error) });
-      }
-    }
-    return rects;
+    this.perception?.applyContentProtection(windows, settings.hideFromCapture);
   }
 
   /**

@@ -85,13 +85,6 @@ export interface PerceptionServiceOptions {
   readonly requestCameraFrame?: () => void;
   /** 隐私模式变化 / 开关变化时的副作用（例如内容保护、行为暂停）。 */
   readonly onSettingsChanged?: (settings: PerceptionSettings) => void;
-  /**
-   * 桌宠自己那些窗口的当前位置（DIP）——截图时把她的像素涂掉。
-   *
-   * 传的是**回调**而不是一份快照：窗口随时会被拖动/缩放，
-   * 每次截图都要按当时的真实位置算遮罩。
-   */
-  readonly getSelfRects?: () => readonly { readonly x: number; readonly y: number; readonly width: number; readonly height: number }[];
 }
 
 /** 内存里保留的观察条数（用于切换频率统计）。 */
@@ -143,12 +136,7 @@ export class PerceptionService {
     this.logger = options.logger;
     this.settingsStore = new PerceptionSettingsStore({ dataDir: options.dataDir, logger: options.logger });
     this.store = new ObservationStore({ dataDir: options.dataDir, logger: options.logger });
-    this.capture = new ScreenCapture({
-      logger: options.logger,
-      getSettings: () => this.settings,
-      // 桌宠自己的窗口位置：用于把她的像素从感知画面里涂掉（见 ScreenCapture.maskSelf）
-      getSelfRects: () => options.getSelfRects?.() ?? [],
-    });
+    this.capture = new ScreenCapture({ logger: options.logger, getSettings: () => this.settings });
     this.vision = new VisionAnalyzer({
       getClient: options.getClient,
       logger: options.logger,
