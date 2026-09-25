@@ -58,7 +58,7 @@ export class TimelineService {
     this.dir = join(options.dataDir, 'perception');
   }
 
-  /** 读盘：把"今天"已有的区间接回来（重启后不丢当天记录）。 */
+  /** 读盘：把"今天"已有的区间接回来（重启后不丢当天记录），并顺手补上昨天没收尾的部分。 */
   public load(): void {
     this.date = localDayOf();
     const loaded = this.readDay(this.date);
@@ -70,18 +70,50 @@ export class TimelineService {
         data: { date: this.date, segments: loaded.segments.length, minutes: loaded.totals.activeMinutes },
       });
     }
+    this.catchUpPreviousDay();
+  }
+
+  /**
+   * 启动时补昨天。
+   *
+   * 为什么需要：跨天收尾只发生在"午夜那一刻正好在采样"的情况下。如果桌宠当时没开
+   * （很常见），昨天就只写了 `timeline-<昨天>.json`（每次观察都会 persist），
+   * 而 `daily-<昨天>.md` 与她写的那段叙述会缺 —— 记忆就断在这一天。
+   * 所以启动时检查一次：有区间但没收尾/没叙述的，补上（叙述仍然"尽力"，失败不影响数据）。
+   */
+  private catchUpPreviousDay(): void {
+    try {
+      const yesterday = localDayOf(Date.now() - 86400000);
+      const previous = this.readDay(yesterday);
+      if (!previous || previous.segments.length === 0) return;
+      this.finalize(yesterday);
+      if (previous.narrative.trim() === '') {
+        this.logger.info('timeline catch-up: narrating previous day', { data: { date: yesterday } });
+        void this.narrate(yesterday).catch(() => undefined);
+      }
+    } catch (error) {
+      this.logger.warn('timeline catch-up failed', { error: describeError(error) });
+    }
   }
 
   /**
    * 收一条观察进时间线（每轮采样调用一次）。
    *
-   * 顺序：先处理**跨天**（把昨天收尾并写盘），再把新观察并进今天的区间。
-   * `nowMs` 只用于判断跨天，段的时间戳仍以 `observation.at` 为准（它是观察发生的时刻）。
+   * 顺序很关键：
+   * 1. **跨天**先把昨天收尾（写确定性部分），再**尽力补一段叙述**；
+   * 2. 然后把新观察并进今天的区间。
+   *
+   * 叙述为什么放在这里"尽力"而不是等用户点按钮：需求是"**每天**再让模型写一段叙述"，
+   * 而一天结束时如果没人点按钮，那段记忆就永远缺了。所以跨天时补一次；
+   * 失败（没密钥/网络）只记日志，确定性区间不受影响 —— `narrate()` 内部已经保证这一点。
+   * 注意它是**异步且不 await**：跨天那一刻不能让采样卡住。
    */
   public observe(observation: ScreenObservation, nowMs: number = Date.now()): void {
     const day = localDayOf(nowMs);
     if (day !== this.date) {
-      this.finalize();
+      const finishedDay = this.date;
+      this.finalize(finishedDay);
+      void this.narrate(finishedDay).catch(() => undefined);
       this.date = day;
       this.segments = [];
       this.narrative = '';
