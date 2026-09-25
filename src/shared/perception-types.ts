@@ -16,6 +16,8 @@
  *    "授权并使用摄像头"之后才会取帧。
  */
 
+import type { TimelineStatusView } from './timeline-types';
+
 /* -------------------------------------------------------------------------- */
 /* 一、开关与配置（默认全开，隐私相关的两项见上）                                  */
 /* -------------------------------------------------------------------------- */
@@ -320,6 +322,13 @@ export interface PerceptionStatus {
     /** 探测是否处于失败退避（没有 PowerShell 等情况）。 */
     readonly backingOff: boolean;
   };
+  /**
+   * 今天的时间线（"9:10–11:32 在写代码"这类区间与汇总）——面板展示，也是她"记得"的依据。
+   *
+   * 只带最近几段（整天的区间不塞进状态推送），完整记录在
+   * `perception/timeline-<日期>.json` 与 `daily-<日期>.md`。
+   */
+  readonly timeline: TimelineStatusView;
   /** 数据目录（观察记录与习惯画像都在里面）。 */
   readonly dataDir: string;
   readonly lastError: string;

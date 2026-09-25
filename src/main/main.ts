@@ -300,6 +300,10 @@ class DesktopPetApplication {
       perceptionClearData: () => this.perception?.clearData() ?? this.perceptionStatus(),
       perceptionOpenLog: () => this.openPath(this.perception?.logPath ?? ''),
       perceptionSampleNow: async () => this.perception?.tick(Date.now(), true) ?? this.perceptionStatus(),
+      perceptionTimeline: async (date) =>
+        this.perception?.timelineView(date) ?? { date: date ?? '', text: '', narrative: '', hasData: false },
+      perceptionNarrateTimeline: async (date, force) =>
+        (await this.perception?.narrateTimeline(date, force)) ?? { date: date ?? '', text: '', narrative: '', hasData: false },
       perceptionCameraFrame: (dataUrl) => {
         void this.perception?.ingestCameraFrame(dataUrl);
       },
@@ -409,6 +413,11 @@ class DesktopPetApplication {
       onStatus: (status) => this.ipcManager?.notifyPerceptionStatus(status),
       requestCameraFrame: () => this.ipcManager?.requestCameraFrame(),
       onSettingsChanged: (settings) => this.applyCapturePrivacy(settings),
+      // 时间线叙述要用名字（"你记得主人今天做了什么"），名字属于 AI 设置
+      getNames: () => {
+        const ai = this.aiService?.status();
+        return { petName: ai?.settings.petName ?? '鲸鱼娘', userName: ai?.settings.userName ?? '' };
+      },
     });
     this.perception.load();
     this.perception.start();
@@ -550,6 +559,7 @@ class DesktopPetApplication {
       interventionsToday: 0,
       cameraReady: false,
       windowContext: { count: 0, foregroundTitle: '', foregroundProcess: '', sample: [], backingOff: false },
+      timeline: { date: '', activeMinutes: 0, idleMinutes: 0, byScene: [], byApp: [], recent: [], narrative: '' },
       dataDir: aiDataDir(),
       lastError: '',
     };
@@ -663,6 +673,14 @@ class DesktopPetApplication {
       getAvailableAnimations: () => this.animationSummaries().map((item) => item.id),
       onSpeak: (request) => this.handleSpeak(request),
       onStatus: () => this.refreshAISurfaces(),
+      /*
+       * 「今天在做什么」喂给聊天与日记。
+       *
+       * 为什么由感知模块提供、而不是让 AI 模块自己去读文件：数据的真相在感知模块内存里
+       * （时间线是增量聚合的），而且这条线要能在感知关掉时**自然消失**（返回空串即可）。
+       * 用回调而不是启动时快照：每轮对话/每次写日记都取当时最新的那一段。
+       */
+      getDailyTimeline: () => this.perception?.dailyTimelineText() ?? '',
     });
     this.aiService.load();
     this.logger.info('ai module ready', { data: { dataDir: aiDataDir() } });

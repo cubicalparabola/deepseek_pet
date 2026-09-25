@@ -33,6 +33,7 @@ import type {
   PerceptionViewMode,
   PerceptionViewResult,
 } from './perception-types';
+import type { TimelineTextResult } from './timeline-types';
 import type {
   GrowthSettingsPatch,
   GrowthStatus,
@@ -186,6 +187,10 @@ export const IpcChannels = {
   PerceptionOpenLog: 'pet:perception-open-log',
   /** 立刻采一次（验收与手动调试用）。 */
   PerceptionSampleNow: 'pet:perception-sample-now',
+  /** 读某天的时间线（默认今天）：区间 + 汇总 + 她写的叙述。 */
+  PerceptionTimelineGet: 'pet:perception-timeline',
+  /** 让模型写/重写某天的"她记得的今天"（多一次 LLM 调用）。 */
+  PerceptionTimelineNarrate: 'pet:perception-timeline-narrate',
   /** Renderer -> Main：一帧摄像头画面（JPEG data URL，**不落盘**）。 */
   PerceptionCameraFrame: 'pet:perception-camera-frame',
   /** Renderer -> Main：摄像头就绪/失败。 */
@@ -518,6 +523,10 @@ export interface PerceptionAPI {
   openLog(): Promise<boolean>;
   /** 立刻采一次（验收/调试入口）。 */
   sampleNow(): Promise<PerceptionStatus>;
+  /** 读某天的时间线（不传 = 今天）：区间汇总 + 她写的那段叙述。 */
+  timeline(date?: string): Promise<TimelineTextResult>;
+  /** 让模型写/重写某天的叙述（`force` = 已有也重写）。 */
+  narrateTimeline(date?: string, force?: boolean): Promise<TimelineTextResult>;
   /** 渲染层：摄像头可用性上报。 */
   setCameraReady(ready: boolean, error?: string): void;
   /** 渲染层：回传一帧摄像头画面（JPEG data URL）。 */

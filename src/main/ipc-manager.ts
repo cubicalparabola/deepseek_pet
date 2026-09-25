@@ -39,6 +39,7 @@ import type {
   PerceptionViewMode,
   PerceptionViewResult,
 } from '../shared/perception-types';
+import type { TimelineTextResult } from '../shared/timeline-types';
 import type {
   GrowthSettingsPatch,
   GrowthStatus,
@@ -126,6 +127,10 @@ export interface IpcManagerDependencies {
   perceptionClearData(): PerceptionStatus;
   perceptionOpenLog(): boolean;
   perceptionSampleNow(): Promise<PerceptionStatus>;
+  /** 读某天的时间线（不传 = 今天）。 */
+  perceptionTimeline(date?: string): Promise<TimelineTextResult>;
+  /** 让模型写/重写某天的叙述。 */
+  perceptionNarrateTimeline(date?: string, force?: boolean): Promise<TimelineTextResult>;
   perceptionCameraFrame(dataUrl: string): void;
   perceptionCameraReady(ready: boolean, error: string): void;
 
@@ -442,6 +447,18 @@ export class IpcManager {
     this.handle(IpcChannels.PerceptionClearData, () => this.deps.perceptionClearData());
     this.handle(IpcChannels.PerceptionOpenLog, () => this.deps.perceptionOpenLog());
     this.handle(IpcChannels.PerceptionSampleNow, async () => this.deps.perceptionSampleNow());
+    this.handle(IpcChannels.PerceptionTimelineGet, async (_event, date) => {
+      // 日期只接受 `YYYY-MM-DD`；其它一律当"今天"（不猜用户意图）
+      const value = asString(date, '');
+      return this.deps.perceptionTimeline(/^\d{4}-\d{2}-\d{2}$/.test(value) ? value : undefined);
+    });
+    this.handle(IpcChannels.PerceptionTimelineNarrate, async (_event, date, force) => {
+      const value = asString(date, '');
+      return this.deps.perceptionNarrateTimeline(
+        /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : undefined,
+        asBoolean(force, false),
+      );
+    });
     this.handle(IpcChannels.PerceptionCameraFrame, (_event, dataUrl) => {
       const value = asString(dataUrl, '');
       if (value.length === 0 || value.length > 8 * 1024 * 1024) return false;

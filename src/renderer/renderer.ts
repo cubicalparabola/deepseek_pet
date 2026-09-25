@@ -84,6 +84,16 @@ import {
   withoutOwnWindows,
 } from '../shared/perception';
 import { createLoggerFactory } from '../shared/logging';
+import {
+  SEGMENT_GAP_MS,
+  appendObservation,
+  buildNarrativeMessages,
+  formatDuration,
+  formatSegmentLine,
+  formatTimelineText,
+  localDayOf,
+  summarizeDay,
+} from '../shared/timeline';
 import { EventBus } from './core/event-bus';
 import { AnimationManager } from './core/animation-manager';
 import { StateMachine } from './core/state-machine';
@@ -1149,6 +1159,20 @@ class PetApplication {
       readonly isTerminalProcess: typeof isTerminalProcess;
       readonly TERMINAL_ACTIVITY_TEXT: typeof TERMINAL_ACTIVITY_TEXT;
       readonly terminalObservationFor: typeof terminalObservationFor;
+      /**
+       * 每天的时间线聚合（"今天 9:10–11:32 在写代码"）：合并/切分/汇总/文案/叙述提示词。
+       * 全是纯函数，所以验收可以把"怎么合并、怎么跨天、idle 算不算"逐条钉死。
+       */
+      readonly timeline: {
+        readonly appendObservation: typeof appendObservation;
+        readonly summarizeDay: typeof summarizeDay;
+        readonly formatDuration: typeof formatDuration;
+        readonly formatSegmentLine: typeof formatSegmentLine;
+        readonly formatTimelineText: typeof formatTimelineText;
+        readonly buildNarrativeMessages: typeof buildNarrativeMessages;
+        readonly localDayOf: typeof localDayOf;
+        readonly SEGMENT_GAP_MS: typeof SEGMENT_GAP_MS;
+      };
     };
     readonly perceptionStatus: () => Promise<PerceptionStatus | null>;
     /**
@@ -1242,6 +1266,16 @@ class PetApplication {
         isTerminalProcess,
         TERMINAL_ACTIVITY_TEXT,
         terminalObservationFor,
+        timeline: {
+          appendObservation,
+          summarizeDay,
+          formatDuration,
+          formatSegmentLine,
+          formatTimelineText,
+          buildNarrativeMessages,
+          localDayOf,
+          SEGMENT_GAP_MS,
+        },
       },
       perceptionStatus: async () => {
         const bridge = this.runtime.perception();

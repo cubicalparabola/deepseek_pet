@@ -58,6 +58,7 @@ import type {
   PerceptionViewMode,
   PerceptionViewResult,
 } from '../shared/perception-types';
+import type { TimelineTextResult } from '../shared/timeline-types';
 import { DEFAULT_PERCEPTION_SETTINGS } from '../shared/perception-types';
 import { ASSET_HOST, ASSET_SCHEME } from '../shared/protocol';
 import {
@@ -211,6 +212,10 @@ function buildPerceptionAPI(): PerceptionAPI {
     clearData: (): Promise<PerceptionStatus> => ipcRenderer.invoke(IpcChannels.PerceptionClearData) as Promise<PerceptionStatus>,
     openLog: (): Promise<boolean> => ipcRenderer.invoke(IpcChannels.PerceptionOpenLog) as Promise<boolean>,
     sampleNow: (): Promise<PerceptionStatus> => ipcRenderer.invoke(IpcChannels.PerceptionSampleNow) as Promise<PerceptionStatus>,
+    timeline: (date?: string): Promise<TimelineTextResult> =>
+      ipcRenderer.invoke(IpcChannels.PerceptionTimelineGet, date) as Promise<TimelineTextResult>,
+    narrateTimeline: (date?: string, force?: boolean): Promise<TimelineTextResult> =>
+      ipcRenderer.invoke(IpcChannels.PerceptionTimelineNarrate, date, force) as Promise<TimelineTextResult>,
     setCameraReady: (ready: boolean, error = ''): void => send(IpcChannels.PerceptionCameraReady, { ready, error }),
     cameraFrame: (dataUrl: string): void => send(IpcChannels.PerceptionCameraFrame, dataUrl),
     onStatus: (handler: (status: PerceptionStatus) => void): Unsubscribe =>
@@ -316,6 +321,7 @@ function createDefaultPerceptionStatus(): PerceptionStatus {
     interventionsToday: 0,
     cameraReady: false,
     windowContext: { count: 0, foregroundTitle: '', foregroundProcess: '', sample: [], backingOff: false },
+    timeline: { date: '', activeMinutes: 0, idleMinutes: 0, byScene: [], byApp: [], recent: [], narrative: '' },
     dataDir: '',
     lastError: '',
   };

@@ -65,9 +65,11 @@ import type { LLMClient } from '../ai/llm-client';
 import { LLMError } from '../ai/llm-client';
 import type { Logger } from '../../shared/logger';
 import { describeError } from '../../shared/errors';
+import type { TimelineTextResult } from '../../shared/timeline-types';
 import { ObservationStore, localDay } from './observation-store';
 import { PerceptionSettingsStore } from './settings-store';
 import { ScreenCapture } from './screen-capture';
+import { TimelineService } from './timeline-service';
 import { VisionAnalyzer } from './vision';
 import { WindowContextProbe } from './window-context';
 
@@ -88,6 +90,8 @@ export interface PerceptionServiceOptions {
   readonly requestCameraFrame?: () => void;
   /** 隐私模式变化 / 开关变化时的副作用（例如内容保护、行为暂停）。 */
   readonly onSettingsChanged?: (settings: PerceptionSettings) => void;
+  /** 写时间线叙述时要用的名字（来自 AI 设置；没接 AI 模块时给默认值）。 */
+  readonly getNames?: () => { readonly petName: string; readonly userName: string };
 }
 
 /** 内存里保留的观察条数（用于切换频率统计）。 */
@@ -110,6 +114,8 @@ export class PerceptionService {
   private readonly vision: VisionAnalyzer;
   /** 窗口上下文（"开着什么 / 最上层是哪个"）。 */
   private readonly windows: WindowContextProbe;
+  /** 每日时间线（"今天 9:10–11:32 在写代码"这类区间与汇总）。 */
+  private readonly timeline: TimelineService;
 
   private timer: NodeJS.Timeout | null = null;
   private cameraTimer: NodeJS.Timeout | null = null;
@@ -150,6 +156,13 @@ export class PerceptionService {
       logger: options.logger,
       isEnabled: () => this.settings.windowContext && !this.settings.privacyMode,
       ttlMs: this.settings.windowProbeTtlMs,
+    });
+    this.timeline = new TimelineService({
+      dataDir: options.dataDir,
+      logger: options.logger,
+      getClient: options.getClient,
+      isLLMUsable: options.isLLMUsable,
+      getNames: () => options.getNames?.() ?? { petName: '鲸鱼娘', userName: '' },
     });
     this.behavior = buildBehaviorSnapshot({
       idleSeconds: 0,
@@ -289,6 +302,28 @@ export class PerceptionService {
   }
 
   /**
+   * 今天（或指定某天）的时间线文本 —— 给聊天、日记、面板共用。
+   *
+   * 为什么用**文本**而不是结构化对象：这几处都只是"往提示词/界面里塞一段话"，
+   * 文本最短路径、也不用让 AI 模块依赖感知模块的类型。
+   */
+  public dailyTimelineText(date?: string): string {
+    return this.timeline.text(date).text;
+  }
+
+  /** 让模型写（或重写）某天"她记得的今天"；返回文本与叙述。 */
+  public async narrateTimeline(date?: string, force = false): Promise<TimelineTextResult> {
+    const result = await this.timeline.narrate(date, force);
+    this.emitStatus();
+    return result;
+  }
+
+  /** 今天的时间线（面板/托盘用）。 */
+  public timelineView(date?: string): TimelineTextResult {
+    return this.timeline.text(date);
+  }
+
+  /**
    * 让桌宠与设置/聊天窗口"不进任何截屏/录屏"（Windows 的内容保护）。
    *
    * 由主进程在感知设置变化时调用：窗口的生命周期属于主进程，
@@ -305,6 +340,7 @@ export class PerceptionService {
   public load(): void {
     this.settingsStore.load();
     this.habits = this.store.load();
+    this.timeline.load();
     this.hookPowerMonitor();
     this.logger.info('perception ready', {
       data: {
@@ -476,6 +512,7 @@ export class PerceptionService {
         this.habits = learnHabit(this.habits, terminalObservation);
         this.store.saveHabits(this.habits);
       }
+      this.timeline.observe(terminalObservation, now);   // 终端时间也要计入"今天在做什么"
       this.lastError = '';
       /*
        * 明确记一条：**这一轮没有截图、没有调模型**。
@@ -510,6 +547,7 @@ export class PerceptionService {
             this.habits = learnHabit(this.habits, observation);
             this.store.saveHabits(this.habits);
           }
+          this.timeline.observe(observation, now);
           this.lastError = '';
         } else {
           this.lastError = '场景分析失败（模型不可用或返回异常）';
@@ -535,6 +573,7 @@ export class PerceptionService {
           this.habits = learnHabit(this.habits, observation);
           this.store.saveHabits(this.habits);
         }
+        this.timeline.observe(observation, now);
       }
       this.lastError = '';
     }
@@ -721,6 +760,7 @@ export class PerceptionService {
           backingOff: this.windows.backingOff,
         };
       })(),
+      timeline: this.timeline.statusView(),
       dataDir: this.store.dataDir,
       lastError: this.lastError,
     };
@@ -793,6 +833,7 @@ export class PerceptionService {
     this.observations = [];
     this.lastObservation = null;
     this.habits = emptyHabitProfile();
+    this.timeline.clear();
     this.store.clear();
     this.logger.info('perception data cleared by user');
     this.emitStatus();

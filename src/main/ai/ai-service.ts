@@ -71,6 +71,13 @@ export interface AIServiceOptions {
   readonly onSpeak?: (request: SpeakRequest) => void;
   /** 状态变化回调（推给设置窗口/聊天窗口）。 */
   readonly onStatus?: (status: AIStatusView) => void;
+  /**
+   * 「主人今天在做什么」的一段紧凑文本（由感知模块的时间线提供）。
+   *
+   * 用回调而不是缓存：每轮对话都要**当时最新**的那一段；感知模块被关掉/还没数据时
+   * 返回空串，聊天与日记里就自然没有这一块（不硬塞"今天没有记录"这种噪声）。
+   */
+  readonly getDailyTimeline?: () => string;
 }
 
 export class AIService {
@@ -397,6 +404,16 @@ export class AIService {
       ].filter((line) => line !== '');
       if (memoryBlock.length > 0) systemLines.push('', '【你记得的事】', ...memoryBlock);
     }
+    /*
+     * 「今天在做什么」：由感知模块的时间线聚合而来（不是模型的推测）。
+     * 放在这里她才能自然地说"你今天上午一直在写代码吧" —— 这是需求里"形成记忆"的落点。
+     */
+    const timeline = (this.options.getDailyTimeline?.() ?? '').trim();
+    if (timeline !== '') {
+      systemLines.push('', '【主人今天在做什么（由你观察到的活动时间线统计，不是猜的）】', timeline,
+        '可以自然地在聊天里提起（例如"你上午一直在写代码呢"），但不要照读、不要说"根据记录"；',
+        '时间线里没有的事不要编。');
+    }
     systemLines.push(
       '',
       '【输出要求】',
@@ -642,6 +659,10 @@ export class AIService {
               `情绪：${context.mood.start} → ${context.mood.end}（最低 ${context.mood.low}）`,
               `互动片段：`,
               context.highlights.event.length > 0 ? context.highlights.event.join('\n') : '（无）',
+              // 今天在做什么（感知模块的时间线）：日记里提一句会让"她记得主人"更具体
+              ...(this.options.getDailyTimeline?.() ?? '').trim() === ''
+                ? []
+                : ['', '主人今天的活动时间线（统计而来，不是猜的）：', (this.options.getDailyTimeline?.() ?? '').trim()],
             ].join('\n'),
           },
         ],

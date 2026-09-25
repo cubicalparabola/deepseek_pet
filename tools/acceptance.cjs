@@ -3218,6 +3218,88 @@ app.whenReady().then(async () => {
       hasTerminalTextStatus: Object.prototype.hasOwnProperty.call(status, 'terminalText'),
     };
   })()`);
+  /*
+   * 每天的使用时间线（需求：「统计每天用户在做什么 …… 记录每天的使用时间区间，形成记忆」）。
+   *
+   * 全是纯函数，所以可以逐条钉死规则里的坑：同场景同程序才合并、漏采一次仍算同一段、
+   * 隔太久要另起一段、**idle 永远单独成段且不计入"在电脑前"**、跨天按本地日切。
+   */
+  const timelineRules = await run(`(() => {
+    const model = window.petDebug.perception.timeline;
+    // 用真实采样节奏（每 30 秒一条）构造：这样才能测出"合并/漏采容忍/隔太久另起"
+    const at = (h, m, s = 0) => new Date(2025, 2, 1, h, m, s).toISOString();
+    const obs = (h, m, s, scene, app) => ({ at: at(h, m, s), scene, app });
+    let segments = [];
+    segments = model.appendObservation(segments, obs(9, 0, 0, 'coding', 'code'));
+    segments = model.appendObservation(segments, obs(9, 0, 30, 'coding', 'code'));   // 30s → 合并
+    segments = model.appendObservation(segments, obs(9, 1, 0, 'coding', 'code'));    // 30s → 合并（段=09:00–09:01，3 条）
+    segments = model.appendObservation(segments, obs(9, 5, 0, 'browsing', 'msedge')); // 场景变了 → 另起
+    segments = model.appendObservation(segments, obs(9, 6, 0, 'browsing', 'msedge')); // 漏采一次（60s ≤ 90s）→ 仍合并
+    segments = model.appendObservation(segments, obs(9, 10, 0, 'browsing', 'msedge')); // 隔 4 分钟 → 必须另起
+    segments = model.appendObservation(segments, obs(9, 12, 0, 'idle', ''));
+    segments = model.appendObservation(segments, obs(9, 12, 30, 'idle', ''));         // idle 与 idle 合并（但绝不与工作段合并）
+    const totals = model.summarizeDay(segments);
+    const day = { date: '2025-03-01', segments, totals, narrative: '', updatedAt: at(10, 30) };
+    const narrative = model.buildNarrativeMessages({ timeline: day, petName: '鲸鱼娘', userName: '小明' });
+    return {
+      segmentCount: segments.length,
+      scenes: segments.map((s) => s.scene),
+      samples: segments.map((s) => s.samples),
+      firstSegmentMinutes: segments[0].minutes,
+      activeMinutes: totals.activeMinutes,
+      idleMinutes: totals.idleMinutes,
+      topScene: totals.byScene[0].scene,
+      topShare: totals.byScene[0].share,
+      topApp: totals.byApp[0].app,
+      duration60: model.formatDuration(60),
+      duration90: model.formatDuration(90),
+      duration45: model.formatDuration(45),
+      line: model.formatSegmentLine(segments[0]),
+      text: model.formatTimelineText(day),
+      crossDay: model.localDayOf(new Date(2025, 2, 1, 23, 59).getTime()) !== model.localDayOf(new Date(2025, 2, 2, 0, 1).getTime()),
+      promptHasFacts: narrative.system.includes('只根据') && narrative.user.includes('时间线'),
+      gapMs: model.SEGMENT_GAP_MS,
+    };
+  })()`);
+  record(
+    '感知：时间线聚合（同场景同程序才合并 / 漏采容忍 / 隔太久另起 / idle 自成一类且不计入在电脑前）',
+    timelineRules.segmentCount === 4 &&
+      JSON.stringify(timelineRules.scenes) === JSON.stringify(['coding', 'browsing', 'browsing', 'idle']) &&
+      JSON.stringify(timelineRules.samples) === JSON.stringify([3, 2, 1, 2]) &&
+      timelineRules.firstSegmentMinutes === 1 &&
+      timelineRules.activeMinutes === 2 &&
+      timelineRules.idleMinutes === 0.5 &&
+      timelineRules.topScene === 'coding' &&
+      timelineRules.topApp === 'code' &&
+      timelineRules.duration60 === '1 小时' &&
+      timelineRules.duration90 === '1 小时 30 分' &&
+      timelineRules.duration45 === '45 分钟' &&
+      /09:00–09:01 写代码（code）/.test(timelineRules.line) === true &&
+      timelineRules.text.includes('写代码') &&
+      timelineRules.crossDay === true &&
+      timelineRules.promptHasFacts === true &&
+      timelineRules.gapMs === 90000,
+    JSON.stringify(timelineRules),
+  );
+  const timelineStatus = await run(`(async () => {
+    const status = await window.petAPI.perception.status();
+    const timeline = await window.petAPI.perception.timeline();
+    return {
+      statusDate: status.timeline.date,
+      hasFields: typeof status.timeline.activeMinutes === 'number' && Array.isArray(status.timeline.recent),
+      readDate: timeline.date,
+      readShape: typeof timeline.text === 'string' && typeof timeline.narrative === 'string' && typeof timeline.hasData === 'boolean',
+    };
+  })()`);
+  record(
+    '感知：时间线可读（状态里有今天的区间视图，IPC 也能取到某天的文本与叙述）',
+    typeof timelineStatus.statusDate === 'string' &&
+      timelineStatus.hasFields === true &&
+      timelineStatus.readDate === timelineStatus.statusDate &&
+      timelineStatus.readShape === true,
+    JSON.stringify(timelineStatus),
+  );
+
   record(
     '感知：前台是终端就直接给「正在使用控制台」（固定结论，不截图不调模型，也没有额外开关）',
     terminalRule.isTerminal === true &&

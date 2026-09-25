@@ -25,6 +25,7 @@ import type {
   UserState,
 } from '../shared/perception-types';
 import { isQuietHour, sceneLabel } from '../shared/perception';
+import { formatDuration } from '../shared/timeline';
 import type { PerceptionAPI } from '../shared/ipc';
 
 /* 通用小工具（纯 DOM，不碰业务状态） */
@@ -453,7 +454,32 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   viewResult.textContent = '点上面的按钮，她才会看一眼屏幕，用一句话说你在做什么。';
   viewSection.appendChild(viewResult);
 
-  /* 八、感知日志 */
+  /* 八、今天在做什么（时间线） */
+
+  /*
+   * 「统计每天用户在做什么」的落点：周期观察聚合成的**使用时间区间**。
+   * 这里只读展示 + 一个"让模型总结今天"的按钮；完整记录在
+   * `perception/timeline-<日期>.json` 与 `daily-<日期>.md`（人可读，也是她"记得"的东西）。
+   */
+  const timelineSection = makeSection('今天在做什么（时间线）');
+  const timelineTotals = makeReadout('合计');
+  const timelineScenes = makeReadout('按场景');
+  const timelineApps = makeReadout('按程序');
+  timelineSection.append(timelineTotals.row, timelineScenes.row, timelineApps.row);
+  const timelineList = el('ul', 'perception-list');
+  timelineList.id = 'perception-timeline-list';
+  timelineList.setAttribute('role', 'list');
+  const narrateButton = makeButton('perception-timeline-narrate', '让模型总结今天', 'ghost');
+  const narrativeBox = el('pre', 'perception-view-result');
+  narrativeBox.id = 'perception-timeline-narrative';
+  narrativeBox.textContent = '她"记得的今天"由模型在读过时间线之后写下（点上面的按钮生成/重写）。';
+  timelineSection.append(timelineList, actionRow(narrateButton), narrativeBox);
+  const timelineHint = el('p', 'perception-hint');
+  timelineHint.textContent = '区间来自周期性观察（场景 + 程序名 + 起止时间），只有文本、没有截图；'
+    + '判为离开/没动的时间单独统计，不计入"在电脑前"。';
+  timelineSection.appendChild(timelineHint);
+
+  /* 九、感知日志 */
 
   const logSection = makeSection('感知日志');
   const logList = el('ul', 'perception-list');
@@ -463,7 +489,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   logSection.append(logList, actionRow(logRefresh));
 
   panel.append(statusSection, switchesSection, privacySection, samplingSection,
-    cameraSection, habitsSection, viewSection, logSection);
+    cameraSection, habitsSection, timelineSection, viewSection, logSection);
 
   /* 面板级提示 */
 
@@ -632,6 +658,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     renderPrivacy(status);
     renderCamera(status);
     renderHabits(status);
+    renderTimeline(status);
   }
 
   /** 隐私模式：醒目行 + 一句"现在到底在不在采集"的实话（只读，不由本地点击决定）。 */
@@ -684,6 +711,54 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
         + ` · 通常 ${hourRange(habits.earliestActiveHour, habits.latestActiveHour)} 在线`;
     habitsTypicalReadout.value.textContent = habits.typicalNow === null
       ? '还看不出来（样本不够）' : sceneLabel(habits.typicalNow);
+  }
+
+  /**
+   * 今天的时间线（区间 + 汇总 + 她写的那段）。
+   *
+   * 只渲染状态里带的**最近几段**：完整的一天在 `daily-<日期>.md` 里，
+   * 面板不必把几百段都塞进来（这里回答的是"她现在记着什么"）。
+   */
+  function renderTimeline(status: PerceptionStatus): void {
+    const timeline = status.timeline;
+    const hasData = timeline.activeMinutes > 0 || timeline.idleMinutes > 0;
+    timelineTotals.value.textContent = hasData
+      ? `在电脑前 ${formatDuration(timeline.activeMinutes)} · 离开/没动 ${formatDuration(timeline.idleMinutes)}`
+      : '今天还没有记录';
+    timelineTotals.value.className = hasData
+      ? 'perception-readout-value' : 'perception-readout-value perception-value-muted';
+    timelineScenes.value.textContent = timeline.byScene.length === 0
+      ? '—'
+      : timeline.byScene.slice(0, 4)
+          .map((item) => `${sceneLabel(item.scene)} ${formatDuration(item.minutes)}（${Math.round(item.share * 100)}%）`)
+          .join('、');
+    timelineApps.value.textContent = timeline.byApp.length === 0
+      ? '—'
+      : timeline.byApp.slice(0, 3).map((item) => `${item.app} ${formatDuration(item.minutes)}`).join('、');
+
+    timelineList.textContent = '';
+    if (timeline.recent.length === 0) {
+      const empty = el('li', 'perception-empty');
+      empty.textContent = '还没有区间（她每 30 秒看一次，攒够一会儿就会出现）。';
+      timelineList.appendChild(empty);
+    } else {
+      for (const segment of timeline.recent) {
+        const item = el('li', 'perception-log-item');
+        const time = el('span', 'perception-log-time');
+        time.textContent = `${formatClock(segment.start)}–${formatClock(segment.end)}`;
+        const scene = el('span', 'perception-log-kind');
+        scene.textContent = sceneLabel(segment.scene);
+        const text = el('span', 'perception-log-text');
+        const minutes = Math.max(0, (new Date(segment.end).getTime() - new Date(segment.start).getTime()) / 60000);
+        text.textContent = `${segment.app.trim() === '' ? '（未知程序）' : segment.app.trim()} · ${formatDuration(minutes)}`;
+        item.append(time, scene, text);
+        timelineList.appendChild(item);
+      }
+    }
+
+    narrativeBox.textContent = timeline.narrative.trim() === ''
+      ? '她"记得的今天"还没有写（点下面的按钮让模型读一遍时间线再写）。'
+      : timeline.narrative.trim();
   }
 
   /* 输入框回填 */
@@ -935,6 +1010,30 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
         return;
       }
       setPanelNote('已打开感知日志');
+    });
+  });
+
+  /*
+   * 「让模型总结今天」：把当天的时间线交给模型写一段"她记得的今天"。
+   * 这是本模块里**唯一一处按需的额外模型调用**（需求明确要"每天再让模型写一段叙述"），
+   * 所以：只在用户点的时候发生、失败不影响确定性记录、写完回填到上面的框里。
+   */
+  narrateButton.addEventListener('click', () => {
+    withBusy(narrateButton, async () => {
+      narrativeBox.textContent = '正在读今天的时间线…';
+      try {
+        const result = await api.narrateTimeline();
+        if (result.narrative.trim() === '') {
+          narrativeBox.textContent = result.hasData
+            ? '模型暂时没写出内容（可能没配密钥），时间线本身已经记在 daily-<日期>.md 里了。'
+            : '今天还没有可总结的记录。';
+        } else {
+          narrativeBox.textContent = result.narrative.trim();
+        }
+        flashNote('已更新她记得的今天');
+      } catch (error) {
+        setPanelError(error instanceof Error ? error.message : String(error));
+      }
     });
   });
 
