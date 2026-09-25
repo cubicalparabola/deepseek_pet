@@ -2861,6 +2861,35 @@ app.whenReady().then(async () => {
       sceneRefine.kinds[4] === 'unknown',
     JSON.stringify(sceneRefine.kinds),
   );
+  /*
+   * 短词的**词边界**匹配（文档评审从代码里看出的反例）：
+   * `arc` / `edge` / `docs` / `notes` 这类短词用子串匹配会误伤一大片 ——
+   * "Search" 含 arc、"Knowledge" 含 edge 都会被判成浏览器。
+   */
+  const appFalsePositives = await run(`(() => {
+    const model = window.petDebug.perception;
+    return {
+      search: model.appKind('Search'),
+      knowledge: model.appKind('Knowledge Base'),
+      arch: model.appKind('Arch Linux'),
+      real: [model.appKind('Google Chrome'), model.appKind('Microsoft Edge'), model.appKind('Google Docs'), model.appKind('Apple Notes')],
+      boundary: [model.matchesAppName('Search', 'arc'), model.matchesAppName('Microsoft Edge', 'edge'), model.matchesAppName('浏览器', '浏览器')],
+    };
+  })()`);
+  record(
+    '感知：短应用名的词边界匹配（Search / Knowledge 不会被误判成浏览器）',
+    appFalsePositives.search === 'unknown' &&
+      appFalsePositives.knowledge === 'unknown' &&
+      appFalsePositives.arch === 'unknown' &&
+      appFalsePositives.real[0] === 'browser' &&
+      appFalsePositives.real[1] === 'browser' &&
+      appFalsePositives.real[2] === 'editor' &&
+      appFalsePositives.real[3] === 'editor' &&
+      appFalsePositives.boundary[0] === false &&
+      appFalsePositives.boundary[1] === true &&
+      appFalsePositives.boundary[2] === true,
+    JSON.stringify(appFalsePositives),
+  );
   record(
     '感知：习惯学习按小时聚合，并能预测当前时段（按你平时的习惯…）',
     perceptionModel.habitSamples === 4 &&

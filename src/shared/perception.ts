@@ -248,16 +248,41 @@ export const VIDEO_APPS: readonly string[] = ['bilibili', 'youtube', 'netflix', 
 /** 游戏平台（与"看视频"区分开）。 */
 export const GAME_APPS: readonly string[] = ['steam', 'epic', 'battle.net', 'wegame', '原神', 'minecraft'];
 
+/**
+ * 应用名匹配（**短英文词按"词"匹配**）。
+ *
+ * 为什么不能一律用 `includes`：应用名表里有 `arc` / `edge` / `docs` / `notes` / `pages`
+ * 这类短词，子串匹配会误伤一大片 —— 实测反例：
+ *   - "Se**arc**h" 含 `arc`  -> 被判成浏览器；
+ *   - "Knowl**edge**" 含 `edge` -> 被判成浏览器；
+ *   - "WordPress" 含 `word` -> 被判成编辑器。
+ * 因此短英文词要求前后不是字母/数字（词边界），中文词没有词边界概念，仍用子串匹配。
+ * （这条是文档评审从代码里看出来的，属于"少一个反例就会一直误判"的典型。）
+ */
+export function matchesAppName(name: string, entry: string): boolean {
+  const haystack = (name ?? '').toLowerCase();
+  const needle = (entry ?? '').toLowerCase();
+  if (needle === '' || haystack === '') return false;
+  // 含非 ASCII（中文等）：直接子串
+  if (!/^[\x20-\x7e]+$/.test(needle)) return haystack.includes(needle);
+  // 短英文词：按词边界匹配，避免命中单词内部
+  if (needle.length <= 5) {
+    const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`).test(haystack);
+  }
+  return haystack.includes(needle);
+}
+
 export type AppKind = 'browser' | 'editor' | 'video' | 'game' | 'unknown';
 
 /** 从应用名（模型给的，可能是"Google Chrome"这种）判断大致类别。 */
 export function appKind(app: string): AppKind {
   const name = (app ?? '').toLowerCase();
   if (name.trim() === '') return 'unknown';
-  if (VIDEO_APPS.some((item) => name.includes(item))) return 'video';
-  if (GAME_APPS.some((item) => name.includes(item))) return 'game';
-  if (EDITOR_APPS.some((item) => name.includes(item))) return 'editor';
-  if (BROWSER_APPS.some((item) => name.includes(item))) return 'browser';
+  if (VIDEO_APPS.some((item) => matchesAppName(name, item))) return 'video';
+  if (GAME_APPS.some((item) => matchesAppName(name, item))) return 'game';
+  if (EDITOR_APPS.some((item) => matchesAppName(name, item))) return 'editor';
+  if (BROWSER_APPS.some((item) => matchesAppName(name, item))) return 'browser';
   return 'unknown';
 }
 

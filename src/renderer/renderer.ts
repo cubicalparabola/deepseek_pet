@@ -61,6 +61,7 @@ import {
   isPlanEnabled,
   isQuietHour,
   learnHabit,
+  matchesAppName,
   matchesSensitiveKeywords,
   normalizeScene,
   parseSceneFixes,
@@ -1111,6 +1112,7 @@ class PetApplication {
       /** 场景纠正（"浏览器被认成笔记软件"这类误判的确定性补救）。 */
       readonly refineScene: typeof refineScene;
       readonly appKind: typeof appKind;
+      readonly matchesAppName: typeof matchesAppName;
       readonly parseSceneFixes: typeof parseSceneFixes;
       readonly BROWSER_APPS: typeof BROWSER_APPS;
     };
@@ -1190,6 +1192,7 @@ class PetApplication {
         sceneLabel,
         refineScene,
         appKind,
+        matchesAppName,
         parseSceneFixes,
         BROWSER_APPS,
       },
