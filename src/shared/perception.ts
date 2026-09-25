@@ -1016,7 +1016,8 @@ export function computeCloseUpCrop(input: {
  * 背景（实测，见 `tools/probe-self-capture.cjs`）：面板上写着"她不会出现在自己的感知画面里"，
  * 实现是 `setContentProtection(true)`（Windows `WDA_EXCLUDEFROMCAPTURE`）。
  * 但那个 API 挡的是**别的进程**的截屏/录屏 —— 我们自己 `desktopCapturer` 截出来的帧里，
- * 她**照样在**（实测：把桌宠藏起来前后截同一块，平均像素差 36）。
+ * 她**照样在**（实测见 `tools/probe-self-capture.cjs`：她那块的"可见 vs 隐藏"平均像素差
+ * **46.89**，而同一区域页面自身动画的噪声只有 **9.48** —— 信噪比 4.9 倍，不是巧合）。
  * 于是模型每次都能在画面角落看到一只鲸鱼娘，既可能被写进描述，也可能干扰场景判断。
  *
  * 修法不是去赌 API，而是**在把图交给模型之前，把她的那块像素涂掉**：
