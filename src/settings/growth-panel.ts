@@ -27,7 +27,7 @@ import type {
   ReflectionInsight,
 } from '../shared/growth-types';
 import { NODE_KINDS } from '../shared/growth-types';
-import { daysBetween, nodeLabel, sceneName } from '../shared/growth';
+import { daysBetween, formatLocalDate, localMonthKey, nodeLabel, sceneName } from '../shared/growth';
 import type { GrowthAPI } from '../shared/ipc';
 /* 通用小工具（纯 DOM，不碰业务状态）。 */
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string): HTMLElementTagNameMap[K] {
@@ -126,20 +126,14 @@ function errorText(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.trim() === '' ? '未知错误' : message;
 }
-/**
- * 时间戳 -> `YYYY-MM-DD`（面板时间口径统一，便于与时间轴分组对照）。
- * 与 `node.at.slice(0, 10)` 同口径，不用 `toLocaleString`：后者在别的区域设置下会变成
- * `2025/3/5`，和分组标题对不上。
+/*
+ * 时间戳 -> `YYYY-MM-DD`（本地口径）。
+ *
+ * 统一走 `shared/growth.ts` 的 `formatLocalDate()`：面板、时间轴分组与 palace.md 三处
+ * 必须是同一个口径。原来面板自己算本地、而分组与 palace.md 用 `at.slice(0,7)`（UTC），
+ * 跨零点时"显示的日期"与"分到哪个月"会互相矛盾。
  */
-function formatDate(iso: string): string {
-  if (iso.trim() === '') return '—';
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso.slice(0, 10);
-  const year = String(date.getFullYear()).padStart(4, '0');
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
+const formatDate = formatLocalDate;
 /** `2025-03` -> `2025 年 3 月`（分组标题用中文，比 `2025-03` 更像日记本）。 */
 function monthTitle(month: string): string {
   const [year, mon] = month.split('-');
@@ -167,11 +161,8 @@ function firstLine(body: string, limit = 60): string {
   if (line === '') return '（空）';
   return line.length > limit ? `${line.slice(0, limit)}…` : line;
 }
-/** 时间轴分组用的月份键（`at` 可能是空串，坏数据也要有个位置）。 */
-function monthKey(iso: string): string {
-  const key = iso.slice(0, 7);
-  return /^\d{4}-\d{2}$/.test(key) ? key : '未知时间';
-}
+/** 时间轴分组用的月份键（本地口径；坏数据也要有个位置）。 */
+const monthKey = localMonthKey;
 /** 请求超时（毫秒）：让"立刻反思一次"这类长调用不会转一辈子。 */
 const REQUEST_TIMEOUT_MS = 120000;
 /** 只读部分的刷新节流窗口：状态推送很密，时间轴不能每次都重建。 */

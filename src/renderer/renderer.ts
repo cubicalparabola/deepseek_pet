@@ -39,12 +39,15 @@ import {
   defaultPolicyOverlay,
   describePolicy,
   effectivePerception,
+  formatLocalDate,
   groupByMonth,
   heuristicInsights,
+  localMonthKey,
   mergeNodes,
   nodeId,
   nodeLabel,
   parseReflection,
+  renderPalaceMarkdown,
   responseStats,
   sceneName,
   suggestNodes,
@@ -1204,6 +1207,10 @@ class PetApplication {
       readonly sceneName: typeof sceneName;
       readonly POLICY_MIN_FACTOR: typeof POLICY_MIN_FACTOR;
       readonly NODE_KINDS: typeof NODE_KINDS;
+      /** 节点时间的展示口径（本地日期/月份），面板与 palace.md 共用。 */
+      readonly formatLocalDate: typeof formatLocalDate;
+      readonly localMonthKey: typeof localMonthKey;
+      readonly renderPalaceMarkdown: typeof renderPalaceMarkdown;
     };
     readonly growthStatus: () => Promise<GrowthStatus | null>;
   } {
@@ -1311,6 +1318,9 @@ class PetApplication {
         sceneName,
         POLICY_MIN_FACTOR,
         NODE_KINDS,
+        formatLocalDate,
+        localMonthKey,
+        renderPalaceMarkdown,
       },
       growthStatus: async () => {
         const bridge = this.runtime.growth();

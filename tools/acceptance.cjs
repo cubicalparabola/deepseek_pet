@@ -117,6 +117,24 @@ app.whenReady().then(async () => {
   const run = (script) => win.webContents.executeJavaScript(script, true);
 
   /*
+   * ⚠️ 动画相关断言期间**先把感知与 AI 都关掉**。
+   *
+   * 为什么：这两个模块都会**主动说话**，而说话会顺手播动画并弹气泡：
+   * - 感知的主动开口 → `handleSpeak()`（talk / 场景对应动画）；
+   * - AI 模块的心跳 → `maybeLonelySpeak()`（"很久没理你了，主动说一句"）→ 常挑 `cute`。
+   * 而验收里有一大批断言在问"**现在应该播的是谁**"（bomb 播完回 idle、冷却期手动再播、
+   * 交叉淡化没有空帧……）。撞在一起时断言看到的是**它们插进来的那个动画**，
+   * 于是稳定/偶发地红（实测：`bomb 播完后自动回到 idle` 看到 `cute` 在播、
+   * `非循环动画触发 animation:end` 被 `source: system` 打断、`对话气泡：隐藏后窗口收回宠物尺寸`…）。
+   * 这是**测试没隔离好**，不是产品 bug —— 产品里"她会主动说话"本来就是设计行为。
+   *
+   * 两个模块自己的断言段开始前会重新打开（并在那里断言"默认全开"）。
+   */
+  await run(`window.petAPI.perception.setSettings({ screen: false, behavior: false, habits: false, camera: false })`);
+  await run(`window.petAPI.ai.setSettings({ enabled: false, chat: false, memory: false, emotion: false, diary: false })`);
+  await wait(300);
+
+  /*
    * 双缓冲下"当前可见"的 <video> 会在 A/B 之间切换。
    * 这段主体函数会被拼接进需要取视频元素的测试脚本里，
    * 保证每次取值都重新查询，且永远不会拿到 null：
@@ -2229,6 +2247,13 @@ app.whenReady().then(async () => {
   /* ---------------------- AI 认知与人格（2.1~2.4） ---------------------- */
 
   /*
+   * AI 自己的这一段开始前把开关**重新打开**（前面为了让动画断言不受干扰而关掉了它，
+   * 因为心跳里的"很久没理你就主动说一句"会插播动画）；下面的"默认全开"断言读的就是打开后的状态。
+   */
+  await run(`window.petAPI.ai.setSettings({ enabled: true, chat: true, memory: true, emotion: true, diary: true })`);
+  await wait(500);
+
+  /*
    * 这一组检查的核心不是"能不能聊"，而是**四条底线**：
    *   1. 默认全关：没打开 AI 时桌宠行为与第一版完全一致（且不联网）；
    *   2. 密钥不出主进程：渲染层拿到的配置里只有掩码；
@@ -2675,6 +2700,13 @@ app.whenReady().then(async () => {
   }
 
   /* ------------------ 环境与用户感知（3.1~3.6） ------------------ */
+
+  /*
+   * 感知自己这一段开始前把开关**重新打开**（前面为了让动画断言不受干扰而关掉了它们），
+   * 下面的"默认全开"断言读的就是打开后的状态。
+   */
+  await run(`window.petAPI.perception.setSettings({ screen: true, behavior: true, habits: true, camera: true })`);
+  await wait(500);
 
   /*
    * 这一组的重点是**隐私与频率**，不是"能不能截图"：
@@ -3660,6 +3692,45 @@ app.whenReady().then(async () => {
     '成长：启动即写下一段"我们第一次见面"（记忆宫殿的起点）',
     growthInitial.nodes >= 1 && growthInitial.hasFirstMeet === true,
     JSON.stringify({ nodes: growthInitial.nodes, days: growthInitial.days, dataDir: growthInitial.dataDir }),
+  );
+
+  /*
+   * 节点时间的展示口径必须是**本地**日期/月份。
+   *
+   * 与"感知日志时间差一个时区"是同一类问题：`at` 存的是 ISO(UTC)，
+   * 直接 `slice(0,7)` 会把 UTC+8 凌晨产生的节点分到**上个月**，
+   * 而面板显示的日期是本地 —— 同一张时间轴上"日期"与"分组"会互相矛盾。
+   * 用一个固定时刻同时断言"面板日期、月份键、palace.md 分组"三者一致。
+   */
+  const probeLocal = new Date(2025, 2, 1, 0, 30, 0, 0);   // 本地 2025-03-01 00:30
+  const pad2 = (value) => String(value).padStart(2, '0');
+  const expectedLocalDay = `${probeLocal.getFullYear()}-${pad2(probeLocal.getMonth() + 1)}-${pad2(probeLocal.getDate())}`;
+  const localDates = await run(`(() => {
+    const model = window.petDebug.growth;
+    const probe = new Date(2025, 2, 1, 0, 30, 0, 0);
+    const iso = probe.toISOString();
+    return {
+      iso,
+      utcDay: iso.slice(0, 10),
+      utcMonth: iso.slice(0, 7),
+      localDay: model.formatLocalDate(iso),
+      localMonth: model.localMonthKey(iso),
+      emptyDay: model.formatLocalDate(''),
+      badMonth: model.localMonthKey('not-a-date'),
+      markdown: model.renderPalaceMarkdown([
+        { id: 'x', kind: 'manual', title: '测试节点', detail: '', at: iso, source: 'manual', evidence: [], hits: 1, pinned: false },
+      ], 1),
+    };
+  })()`);
+  record(
+    '成长：节点时间用本地日期/月份（UTC 切片会把凌晨的节点分到上个月）',
+    localDates.localDay === expectedLocalDay &&
+      localDates.localMonth === expectedLocalDay.slice(0, 7) &&
+      localDates.emptyDay === '—' &&
+      localDates.badMonth === '未知时间' &&
+      localDates.markdown.includes(`## ${expectedLocalDay.slice(0, 7)}`) &&
+      localDates.markdown.includes(expectedLocalDay),
+    JSON.stringify({ ...localDates, expectedLocalDay, utcDiffers: localDates.utcDay !== expectedLocalDay }),
   );
 
   /* 4.1 纯函数：节点去重 / 分组 / 规则抽取 */

@@ -274,9 +274,30 @@ export function suggestNodes(input: NodeSuggestionInput): MemoryNodeDraft[] {
   });
 }
 
+/**
+ * 节点时间 -> **本地日期** `YYYY-MM-DD`（面板与 palace.md 共用的展示口径）。
+ *
+ * 为什么不能用 `at.slice(0, 10)`：`at` 是 `toISOString()`（UTC），UTC+8 的凌晨会显示成
+ * **前一天**，时间轴分组也会跟着错到上个月（与感知日志那次"时间差一个时区"是同一类问题）。
+ */
+export function formatLocalDate(iso: string): string {
+  const trimmed = (iso ?? '').trim();
+  if (trimmed === '') return '—';
+  const date = new Date(trimmed);
+  if (Number.isNaN(date.getTime())) return trimmed.slice(0, 10);
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/** 节点时间 -> **本地月份键** `YYYY-MM`（时间轴分组用；坏数据落在"未知时间"）。 */
+export function localMonthKey(iso: string): string {
+  const date = new Date(iso ?? '');
+  if (Number.isNaN(date.getTime())) return '未知时间';
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+
 /** 节点 -> 一句话（她在聊天/气泡里提到这段经历时的说法）。 */
-export function nodeSentence(node: MemoryNode): string {
-  const label = NODE_KINDS[node.kind]?.label ?? '那段日子';
+export function nodeSentence(node: MemoryNode): string {  const label = NODE_KINDS[node.kind]?.label ?? '那段日子';
   return `${NODE_KINDS[node.kind]?.emoji ?? '📌'} ${label}：${node.title}`;
 }
 
@@ -293,13 +314,14 @@ export function renderPalaceMarkdown(nodes: readonly MemoryNode[], daysTogether:
   ];
   let currentMonth = '';
   for (const node of nodes) {
-    const month = node.at.slice(0, 7);
+    // 分组与日期都用**本地**口径（原来用 at.slice 是 UTC，跨零点的节点会被分到上个月）
+    const month = localMonthKey(node.at);
     if (month !== currentMonth) {
       currentMonth = month;
       lines.push(`## ${month}`, '');
     }
     const pinned = node.pinned ? ' 📌' : '';
-    lines.push(`- ${node.at.slice(0, 10)} ${NODE_KINDS[node.kind]?.emoji ?? '📌'} **${node.title}**${pinned}`);
+    lines.push(`- ${formatLocalDate(node.at)} ${NODE_KINDS[node.kind]?.emoji ?? '📌'} **${node.title}**${pinned}`);
     if (node.detail) lines.push(`  - ${node.detail}`);
     if (node.evidence.length > 0) lines.push(`  - 依据：${node.evidence.slice(0, 2).join(' / ')}`);
   }
