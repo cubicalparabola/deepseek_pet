@@ -21,6 +21,17 @@ import {
 } from '../shared/ipc';
 import type { PetSettingsState, PetSizeInfo } from '../shared/pet-size';
 import type { BubblePayload, BubbleState } from '../shared/bubble';
+import type {
+  AIChatReply,
+  AISettingsPatch,
+  AIStatusView,
+  AITestResult,
+  ChatTurn,
+  DiaryEntry,
+  DiarySnapshot,
+  InteractionKind,
+  MemorySnapshot,
+} from '../shared/ai-types';
 import type { PetAction } from '../shared/action-types';
 import type { DiscoveredPlugin, PluginRecord } from '../shared/plugin-types';
 import type { Logger } from '../shared/logger';
@@ -71,6 +82,30 @@ export interface IpcManagerDependencies {
   onStateChanged(payload: StateChangedPayload): void;
   onBehaviorPausedChanged(paused: boolean): void;
   onActionFromRenderer(action: PetAction): void;
+
+  /* ------------------------- AI 认知与人格（2.1~2.4） -------------------------
+   *
+   * 全部转发给 AIService：IPC 层只做参数校验与类型收窄，
+   * 业务（prompt、记忆、情绪、日记）都在 ai/ 里，避免"校验逻辑里长出业务"。
+   */
+  getAIStatus(): AIStatusView;
+  setAISettings(patch: AISettingsPatch): AIStatusView;
+  aiChat(text: string): Promise<AIChatReply>;
+  aiSpeakUp(): Promise<AIChatReply>;
+  aiHistory(): readonly ChatTurn[];
+  aiMemory(): MemorySnapshot;
+  aiClearMemory(): MemorySnapshot;
+  aiOpenMemoryLog(): boolean;
+  aiDiary(): DiarySnapshot;
+  aiDiaryGet(date: string): DiaryEntry | null;
+  aiWriteDiary(): Promise<DiaryEntry>;
+  aiOpenDiaryDir(): boolean;
+  aiTest(): Promise<AITestResult>;
+  aiInteraction(kind: InteractionKind): void;
+  aiResetEmotion(): AIStatusView;
+  aiSetPresence(presence: 'visible' | 'collapsed' | 'hidden'): AIStatusView;
+  aiOpenChat(): boolean;
+  closeChatWindow(): boolean;
 }
 
 type InvokeHandler = (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown;
@@ -288,8 +323,56 @@ export class IpcManager {
       return true;
     });
 
-    this.handle(IpcChannels.PluginDiscover, () => this.deps.discoverPlugins());
-    this.handle(IpcChannels.PluginFetchCode, async (_event, id) => this.deps.fetchPluginCode(asString(id)));
+    /* ---------------------- AI 认知与人格（2.1~2.4） ---------------------- */
+    /*
+     * 这一组通道的特点是"**渲染层只提交意图，不提交能力**"：
+     * 密钥、prompt、记忆文件、日记文件都只在主进程，渲染层拿到的永远是只读快照。
+     */
+    this.handle(IpcChannels.AIStatusGet, () => this.deps.getAIStatus());
+    this.handle(IpcChannels.AISettingsSet, (_event, patch) => {
+      const record = asRecord(patch);
+      if (record === null) {
+        throw new IpcError('ai settings patch must be an object', {
+          code: 'IPC_HANDLER_FAILED',
+          module: 'IpcManager',
+        });
+      }
+      return this.deps.setAISettings(record as AISettingsPatch);
+    });
+    this.handle(IpcChannels.AIChatSend, async (_event, text) => this.deps.aiChat(asString(text)));
+    this.handle(IpcChannels.AISpeakUp, async () => this.deps.aiSpeakUp());
+    this.handle(IpcChannels.AIChatHistory, () => this.deps.aiHistory());
+    this.handle(IpcChannels.AIMemoryGet, () => this.deps.aiMemory());
+    this.handle(IpcChannels.AIMemoryClear, () => this.deps.aiClearMemory());
+    this.handle(IpcChannels.AIMemoryOpenLog, () => this.deps.aiOpenMemoryLog());
+    this.handle(IpcChannels.AIDiaryList, () => this.deps.aiDiary());
+    this.handle(IpcChannels.AIDiaryGet, (_event, date) => this.deps.aiDiaryGet(asString(date)));
+    this.handle(IpcChannels.AIDiaryWriteNow, async () => this.deps.aiWriteDiary());
+    this.handle(IpcChannels.AIDiaryOpenDir, () => this.deps.aiOpenDiaryDir());
+    this.handle(IpcChannels.AITestConnection, async () => this.deps.aiTest());
+    this.handle(IpcChannels.AIInteraction, (_event, kind) => {
+      const allowed: readonly InteractionKind[] = ['click', 'doubleclick', 'drag', 'chat', 'diary', 'gift'];
+      const value = asString(kind, 'click') as InteractionKind;
+      if (!allowed.includes(value)) return false;
+      this.deps.aiInteraction(value);
+      return true;
+    });
+    this.handle(IpcChannels.AIResetEmotion, () => this.deps.aiResetEmotion());
+    this.handle(IpcChannels.AISetPresence, (_event, presence) => {
+      const allowed: readonly string[] = ['visible', 'collapsed', 'hidden'];
+      const value = asString(presence, 'visible');
+      if (!allowed.includes(value)) {
+        throw new IpcError('presence must be visible|collapsed|hidden', {
+          code: 'IPC_HANDLER_FAILED',
+          module: 'IpcManager',
+        });
+      }
+      return this.deps.aiSetPresence(value as 'visible' | 'collapsed' | 'hidden');
+    });
+    this.handle(IpcChannels.AIOpenChat, () => this.deps.aiOpenChat());
+    this.handle(IpcChannels.ChatWindowClose, () => this.deps.closeChatWindow());
+
+    this.handle(IpcChannels.PluginDiscover, () => this.deps.discoverPlugins());    this.handle(IpcChannels.PluginFetchCode, async (_event, id) => this.deps.fetchPluginCode(asString(id)));
     this.handle(IpcChannels.PluginReload, async (_event, id) => this.deps.reloadPlugin(asString(id)));
     this.handle(IpcChannels.PluginList, () => this.deps.listPlugins());
     this.handle(IpcChannels.PluginActivated, (_event, payload) => {

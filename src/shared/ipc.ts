@@ -13,6 +13,19 @@ import type { DiscoveredPlugin, PluginRecord } from './plugin-types';
 import type { AnimationManifest } from './animation-types';
 import type { PetSettingsState, PetSizeInfo } from './pet-size';
 import type { BubblePayload, BubbleState } from './bubble';
+import type {
+  AIChatReply,
+  AISettingsPatch,
+  AIStatusView,
+  AITestResult,
+  ChatMessagePush,
+  ChatTurn,
+  DiaryEntry,
+  DiarySnapshot,
+  InteractionKind,
+  MemorySnapshot,
+  PetPresence,
+} from './ai-types';
 
 /* -------------------------------------------------------------------------- */
 /* 通道名                                                                      */
@@ -68,6 +81,8 @@ export const IpcChannels = {
   SettingsWindowSetAlwaysOnTop: 'pet:settings-window-set-always-on-top',
   SettingsWindowOpenConfig: 'pet:settings-window-open-config',
   SettingsWindowClose: 'pet:settings-window-close',
+  /** 聊天窗口关闭（隐藏，不销毁）。 */
+  ChatWindowClose: 'pet:chat-window-close',
   CommandSettingsChanged: 'pet:command-settings-changed',
 
   /* 菜单 / 托盘 */
@@ -93,6 +108,51 @@ export const IpcChannels = {
   PluginDeactivated: 'pet:plugin-deactivated',
   PluginError: 'pet:plugin-error',
 
+  /* --------------- AI 认知与人格（2.1~2.4） ---------------
+   *
+   * 全部落在 Main 进程：大模型调用（密钥不出主进程）、记忆文件、
+   * 情绪结算、日记生成都在那边；渲染层只能拿只读快照与提交一句话。
+   */
+  /** 读取 AI 运行状态（含掩码后的配置 + 情绪快照）。 */
+  AIStatusGet: 'pet:ai-status',
+  /** 修改 AI 配置（部分补丁；apiKey 省略表示不改动）。 */
+  AISettingsSet: 'pet:ai-settings-set',
+  /** 发一句话给桌宠（2.1）。 */
+  AIChatSend: 'pet:ai-chat-send',
+  /** 读最近对话（聊天窗口打开时回填历史）。 */
+  AIChatHistory: 'pet:ai-chat-history',
+  /** 读记忆快照（2.2）。 */
+  AIMemoryGet: 'pet:ai-memory-get',
+  /** 清空记忆（事实 + 流水，profile 一并重置）。 */
+  AIMemoryClear: 'pet:ai-memory-clear',
+  /** 在文件管理器里打开记忆日志。 */
+  AIMemoryOpenLog: 'pet:ai-memory-open-log',
+  /** 日记列表（2.4）。 */
+  AIDiaryList: 'pet:ai-diary-list',
+  /** 读某一篇日记（date = YYYY-MM-DD）。 */
+  AIDiaryGet: 'pet:ai-diary-get',
+  /** 立刻写今天的日记（不等定时器）。 */
+  AIDiaryWriteNow: 'pet:ai-diary-write',
+  /** 打开日记目录。 */
+  AIDiaryOpenDir: 'pet:ai-diary-open',
+  /** 连通性自检（设置界面「测试连接」）。 */
+  AITestConnection: 'pet:ai-test',
+  /** Renderer -> Main：发生了一次互动（点击/拖动…），用于情绪上涨。 */
+  AIInteraction: 'pet:ai-interaction',
+  /** 把情绪重置为初始值（调试/后悔药）。 */
+  AIResetEmotion: 'pet:ai-reset-emotion',
+  /**
+   * 切换在场状态（可见 / 收起 / 隐藏）。
+   *
+   * 收起 = 她还在屏幕上但整窗点击穿透、行为暂停、情绪下降更快（见 2.3）。
+   * 入口在托盘菜单，同时开给渲染层与验收脚本 —— 否则这个状态无法被断言。
+   */
+  AISetPresence: 'pet:ai-set-presence',
+  /** 打开聊天窗口（托盘菜单与桌宠共用）。 */
+  AIOpenChat: 'pet:ai-open-chat',
+  /** 让桌宠主动说一句话（聊天窗口的「让她说句话」，也是"主动搭话"的手动入口）。 */
+  AISpeakUp: 'pet:ai-speak-up',
+
   /* Main -> Renderer 指令 */
   CommandAction: 'pet:command-action',
   CommandSetBehaviorPaused: 'pet:command-set-behavior-paused',
@@ -100,6 +160,10 @@ export const IpcChannels = {
   CommandSetAnimation: 'pet:command-set-animation',
   CommandSizeChanged: 'pet:command-size-changed',
   CommandBubble: 'pet:command-bubble',
+  /** AI 状态变化（开关、情绪、模式），推给设置窗口与桌宠窗口。 */
+  CommandAIStatus: 'pet:command-ai-status',
+  /** Main -> 聊天窗口：一条新消息（用户/宠物/系统提示）。 */
+  CommandChatMessage: 'pet:command-chat-message',
   CommandShutdown: 'pet:command-shutdown',
 } as const;
 
@@ -193,6 +257,10 @@ export interface TrayStatePayload {
   readonly alwaysOnTop?: boolean;
   /** 全部已注册动画（仅供主进程构造「播放动画」菜单使用）。 */
   readonly animations?: readonly AnimationSummary[];
+  /** AI 状态（仅供主进程构造「AI（认知与人格）」子菜单使用）。 */
+  readonly ai?: AIStatusView;
+  /** 在场状态（可见 / 收起 / 隐藏），子菜单据此显示"收起/展开"。 */
+  readonly presence?: PetPresence;
 }
 
 /** 菜单展示用的动画摘要（主进程从 Manifest 解析）。 */
@@ -304,6 +372,52 @@ export interface SettingsAPI {
   onChanged(handler: (state: PetSettingsState) => void): () => void;
 }
 
+/**
+ * AI 认知与人格 API（2.1~2.4）。
+ *
+ * 桌宠窗口（`petAPI.ai`）与设置窗口（`settingsAPI.ai`）共用同一个面：
+ * 两边都需要"看状态、改开关、读日记、读记忆"，差别只在布局。
+ * 注意返回的配置里**没有明文密钥**（只有掩码），密钥的写入是单向的。
+ */
+export interface AIAPI {
+  /** 状态快照：开关、掩码配置、模式（llm/local）、情绪、数据目录。 */
+  status(): Promise<AIStatusView>;
+  /** 修改配置（部分字段；`apiKey` 省略 = 保持原值）。 */
+  setSettings(patch: AISettingsPatch): Promise<AIStatusView>;
+  /** 对桌宠说一句话（2.1）。关掉 AI 时走本地兜底回复，不会报错。 */
+  chat(text: string): Promise<AIChatReply>;
+  /** 最近的对话记录（倒序，最多 20 轮）。 */
+  history(): Promise<readonly ChatTurn[]>;
+  /** 记忆快照（2.2）。 */
+  memory(): Promise<MemorySnapshot>;
+  /** 清空记忆（保留配置文件）。 */
+  clearMemory(): Promise<MemorySnapshot>;
+  /** 在系统文件管理器里打开记忆日志文件。 */
+  openMemoryLog(): Promise<boolean>;
+  /** 日记列表（2.4）。 */
+  diary(): Promise<DiarySnapshot>;
+  /** 读某一篇日记；不存在返回 null。 */
+  diaryGet(date: string): Promise<DiaryEntry | null>;
+  /** 立刻写今天的日记（已写过则覆盖）。 */
+  writeDiary(): Promise<DiaryEntry>;
+  /** 打开日记目录。 */
+  openDiaryDir(): Promise<boolean>;
+  /** 连通性自检（设置界面「测试连接」）。 */
+  testConnection(): Promise<AITestResult>;
+  /** 上报一次互动（点击/拖动/双击），用于情绪上涨。 */
+  notifyInteraction(kind: InteractionKind): void;
+  /** 把情绪重置回初始值。 */
+  resetEmotion(): Promise<AIStatusView>;
+  /** 切换在场状态（收起 = 安静待着：点击穿透 + 行为暂停 + 情绪下降更快）。 */
+  setPresence(presence: PetPresence): Promise<AIStatusView>;
+  /** 打开聊天窗口（桌宠窗口/托盘共用）。 */
+  openChatWindow(): Promise<boolean>;
+  /** 订阅状态变化（情绪心跳会定期推送）。 */
+  onStatus(handler: (status: AIStatusView) => void): () => void;
+  /** 订阅"宠物主动说话 / 系统提示"（聊天窗口与桌宠窗口都可订阅）。 */
+  onChatMessage(handler: (message: ChatMessagePush) => void): () => void;
+}
+
 /** `window.petAPI` 的完整形状。 */
 export interface PetBridge {
   readonly runtime: RuntimeInfo;
@@ -318,6 +432,8 @@ export interface PetBridge {
   readonly settings: SettingsAPI;
   /** 对话气泡（第一版只用于手动验证）。 */
   readonly bubble: BubbleAPI;
+  /** AI 认知与人格（2.1~2.4）。 */
+  readonly ai: AIAPI;
   notifyAnimationChanged(payload: AnimationChangedPayload): void;
   notifyStateChanged(payload: StateChangedPayload): void;
   notifyBehaviorPaused(paused: boolean): void;

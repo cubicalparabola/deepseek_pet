@@ -2,35 +2,18 @@ node_modules/
 dist/
 release/
 
-# 构建产物（由 npm run icons / npm run assets 生成，可随时重新生成）
-build/icon.ico
-build/icon.png
-build/icon-32.png
-build/tray.png
-build/tray@2x.png
-build/tray-16.png
+# build/ 整体是「产物与诊断」目录，一律不入库：
+#   icon.ico / icon.png / tray*.png      —— 由 npm run icons 生成
+#   *.json / *.log / *.txt / *.html      —— 验收与诊断结果
+#   bubble/、*-frames/、desktop-burst/ 等 —— 逐帧转储与截图，几十上百 MB
+#
+# 为什么整体忽略而不是逐条列举：漏一条（例如新加的 *.png 截图）就会误提交
+# 几十 MB 的中间数据 —— 实测踩过（`git add -A` 把整目录 500+ 个诊断文件暂存了）。
+build/
 
 # 运行期用户设置（首次运行时自动生成，不应提交）
 assets/config/settings.json
 
-# 诊断与验收产物
-build/*.json
-build/*.log
-build/*.html
-build/*.bin
-build/*.txt
-build/knockout/
-# 素材蒙版对比图（由 npm run compare:matte 重新生成）
-build/matte/
-# 逐帧转储与分析中间产物：动辄几百 MB，绝不入库
-build/frames/
-build/loop-frames/
-build/motion-frames/
-build/seam-frames/
-build/frames-capture/
-build/backup-animations/
-# 被替换掉的旧素材备份（换素材时自动生成）
-build/backup-segments/
 *.log
 
 .DS_Store

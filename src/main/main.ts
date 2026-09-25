@@ -14,7 +14,7 @@
  * 主进程只负责系统能力，并把它们通过 preload + IPC 暴露出去。
  */
 
-import { app, dialog, screen } from 'electron';
+import { app, dialog, screen, shell } from 'electron';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -51,7 +51,11 @@ import { SettingsStore } from './settings-store';
 import { SettingsWindowManager } from './settings-window-manager';
 import { FALLBACK_ASPECT_RATIO, resolvePetSize } from './pet-size';
 import { resolveBubbleLayout, type BubblePayload, type BubbleState } from '../shared/bubble';
+import type { AIStatusView, DiaryEntry, PetPresence } from '../shared/ai-types';
+import { createDefaultAIStatus } from '../shared/ai-types';
 import { registerAssetProtocolHandler, registerAssetScheme } from './asset-protocol';
+import { AIService } from './ai/ai-service';
+import { ChatWindowManager } from './chat-window-manager';
 import { IpcManager } from './ipc-manager';
 import { PluginManager } from './plugin-manager';
 import { TrayManager } from './tray-manager';
@@ -69,6 +73,11 @@ class DesktopPetApplication {
   private ipcManager: IpcManager | null = null;
   private pluginManager: PluginManager | null = null;
   private bubbleController: BubbleController | null = null;
+  /** AI 认知与人格（2.1~2.4）：大模型、记忆、情绪、日记都在这里。 */
+  private aiService: AIService | null = null;
+  private chatWindow: ChatWindowManager | null = null;
+  /** 桌宠"在不在场"（影响情绪衰减与是否接收点击）。 */
+  private presence: PetPresence = 'visible';
 
   private animationManifest: AnimationManifest = {};
   private bootstrapData: PetBootstrap | null = null;
@@ -156,6 +165,15 @@ class DesktopPetApplication {
     });
     this.pluginManager.discoverPlugins();
 
+    /*
+     * AI 认知与人格（2.1~2.4）。
+     *
+     * 刻意在窗口创建**之前**装配：这样"打开桌宠时她先跟你打个招呼"
+     * 这类主动行为才有地方挂。装配本身不联网、不读密钥以外的外部资源。
+     */
+    this.createAIService();
+    this.createChatWindow();
+
     this.bootstrapData = this.createBootstrap();
 
     this.ipcManager = new IpcManager({
@@ -217,6 +235,37 @@ class DesktopPetApplication {
         this.refreshTray();
       },
       onActionFromRenderer: (action) => this.handleRendererAction(action),
+
+      /* --------------------- AI 认知与人格（2.1~2.4） ---------------------
+       *
+       * IPC 层只做转发，真正的业务在 ai/ 里（见 src/main/ai/）。
+       * 这里每个方法都是一行 —— "接线"与"逻辑"分开，改逻辑不必碰 IPC。
+       */
+      getAIStatus: () => this.aiStatus(),
+      setAISettings: (patch) => this.aiService?.setSettings(patch) ?? this.aiStatus(),
+      aiChat: async (text) => this.aiService?.chat(text, 'chat-window') ?? localChatFallback('AI 模块未就绪'),
+      aiSpeakUp: async () => this.aiService?.speakUp('tray') ?? localChatFallback('AI 模块未就绪'),
+      aiHistory: () => this.aiService?.history() ?? [],
+      aiMemory: () => this.aiService?.memorySnapshot() ?? emptyMemorySnapshot(),
+      aiClearMemory: () => this.aiService?.clearMemory() ?? emptyMemorySnapshot(),
+      aiOpenMemoryLog: () => this.openPath(this.aiService?.memoryLogFile ?? ''),
+      aiDiary: () => this.aiService?.diarySnapshot() ?? { items: [], dataDir: '', todayWritten: false, diaryHour: 22 },
+      aiDiaryGet: (date) => this.aiService?.getDiary(date) ?? null,
+      aiWriteDiary: () => this.writeDiaryNow(),
+      aiOpenDiaryDir: () => this.openPath(this.aiService?.diaryService.dataDir ?? ''),
+      aiTest: async () =>
+        this.aiService?.testConnection() ?? { ok: false, mode: 'local', latencyMs: 0, sample: '', error: 'AI 模块未就绪', tokens: 0 },
+      aiInteraction: (kind) => this.aiService?.notifyInteraction(kind),
+      aiResetEmotion: () => this.aiService?.resetEmotion() ?? this.aiStatus(),
+      aiSetPresence: (presence) => {
+        this.setPresence(presence);
+        return this.aiStatus();
+      },
+      aiOpenChat: () => this.openChatWindow(),
+      closeChatWindow: () => {
+        this.chatWindow?.hide();
+        return true;
+      },
     });
     this.ipcManager.register();
     this.ipcManager.setSenderProvider(() => this.windowManager?.getWindow() ?? null);
@@ -272,7 +321,175 @@ class DesktopPetApplication {
       getState: () => this.settingsState(),
       setScale: (scale) => this.applyScale(scale),
       setAlwaysOnTop: (value) => this.applyAlwaysOnTop(value),
+      getAIStatus: () => this.aiStatus(),
     });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* AI 认知与人格（2.1~2.4）                                             */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * 装配 AI 服务。
+   *
+   * 三个回调决定了"AI 模块如何影响桌宠本体"：
+   * - `onSpeak`   ：她说的话 -> 气泡；挑中的动画 -> 播放；同时推给聊天窗口；
+   * - `onStatus`  ：状态变化 -> 推设置/聊天窗口 + 刷新托盘（菜单里的心情是活的）；
+   * - `getAvailableAnimations`：只能播放 Manifest 里真实存在的动画。
+   */
+  private createAIService(): void {
+    this.aiService = new AIService({
+      // 数据目录默认在 userData；验收脚本用环境变量指到临时目录，
+      // 这样"自动验收"不会污染用户真实的记忆与日记。
+      dataDir: aiDataDir(),
+      logger: this.loggerFactory.create('AI'),
+      getAvailableAnimations: () => this.animationSummaries().map((item) => item.id),
+      onSpeak: (request) => this.handleSpeak(request),
+      onStatus: () => this.refreshAISurfaces(),
+    });
+    this.aiService.load();
+    this.logger.info('ai module ready', { data: { dataDir: aiDataDir() } });
+  }
+
+  private createChatWindow(): void {
+    this.chatWindow = new ChatWindowManager({
+      config: this.config,
+      logger: this.loggerFactory.create('ChatWindow'),
+      getHistory: () => this.aiService?.history() ?? [],
+      getStatus: () => this.aiStatus(),
+    });
+  }
+
+  /** 她说一句话：气泡 + 动画 + 推给聊天窗口。 */
+  private handleSpeak(request: { text: string; animation: string | null; kind: string; level?: 'info' | 'warn' | 'error' }): void {
+    if (request.text.trim() !== '') {
+      this.applyBubble({ visible: true, text: request.text, ready: false });
+    }
+    if (request.animation) {
+      this.ipcManager?.setAnimation(request.animation);
+    }
+    this.chatWindow?.pushMessage({
+      role: request.kind === 'system' ? 'system' : 'pet',
+      text: request.text,
+      at: new Date().toISOString(),
+      ...(request.level ? { level: request.level } : {}),
+    });
+  }
+
+  /** AI 状态快照（含情绪与在场状态）。 */
+  private aiStatus(): AIStatusView {
+    if (this.aiService) {
+      const status = this.aiService.status();
+      // 在场状态以主进程为准（窗口是显示还是隐藏，只有这里知道）
+      return { ...status, presence: this.presence };
+    }
+    const fallback = createDefaultAIStatus(aiDataDir());
+    return { ...fallback, presence: this.presence };
+  }
+
+  /** 状态变化后刷新三处 UI：托盘菜单、设置窗口、聊天窗口。 */
+  private refreshAISurfaces(): void {
+    this.refreshTray();
+    this.settingsWindow?.pushAIStatus();
+    this.chatWindow?.pushStatus(this.aiStatus());
+  }
+
+  private openPath(target: string): boolean {
+    if (!target) return false;
+    try {
+      void shell.openPath(target);
+      return true;
+    } catch (error) {
+      this.logger.warn('opening path failed', { error: describeError(error), data: { target } });
+      return false;
+    }
+  }
+
+  private openChatWindow(): boolean {
+    this.chatWindow?.open();
+    return this.chatWindow?.exists() ?? false;
+  }
+
+  /**
+   * "她记住了什么？"——把长期记忆整理成一段可读文本显示在气泡里。
+   *
+   * 记忆必须是**可审计**的：用户点一下就能看到她在记什么，
+   * 而不是只能去翻 JSON 文件。记错了也才能被发现。
+   */
+  private memoryDigest(): string {
+    const snapshot = this.aiService?.memorySnapshot();
+    if (!snapshot || snapshot.profile.facts.length === 0) {
+      return '我现在还没记住什么。多和我说说话吧～\n（记忆日志：' + (this.aiService?.memoryLogFile ?? '-') + '）';
+    }
+    const label: Record<string, string> = {
+      name: '名字',
+      interest: '兴趣',
+      routine: '作息',
+      activity: '常做的事',
+      project: '在做的项目',
+      preference: '偏好',
+      relation: '提到的人',
+      note: '其它',
+    };
+    const lines = snapshot.profile.facts.slice(0, 12).map((fact) => `· ${label[fact.key] ?? fact.key}：${fact.value}`);
+    return [
+      `我记住了 ${snapshot.stats.facts} 件事（对话 ${snapshot.stats.turns} 轮）：`,
+      ...lines,
+      '',
+      '记忆日志：' + snapshot.logFile,
+    ].join('\n');
+  }
+
+  /** 立刻写一篇日记（托盘菜单与设置界面共用）。 */
+  private async writeDiaryNow(): Promise<DiaryEntry> {
+    if (!this.aiService) {
+      throw new Error('AI 模块未就绪');
+    }
+    const entry = await this.aiService.writeDiary(undefined, true);
+    // 写完把正文冒泡出来 —— 用户点菜单就是想看内容
+    this.applyBubble({ visible: true, text: entry.body, ready: false });
+    this.refreshTray();
+    return entry;
+  }
+
+  /**
+   * 切换"收起（不打扰）"。
+   *
+   * 收起的语义（与 2.3 的衰减三档一致）：
+   * - 她还在屏幕上，但**整窗点击穿透**，不接收任何点击/拖动；
+   * - 行为暂停（不会自己跳动画打扰你）；
+   * - 情绪衰减加快（1.0/分钟，隐藏是 2.2）。
+   */
+  private toggleCollapsed(): boolean {
+    const next: PetPresence = this.presence === 'collapsed' ? 'visible' : 'collapsed';
+    this.setPresence(next);
+    return next === 'collapsed';
+  }
+
+  private setPresence(presence: PetPresence): void {
+    if (presence === this.presence) return;
+    const wasCollapsed = this.presence === 'collapsed';
+    this.presence = presence;
+
+    if (presence === 'hidden') {
+      this.windowManager?.hide();
+      this.windowVisible = false;
+    } else {
+      this.windowManager?.show();
+      this.windowVisible = true;
+    }
+
+    const collapsed = presence === 'collapsed';
+    this.windowManager?.setIgnoreMouseEvents(collapsed, true);
+    if (collapsed !== wasCollapsed) {
+      this.behaviorPaused = collapsed;
+      this.ipcManager?.setBehaviorPaused(collapsed);
+    }
+
+    this.aiService?.setPresence(presence);
+    this.aiService?.recordEvent('presence', presence === 'collapsed' ? '收起（不打扰）' : presence === 'hidden' ? '隐藏桌宠' : '展开桌宠');
+    this.logger.info('pet presence changed', { data: { presence } });
+    this.refreshTray();
   }
 
   private createTray(): void {
@@ -343,6 +560,32 @@ class DesktopPetApplication {
           this.applyAlwaysOnTop(value);
         },
         onOpenSettings: () => this.settingsWindow?.open(),
+
+        /* ------------------ AI 认知与人格（2.1~2.4） ------------------ */
+        onOpenChat: () => {
+          this.openChatWindow();
+        },
+        onSpeakUp: () => {
+          void this.aiService?.speakUp('tray');
+        },
+        onWriteDiary: () => {
+          void this.writeDiaryNow().catch((error: unknown) => {
+            this.logger.warn('writing diary from tray failed', { error: describeError(error) });
+          });
+        },
+        onOpenDiaryFolder: () => {
+          this.openPath(this.aiService?.diaryService.dataDir ?? '');
+        },
+        onShowMemoryDigest: () => {
+          this.applyBubble({ visible: true, text: this.memoryDigest(), ready: false });
+        },
+        onToggleCollapsed: () => this.toggleCollapsed(),
+        onResetEmotion: () => {
+          this.aiService?.resetEmotion();
+          this.refreshTray();
+        },
+        onOpenAISettings: () => this.settingsWindow?.open(),
+
         onQuit: () => this.quit(),
       },
     });
@@ -592,6 +835,9 @@ class DesktopPetApplication {
       alwaysOnTop: this.settings.alwaysOnTop,
       // 「播放动画」菜单需要全部动画清单，主进程自己解析 Manifest 即可
       animations: this.animationSummaries(),
+      // 「AI（认知与人格）」子菜单需要状态与在场状态（心情会随心跳变化）
+      ai: this.aiStatus(),
+      presence: this.presence,
     });
   }
 
@@ -678,9 +924,12 @@ class DesktopPetApplication {
     if (this.quitting) return;
     this.quitting = true;
     this.logger.info('shutting down');
+    // AI 侧要收尾：停心跳/日记定时器，并把情绪写盘（下次打开接着掉）
+    this.aiService?.dispose();
     this.windowManager?.markQuitting();
     this.ipcManager?.notifyShutdown();
     this.settingsWindow?.destroy();
+    this.chatWindow?.destroy();
     this.trayManager?.destroy();
     this.ipcManager?.unregister();
 
@@ -688,6 +937,7 @@ class DesktopPetApplication {
     setTimeout(() => {
       this.windowManager?.destroy();
       this.settingsWindow?.destroy();
+      this.chatWindow?.destroy();
       app.exit(0);
     }, 120);
   }
@@ -747,7 +997,14 @@ class DesktopPetApplication {
       rendererExists: existsSync(join(this.config.distPath, 'renderer', 'index.html')),
       settingsRenderer: this.config.settingsHtmlPath,
       settingsRendererExists: existsSync(this.config.settingsHtmlPath),
+      chatRenderer: this.config.chatHtmlPath,
+      chatRendererExists: existsSync(this.config.chatHtmlPath),
       userData: app.getPath('userData'),
+      // AI 认知与人格（2.1~2.4）：自检里带上关键路径与开关，便于排查"为什么她不理我"
+      ai: this.aiStatus(),
+      aiSettingsFile: join(app.getPath('userData'), 'ai-settings.json'),
+      aiMemoryDir: join(app.getPath('userData'), 'memory'),
+      aiDiaryDir: join(app.getPath('userData'), 'diary'),
     };
   }
 
@@ -757,6 +1014,59 @@ class DesktopPetApplication {
     this.logger.info('SELF_TEST=' + JSON.stringify(report));
     console.log('SELF_TEST=' + JSON.stringify(report));
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/* 模块级兜底                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * AI 数据目录（记忆 / 日记 / 配置 / 情绪）。
+ *
+ * 默认是 `%APPDATA%\DesktopPet`；环境变量 `DESKTOP_PET_AI_DATA_DIR` 可以改到
+ * 别处 —— 自动化验收靠它把测试数据隔离到临时目录，不污染用户真实的记忆。
+ */
+function aiDataDir(): string {
+  const override = process.env.DESKTOP_PET_AI_DATA_DIR;
+  if (typeof override === 'string' && override.trim() !== '') return override;
+  return app.getPath('userData');
+}
+
+/**
+ * AI 服务尚未装配时的兜底回复。
+ *
+ * 为什么不在 IPC 层抛异常：桌宠的所有能力都必须是"可降级"的 ——
+ * 聊天窗口在极端时序下（服务还没起来）点发送，用户应该看到一句人话，
+ * 而不是一个红色报错。
+ */
+function localChatFallback(reason: string): {
+  ok: false;
+  reply: string;
+  mode: 'local';
+  tokens: number;
+  error: string;
+  mood: number;
+  hunger: number;
+} {
+  return { ok: false, reply: '我还没准备好……等我一下下。', mode: 'local', tokens: 0, error: reason, mood: 62, hunger: 0 };
+}
+
+function emptyMemorySnapshot(): {
+  profile: { userName: string; petName: string; facts: never[]; summary: string; updatedAt: string };
+  todayEvents: never[];
+  recentChat: never[];
+  logFile: string;
+  dataDir: string;
+  stats: { events: number; turns: number; facts: number };
+} {
+  return {
+    profile: { userName: '', petName: '', facts: [], summary: '', updatedAt: '' },
+    todayEvents: [],
+    recentChat: [],
+    logFile: '',
+    dataDir: '',
+    stats: { events: 0, turns: 0, facts: 0 },
+  };
 }
 
 /* -------------------------------------------------------------------------- */

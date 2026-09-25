@@ -22,6 +22,7 @@ import { BrowserWindow, shell, type BrowserWindowConstructorOptions } from 'elec
 import { IpcChannels } from '../shared/ipc';
 import type { PetConfig } from '../shared/config';
 import type { PetSettingsState } from '../shared/pet-size';
+import type { AIStatusView } from '../shared/ai-types';
 import {
   SETTINGS_BOOTSTRAP_FLAG,
   SETTINGS_WINDOW_FLAG,
@@ -38,11 +39,19 @@ export interface SettingsWindowOptions {
   /** 调整尺寸（已含 clamp + 写盘），返回应用后的真实尺寸。 */
   readonly setScale: (scale: number) => PetSettingsState;
   readonly setAlwaysOnTop: (value: boolean) => PetSettingsState;
+  /** AI 状态快照（AI 面板的初始数据 + 推送更新）。 */
+  readonly getAIStatus: () => AIStatusView;
 }
 
-/** 设置窗口尺寸（DIP）。高度足够容纳滑块 + 两个开关 + 按钮行。 */
-const WINDOW_WIDTH = 460;
-const WINDOW_HEIGHT = 430;
+/**
+ * 设置窗口尺寸（DIP）。
+ *
+ * 高度从 430 提到 700：多出来的部分给「AI 认知与人格」面板
+ * （四个开关 + 服务商配置 + 测试连接 + 日记/记忆入口）。
+ * 同时把 resizable 打开 —— 日记列表可能很长，用户应该能自己拉高。
+ */
+const WINDOW_WIDTH = 520;
+const WINDOW_HEIGHT = 700;
 
 export class SettingsWindowManager {
   private readonly options: SettingsWindowOptions;
@@ -61,8 +70,9 @@ export class SettingsWindowManager {
       if (window.isMinimized()) window.restore();
       window.show();
       window.focus();
-      // 重新打开时把最新设置推回页面（托盘菜单可能刚改过尺寸）
+      // 重新打开时把最新设置推回页面（托盘菜单可能刚改过尺寸/情绪）
       this.pushState();
+      this.pushAIStatus();
       return;
     }
     this.create();
@@ -90,6 +100,18 @@ export class SettingsWindowManager {
       window.webContents.send(IpcChannels.CommandSettingsChanged, this.options.getState());
     } catch (error) {
       this.logger.warn('pushing settings to settings window failed', { error: describeError(error) });
+    }
+  }
+
+  /** 把最新 AI 状态推给设置窗口（情绪心跳会让"心情"数字自己动）。 */
+  public pushAIStatus(): void {
+    if (!this.exists()) return;
+    const window = this.window as BrowserWindow;
+    if (window.isDestroyed()) return;
+    try {
+      window.webContents.send(IpcChannels.CommandAIStatus, this.options.getAIStatus());
+    } catch (error) {
+      this.logger.warn('pushing ai status to settings window failed', { error: describeError(error) });
     }
   }
 
@@ -125,6 +147,7 @@ export class SettingsWindowManager {
     const bootstrap: SettingsWindowBootstrap = {
       state: this.options.getState(),
       configPath: this.options.config.configPath,
+      ai: this.options.getAIStatus(),
     };
 
     const webPreferences: BrowserWindowConstructorOptions['webPreferences'] = {
@@ -146,9 +169,11 @@ export class SettingsWindowManager {
     const window = new BrowserWindow({
       width: WINDOW_WIDTH,
       height: WINDOW_HEIGHT,
-      // 普通窗口：有边框（可拖动、可关闭），但不可缩放且不可最大化
+      minWidth: 460,
+      minHeight: 480,
+      // 普通窗口：有边框（可拖动、可关闭），可纵向拉伸（AI 面板内容较长）
       frame: true,
-      resizable: false,
+      resizable: true,
       maximizable: false,
       minimizable: true,
       fullscreenable: false,

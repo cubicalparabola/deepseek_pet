@@ -15,6 +15,7 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import { IpcChannels } from '../shared/ipc';
 import type {
+  AIAPI,
   AnimationChangedPayload,
   LogPayload,
   PetBootstrap,
@@ -29,6 +30,20 @@ import type {
 import type { PetAction, ActionResult } from '../shared/action-types';
 import type { PetSettingsState, PetSizeInfo } from '../shared/pet-size';
 import type { BubblePayload, BubbleState } from '../shared/bubble';
+import type {
+  AIChatReply,
+  AISettingsPatch,
+  AIStatusView,
+  AITestResult,
+  ChatMessagePush,
+  ChatTurn,
+  DiaryEntry,
+  DiarySnapshot,
+  InteractionKind,
+  MemorySnapshot,
+  PetPresence,
+} from '../shared/ai-types';
+import { createDefaultAIStatus } from '../shared/ai-types';
 import { ASSET_HOST, ASSET_SCHEME } from '../shared/protocol';
 import {
   SETTINGS_BOOTSTRAP_FLAG,
@@ -36,6 +51,12 @@ import {
   type SettingsWindowBootstrap,
   type SettingsWindowBridge,
 } from '../shared/settings-window';
+import {
+  CHAT_BOOTSTRAP_FLAG,
+  CHAT_WINDOW_FLAG,
+  type ChatWindowBootstrap,
+  type ChatWindowBridge,
+} from '../shared/chat-window';
 
 /* -------------------------------------------------------------------------- */
 /* 启动数据                                                                    */
@@ -118,16 +139,57 @@ function send(channel: string, ...args: unknown[]): void {
 }
 
 /* -------------------------------------------------------------------------- */
+/* AI 认知与人格：三份桥共用的实现（2.1~2.4）                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * AI API 只有一个实现，桌宠窗口与设置窗口共用。
+ *
+ * 为什么共用：两个窗口需要的是同一件事（看状态、改开关、读日记/记忆），
+ * 差异只在布局。共用一份实现意味着"设置窗口能改的，桌宠窗口也一致"，
+ * 不会出现两边行为不一致的坑。
+ */
+function buildAIAPI(): AIAPI {
+  return {
+    status: (): Promise<AIStatusView> => ipcRenderer.invoke(IpcChannels.AIStatusGet) as Promise<AIStatusView>,
+    setSettings: (patch: AISettingsPatch): Promise<AIStatusView> =>
+      ipcRenderer.invoke(IpcChannels.AISettingsSet, patch) as Promise<AIStatusView>,
+    chat: (text: string): Promise<AIChatReply> => ipcRenderer.invoke(IpcChannels.AIChatSend, text) as Promise<AIChatReply>,
+    history: (): Promise<readonly ChatTurn[]> =>
+      ipcRenderer.invoke(IpcChannels.AIChatHistory) as Promise<readonly ChatTurn[]>,
+    memory: (): Promise<MemorySnapshot> => ipcRenderer.invoke(IpcChannels.AIMemoryGet) as Promise<MemorySnapshot>,
+    clearMemory: (): Promise<MemorySnapshot> => ipcRenderer.invoke(IpcChannels.AIMemoryClear) as Promise<MemorySnapshot>,
+    openMemoryLog: (): Promise<boolean> => ipcRenderer.invoke(IpcChannels.AIMemoryOpenLog) as Promise<boolean>,
+    diary: (): Promise<DiarySnapshot> => ipcRenderer.invoke(IpcChannels.AIDiaryList) as Promise<DiarySnapshot>,
+    diaryGet: (date: string): Promise<DiaryEntry | null> =>
+      ipcRenderer.invoke(IpcChannels.AIDiaryGet, date) as Promise<DiaryEntry | null>,
+    writeDiary: (): Promise<DiaryEntry> => ipcRenderer.invoke(IpcChannels.AIDiaryWriteNow) as Promise<DiaryEntry>,
+    openDiaryDir: (): Promise<boolean> => ipcRenderer.invoke(IpcChannels.AIDiaryOpenDir) as Promise<boolean>,
+    testConnection: (): Promise<AITestResult> => ipcRenderer.invoke(IpcChannels.AITestConnection) as Promise<AITestResult>,
+    notifyInteraction: (kind: InteractionKind): void => send(IpcChannels.AIInteraction, kind),
+    resetEmotion: (): Promise<AIStatusView> => ipcRenderer.invoke(IpcChannels.AIResetEmotion) as Promise<AIStatusView>,
+    setPresence: (presence: PetPresence): Promise<AIStatusView> =>
+      ipcRenderer.invoke(IpcChannels.AISetPresence, presence) as Promise<AIStatusView>,
+    openChatWindow: (): Promise<boolean> => ipcRenderer.invoke(IpcChannels.AIOpenChat) as Promise<boolean>,
+    onStatus: (handler: (status: AIStatusView) => void): Unsubscribe =>
+      subscribe<AIStatusView>(IpcChannels.CommandAIStatus, handler),
+    onChatMessage: (handler: (message: ChatMessagePush) => void): Unsubscribe =>
+      subscribe<ChatMessagePush>(IpcChannels.CommandChatMessage, handler),
+  };
+}
+
+/* -------------------------------------------------------------------------- */
 /* window.settingsAPI（仅设置窗口）                                             */
 /* -------------------------------------------------------------------------- */
 
 /**
- * 设置窗口走的是**同一份 preload 产物**，但只暴露下面这 4 个方法。
+ * 设置窗口走的是**同一份 preload 产物**，但只暴露下面这几个方法。
  *
  * 用命令行参数区分角色，而不是开第二份 preload 文件：
  * 桥的面越小越好维护，也让"设置窗口拿不到桌宠 IPC"这件事在代码上是显然的。
  */
 const isSettingsWindow = process.argv.includes(SETTINGS_WINDOW_FLAG);
+const isChatWindow = process.argv.includes(CHAT_WINDOW_FLAG);
 
 const settingsFallback: SettingsWindowBootstrap = {
   state: {
@@ -144,6 +206,7 @@ const settingsFallback: SettingsWindowBootstrap = {
     alwaysOnTop: true,
   },
   configPath: '',
+  ai: createDefaultAIStatus(),
 };
 
 function buildSettingsBridge(): SettingsWindowBridge {
@@ -158,6 +221,33 @@ function buildSettingsBridge(): SettingsWindowBridge {
     close: (): Promise<void> => ipcRenderer.invoke(IpcChannels.SettingsWindowClose) as Promise<void>,
     onChanged: (handler: (state: PetSettingsState) => void): Unsubscribe =>
       subscribe<PetSettingsState>(IpcChannels.CommandSettingsChanged, handler),
+    ai: buildAIAPI(),
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* window.chatAPI（仅聊天窗口）                                                 */
+/* -------------------------------------------------------------------------- */
+
+const chatFallback: ChatWindowBootstrap = {
+  history: [],
+  status: createDefaultAIStatus(),
+};
+
+function buildChatBridge(): ChatWindowBridge {
+  return {
+    initial: readFlaggedJson<ChatWindowBootstrap>(CHAT_BOOTSTRAP_FLAG) ?? chatFallback,
+    send: (text: string): Promise<AIChatReply> => ipcRenderer.invoke(IpcChannels.AIChatSend, text) as Promise<AIChatReply>,
+    speakUp: (): Promise<AIChatReply> => ipcRenderer.invoke(IpcChannels.AISpeakUp) as Promise<AIChatReply>,
+    history: (): Promise<readonly ChatTurn[]> =>
+      ipcRenderer.invoke(IpcChannels.AIChatHistory) as Promise<readonly ChatTurn[]>,
+    status: (): Promise<AIStatusView> => ipcRenderer.invoke(IpcChannels.AIStatusGet) as Promise<AIStatusView>,
+    onMessage: (handler: (message: ChatMessagePush) => void): Unsubscribe =>
+      subscribe<ChatMessagePush>(IpcChannels.CommandChatMessage, handler),
+    onStatus: (handler: (status: AIStatusView) => void): Unsubscribe =>
+      subscribe<AIStatusView>(IpcChannels.CommandAIStatus, handler),
+    openSettings: (): Promise<boolean> => ipcRenderer.invoke(IpcChannels.SettingsWindowShow) as Promise<boolean>,
+    close: (): Promise<void> => ipcRenderer.invoke(IpcChannels.ChatWindowClose) as Promise<void>,
   };
 }
 
@@ -257,6 +347,8 @@ function buildPetBridge(): PetBridge {
         ipcRenderer.invoke(IpcChannels.BubbleAcknowledge) as Promise<BubblePayload>,
     },
 
+    ai: buildAIAPI(),
+
     notifyAnimationChanged: (payload: AnimationChangedPayload): void =>
       send(IpcChannels.AnimationChanged, payload),
     notifyStateChanged: (payload: StateChangedPayload): void => send(IpcChannels.StateChanged, payload),
@@ -277,6 +369,9 @@ const petWindowFallbackBootstrap: PetBootstrap = {
 if (isSettingsWindow) {
   // 设置窗口：只有 settingsAPI，**没有** petAPI（更小的暴露面）。
   contextBridge.exposeInMainWorld('settingsAPI', buildSettingsBridge());
+} else if (isChatWindow) {
+  // 聊天窗口：只有 chatAPI（连"改桌宠尺寸"都拿不到）。
+  contextBridge.exposeInMainWorld('chatAPI', buildChatBridge());
 } else {
   contextBridge.exposeInMainWorld('petAPI', buildPetBridge());
   contextBridge.exposeInMainWorld('petBootstrap', bootstrap ?? petWindowFallbackBootstrap);

@@ -233,6 +233,29 @@ export class RuntimeCapabilities {
     return this.bridge?.plugins;
   }
 
+  /**
+   * AI 桥（2.1~2.4）。
+   *
+   * 渲染层对 AI 只有一个用途：**上报互动**（情绪输入）。
+   * 其余能力（聊天、日记、记忆查看）都在独立的窗口或主进程里，
+   * 这里刻意只暴露桥本身，不做包装 —— 需要时再按需加方法。
+   */
+  public ai() {
+    return this.bridge?.ai;
+  }
+
+  /** 读取 AI 状态（桌宠窗口自检/调试用）。 */
+  public async aiStatus() {
+    const bridge = this.bridge;
+    if (!bridge) return null;
+    try {
+      return await bridge.ai.status();
+    } catch (error) {
+      this.logger.warn('reading ai status failed', { error });
+      return null;
+    }
+  }
+
   /** 插件列表变化时同步给 Main（托盘菜单展示用）。 */
   public updatePluginRecords(records: readonly PluginRecord[]): void {
     this.updateTrayState({ plugins: records });

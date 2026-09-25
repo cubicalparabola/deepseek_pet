@@ -14,6 +14,8 @@
     />
     <title>桌宠设置</title>
     <link rel="stylesheet" href="./settings.css" />
+    <!-- AI 认知与人格面板的样式（内容由 ai-panel.ts 动态挂载） -->
+    <link rel="stylesheet" href="./ai-panel.css" />
   </head>
   <body>
     <main class="panel">
@@ -59,6 +61,14 @@
         <code>assets/config/settings.json</code>，重启后保持不变。<br />
         步进 <span id="step">5%</span>，可调范围 <span id="range">20%–250%</span>。
       </p>
+
+      <!--
+        AI 认知与人格（2.1~2.4）：内容由 src/settings/ai-panel.ts 动态挂载到这里。
+        为什么要单独一个面板文件：AI 面板有 8 个分区、几十个控件，
+        塞进 settings.ts 会让"调尺寸"这件小事被淹没；
+        分文件后两边互不影响，面板也可以独立演进。
+      -->
+      <section id="ai-panel-root" aria-label="AI 认知与人格"></section>
     </main>
 
     <footer class="footer">

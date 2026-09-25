@@ -57,6 +57,14 @@ export interface InteractionManagerOptions {
   readonly onDragMove: (screenX: number, screenY: number) => void;
   readonly onDragStart: (screenX: number, screenY: number) => void;
   readonly onDragEnd: (screenX: number, screenY: number) => void;
+  /**
+   * 上报"发生了一次互动"（2.3 情绪系统的输入）。
+   *
+   * 为什么放在这里而不是监听 pet:* 事件：情绪只关心**用户真的碰了她**，
+   * 而 `pet:*` 事件还会被插件/行为触发（例如定时抚摸）。
+   * 在事件源头上报，"互动"与"非互动"的边界才是清楚的。
+   */
+  readonly onInteraction?: (kind: 'click' | 'doubleclick' | 'drag') => void;
 }
 
 export type InteractionIntent =
@@ -170,6 +178,8 @@ export class InteractionManager {
       this.dragging = true;
       this.options.onDragStart(event.screenX, event.screenY);
       this.emitDrag('start', event.screenX, event.screenY);
+      // 拖动算一次互动（但比点击轻：她只是被挪了个位置）
+      this.options.onInteraction?.('drag');
       this.logger.info('drag start');
     }
     this.options.onDragMove(event.screenX, event.screenY);
@@ -216,6 +226,7 @@ export class InteractionManager {
 
     this.eventBus.emit(PetEvents.PetClick, payload);
     this.options.onIntent({ kind: 'click', region, payload });
+    this.options.onInteraction?.('click');
   };
 
   private handlePointerCancel = (): void => {
@@ -239,6 +250,7 @@ export class InteractionManager {
     };
     this.eventBus.emit(PetEvents.PetDoubleClick, payload);
     this.options.onIntent({ kind: 'double-click', region, payload });
+    this.options.onInteraction?.('doubleclick');
   };
 
   private handleContextMenu = (event: MouseEvent): void => {

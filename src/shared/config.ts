@@ -33,6 +33,13 @@ export interface PetConfig {
   readonly settingsPreloadPath: string;
   /** 设置窗口页面绝对路径（dist/settings/index.html）。 */
   readonly settingsHtmlPath: string;
+  /**
+   * 聊天窗口页面绝对路径（dist/chat/index.html）。
+   *
+   * 与设置窗口同理：普通窗口、复用同一份 preload，
+   * 靠 `--pet-window=chat` 只暴露 `window.chatAPI`。
+   */
+  readonly chatHtmlPath: string;
   /** 运行模式。 */
   readonly mode: 'development' | 'production';
 }
@@ -165,6 +172,7 @@ export function resolvePetConfig(input: PetConfigInput): PetConfig {
     distPath,
     settingsPreloadPath: joinPath(distPath, 'preload', 'preload.js'),
     settingsHtmlPath: joinPath(distPath, 'settings', 'index.html'),
+    chatHtmlPath: joinPath(distPath, 'chat', 'index.html'),
     mode: input.mode,
   };
 }

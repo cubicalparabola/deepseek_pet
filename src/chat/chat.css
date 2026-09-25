@@ -1,0 +1,295 @@
+/*
+ * 聊天窗口样式（普通非透明窗口，420x560 逻辑像素）。
+ *
+ * 主题与视觉语言跟随 settings.css，避免两个窗口像两个软件。
+ * 布局约定：body 满高 flex 纵向且自身不滚动，只有 #messages 可滚动，
+ * 这样顶部状态栏与底部输入框永远钉在原位，不会被变长的聊天记录顶出视口。
+ */
+
+:root {
+  --bg: #1b1d23;
+  --panel: #23262e;
+  --line: #333846;
+  --text: #e8eaf0;
+  --muted: #9aa3b5;
+  --accent: #59a9ff;
+  --ok: #4ec98a;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f4f5f7;
+    --panel: #ffffff;
+    --line: #dfe2e8;
+    --text: #1d2027;
+    --muted: #6b7383;
+    --accent: #1f7ae0;
+    --ok: #1f9d5f;
+  }
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.5 "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  user-select: none;
+  /* 页面整体不滚动，滚动只交给 #messages，否则会出现两条滚动条 */
+  overflow: hidden;
+}
+
+/* ------------------------------- 顶部栏 ------------------------------- */
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.who { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.avatar {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--bg);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.names { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.names strong {
+  font-size: 14px;
+  font-weight: 600;
+  /* 宠物名可能很长：截断而不是把右侧按钮挤出窗口 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  align-self: flex-start;
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+/* 由 JS 按当前推理模式加类：走大模型显绿，本地兜底显灰。 */
+.badge.badge-llm { color: var(--ok); border-color: var(--ok); background: rgba(78, 201, 138, 0.12); }
+.badge.badge-local { color: var(--muted); border-color: var(--line); background: transparent; }
+.head-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+/* ------------------------------- 状态栏 ------------------------------- */
+
+.status-bar {
+  display: flex;
+  gap: 12px;
+  flex-shrink: 0;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* ------------------------------- 消息区 ------------------------------- */
+
+.messages {
+  /* flex:1 + min-height:0 缺一不可：少了 min-height，
+     flex 子项的最小内容高度会撑破容器，overflow 也就永远不触发。 */
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.msg { display: flex; flex-direction: column; gap: 3px; max-width: 100%; }
+.msg .bubble {
+  max-width: 78%;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  font-size: 13px;
+  /* 中文长句没有空格可断，必须 pre-wrap + break-word 才不溢出气泡 */
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* 聊天内容要能复制，抵消 body 上的全局 user-select:none */
+  user-select: text;
+  cursor: text;
+}
+
+.msg time { color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+
+/* 桌宠：靠左，气泡左下角收角当“尾巴” */
+.msg-pet { align-items: flex-start; }
+.msg-pet .bubble { border-bottom-left-radius: 4px; }
+
+/* 用户：靠右，气泡用强调色淡染，时间也贴右 */
+.msg-user { align-items: flex-end; }
+.msg-user .bubble { background: rgba(89, 169, 255, 0.16); border-color: rgba(89, 169, 255, 0.42); border-bottom-right-radius: 4px; }
+.msg-user time { text-align: right; }
+
+/* 系统提示（错误、连接状态等）：居中、无气泡，不抢视线 */
+.msg-system { align-items: center; color: var(--muted); font-size: 11.5px; text-align: center; }
+/* display:contents 让 .bubble 的盒子消失，只留其中的文字 */
+.msg-system .bubble {
+  display: contents;
+  color: inherit;
+  font-size: inherit;
+  user-select: none;
+  cursor: default;
+}
+
+/* “她正在想…”：纯 CSS 呼吸动画，等回复期间由 chat.ts 插入 */
+.typing {
+  align-self: flex-start;
+  padding: 2px 4px;
+  color: var(--muted);
+  font-size: 12px;
+  animation: typing-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes typing-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+/* 系统里关掉动画时也要能看清这行字 */
+@media (prefers-reduced-motion: reduce) {
+  .typing { animation: none; opacity: 0.75; }
+}
+
+/* ----------------------------- 空状态提示 ----------------------------- */
+
+.empty-hint {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 0 24px 22px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.empty-hint .muted { font-size: 11.5px; opacity: 0.8; }
+
+/* display:flex 会覆盖 [hidden] 自带的 display:none，必须显式写回来 */
+#empty-hint[hidden] { display: none; }
+
+/* ------------------------------- 错误条 ------------------------------- */
+
+.error-bar {
+  flex-shrink: 0;
+  padding: 6px 14px;
+  border-top: 1px solid rgba(255, 107, 107, 0.35);
+  background: rgba(255, 107, 107, 0.12);
+  color: #ff8a8a;
+  font-size: 11.5px;
+  /* 单行提示：过长就截断，免得把输入框挤出窗口 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.error-bar[hidden] { display: none; }
+
+/* ------------------------------- 输入区 ------------------------------- */
+
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* 不参与收缩，保证输入框始终贴在窗口底部 */
+  flex-shrink: 0;
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.composer textarea {
+  width: 100%;
+  min-height: 52px;
+  max-height: 120px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  /* 只允许纵向拉伸，上下限由 min/max-height 兜住，横向拖拽会破坏布局 */
+  resize: vertical;
+  overflow-y: auto;
+  user-select: text;
+}
+
+.composer textarea::placeholder { color: var(--muted); opacity: 0.75; }
+.composer textarea:focus { outline: none; border-color: var(--accent); }
+.composer-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* -------------------------------- 按钮 -------------------------------- */
+
+button {
+  font: inherit;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+}
+
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:active:not(:disabled) { transform: translateY(1px); }
+button:disabled { cursor: default; opacity: 0.5; }
+button.ghost { color: var(--muted); background: transparent; }
+button.ghost:hover:not(:disabled) { color: var(--text); }
+button.primary {
+  min-width: 76px;
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+
+/* 只在键盘导航时显示焦点框，鼠标点击不出现，避免视觉噪点 */
+button:focus-visible,
+textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ------------------------------- 滚动条 ------------------------------- */
+
+.messages { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.messages::-webkit-scrollbar { width: 8px; }
+.messages::-webkit-scrollbar-track { background: transparent; }
+.messages::-webkit-scrollbar-thumb { border-radius: 4px; background: var(--line); }
+.messages::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+/* 浅色主题下 --line 太浅，滑块需要稍深一点才有对比度 */
+@media (prefers-color-scheme: light) {
+  .messages { scrollbar-color: #c4cad4 transparent; }
+  .messages::-webkit-scrollbar-thumb { background: #c4cad4; }
+}

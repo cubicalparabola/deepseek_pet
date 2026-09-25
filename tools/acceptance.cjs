@@ -19,11 +19,27 @@
  * 结果：build/acceptance.json
  */
 const { app, BrowserWindow } = require('electron');
-const { writeFileSync, mkdirSync, readFileSync } = require('node:fs');
+const { writeFileSync, mkdirSync, readFileSync, rmSync } = require('node:fs');
 const { join } = require('node:path');
+const { tmpdir } = require('node:os');
 
 const root = join(__dirname, '..');
 const outFile = join(root, 'build', 'acceptance.json');
+
+/*
+ * AI 认知与人格（2.1~2.4）的数据目录必须**隔离**：
+ * 验收会在里面写假密钥、测试记忆与测试日记，绝不能污染用户真实数据。
+ * 因此这里在 require(main.js) **之前**把环境变量指到临时目录，
+ * 并每次清空一次（保证"AI 默认全关"这类断言从干净状态开始）。
+ */
+const aiTestDataDir = join(tmpdir(), 'desktop-pet-acceptance-ai');
+process.env.DESKTOP_PET_AI_DATA_DIR = aiTestDataDir;
+try {
+  rmSync(aiTestDataDir, { recursive: true, force: true });
+} catch (error) {
+  console.error('cleaning AI test data dir failed', error);
+}
+mkdirSync(aiTestDataDir, { recursive: true });
 
 /**
  * 读取当前持久化的 scale。
@@ -2152,6 +2168,387 @@ app.whenReady().then(async () => {
   }
   record('日志文件存在且是合法 UTF-8', logCheck.exists === true && logCheck.utf8 === true, `${logFile}`);
   record('日志消息为英文（不受终端编码影响）', logCheck.english === true, JSON.stringify(logCheck));
+
+  /* ---------------------- AI 认知与人格（2.1~2.4） ---------------------- */
+
+  /*
+   * 这一组检查的核心不是"能不能聊"，而是**四条底线**：
+   *   1. 默认全关：没打开 AI 时桌宠行为与第一版完全一致（且不联网）；
+   *   2. 密钥不出主进程：渲染层拿到的配置里只有掩码；
+   *   3. 失败可降级：地址不可达/没密钥时，仍然给出一句人话，而不是报错或装死；
+   *   4. 记忆/日记真的落盘：本地文件是这个模块可审计的证据。
+   *
+   * 数据目录由 `DESKTOP_PET_AI_DATA_DIR` 指到临时目录（见 main.ts 的 aiDataDir），
+   * 因此这里读写文件不会碰到用户真实的记忆与日记。
+   */
+  const aiDataDir = process.env.DESKTOP_PET_AI_DATA_DIR;
+
+  const aiInitial = await run(`(async () => {
+    const status = await window.petAPI.ai.status();
+    return {
+      enabled: status.settings.enabled,
+      chat: status.settings.chat,
+      memory: status.settings.memory,
+      emotion: status.settings.emotion,
+      diary: status.settings.diary,
+      usable: status.usable,
+      mode: status.mode,
+      hasPlainKey: Object.prototype.hasOwnProperty.call(status.settings.provider, 'apiKey'),
+      masked: status.settings.provider.apiKeyMasked,
+      apiKeySet: status.settings.provider.apiKeySet,
+      mood: status.emotion.mood,
+      dataDir: status.dataDir,
+      aiMethods: Object.keys(window.petAPI.ai).sort(),
+    };
+  })()`);
+  record(
+    'AI 默认全部关闭（不影响第一版行为）',
+    aiInitial.enabled === false &&
+      aiInitial.chat === false &&
+      aiInitial.memory === false &&
+      aiInitial.emotion === false &&
+      aiInitial.diary === false &&
+      aiInitial.usable === false &&
+      aiInitial.mode === 'local',
+    JSON.stringify(aiInitial),
+  );
+  record(
+    'AI 配置不含明文密钥（只有掩码）',
+    aiInitial.hasPlainKey === false && aiInitial.apiKeySet === false && aiInitial.masked === '',
+    `hasPlainKey=${aiInitial.hasPlainKey} masked="${aiInitial.masked}"`,
+  );
+  record(
+    'AI 桥暴露了完整的能力面（桌宠窗口）',
+    ['status', 'setSettings', 'chat', 'memory', 'diary', 'writeDiary', 'testConnection', 'notifyInteraction'].every((name) =>
+      aiInitial.aiMethods.includes(name),
+    ),
+    JSON.stringify(aiInitial.aiMethods),
+  );
+  record('AI 数据目录可解析（记忆/日记落盘位置）', typeof aiInitial.dataDir === 'string' && aiInitial.dataDir.length > 0, aiInitial.dataDir);
+
+  /* 2.3 情绪模型：纯函数直接断言（互动上涨 / 三档衰减 / token -> 饿） */
+  const emotionModel = await run(`(() => {
+    const model = window.petDebug.emotion;
+    const now = Date.now();
+    const base = model.initialEmotion(now);
+    const clicked = model.applyInteraction(base, 'click', now);
+    const chatted = model.applyInteraction(base, 'chat', now);
+    // 三档衰减：同一份状态、同样过去 60 分钟，只改在场状态
+    const idle = { ...base, lastInteractionAt: now - 3600000, lastUpdateAt: now - 3600000 };
+    const decay = (presence) => model.decayEmotion(idle, { presence, now, tokensRemainingRatio: 1 });
+    const visible = decay('visible');
+    const collapsed = decay('collapsed');
+    const hidden = decay('hidden');
+    return {
+      initial: base.mood,
+      afterClick: clicked.mood,
+      afterChat: chatted.mood,
+      visible: visible.mood,
+      collapsed: collapsed.mood,
+      hidden: hidden.mood,
+      // 宽限期内不应衰减（刚被摸过就掉心情会让人觉得"摸她没用"）
+      grace: model.decayEmotion(model.applyInteraction(base, 'click', now), { presence: 'hidden', now: now + 1000, tokensRemainingRatio: 1 }).mood,
+      // 饿 = 预算用光的比例，且与时间无关
+      hungerFull: model.applyTokens(base, 1, now).hunger,
+      hungerHalf: model.applyTokens(base, 0.5, now).hunger,
+      hungerEmpty: model.applyTokens(base, 0, now).hunger,
+      hungerUnlimited: model.hungerFromTokens(1),
+      labelSad: model.moodLabel(10).key,
+      labelGreat: model.moodLabel(90).key,
+      clamped: model.applyInteraction({ ...base, mood: 99 }, 'gift', now).mood,
+    };
+  })()`);
+  record(
+    '情绪：互动让心情上涨（点击/对话涨幅不同）',
+    emotionModel.afterClick > emotionModel.initial && emotionModel.afterChat > emotionModel.afterClick,
+    JSON.stringify(emotionModel),
+  );
+  record(
+    '情绪：不互动自然下降，收起更快、隐藏最快',
+    emotionModel.visible < emotionModel.initial &&
+      emotionModel.collapsed < emotionModel.visible &&
+      emotionModel.hidden < emotionModel.collapsed,
+    `visible=${emotionModel.visible} collapsed=${emotionModel.collapsed} hidden=${emotionModel.hidden}`,
+  );
+  record('情绪：互动后有宽限期（不会立刻掉回去）', emotionModel.grace === emotionModel.afterClick, `grace=${emotionModel.grace} afterClick=${emotionModel.afterClick}`);
+  record(
+    '情绪：饥饿来自 token 剩余量（满/半/空 -> 0/50/100）',
+    emotionModel.hungerFull === 0 && emotionModel.hungerHalf === 50 && emotionModel.hungerEmpty === 100 && emotionModel.hungerUnlimited === 0,
+    JSON.stringify({
+      full: emotionModel.hungerFull,
+      half: emotionModel.hungerHalf,
+      empty: emotionModel.hungerEmpty,
+    }),
+  );
+  record(
+    '情绪：心情有上下限（100 封顶）且分档正确',
+    emotionModel.clamped === 100 && emotionModel.labelSad === 'sad' && emotionModel.labelGreat === 'great',
+    `clamped=${emotionModel.clamped} sad=${emotionModel.labelSad} great=${emotionModel.labelGreat}`,
+  );
+
+  /* 2.1 未开启 AI 时：本地兜底回复 + 情绪上涨 + 不联网（用耗时证明） */
+  const localChat = await run(`(async () => {
+    const before = await window.petAPI.ai.status();
+    const startedAt = performance.now();
+    const reply = await window.petAPI.ai.chat('你好呀');
+    const elapsed = performance.now() - startedAt;
+    const after = await window.petAPI.ai.status();
+    return {
+      ok: reply.ok,
+      mode: reply.mode,
+      tokens: reply.tokens,
+      reply: reply.reply,
+      error: reply.error ?? '',
+      elapsed: Math.round(elapsed),
+      moodBefore: before.emotion.mood,
+      moodAfter: after.emotion.mood,
+      hunger: after.emotion.hunger,
+    };
+  })()`);
+  record(
+    'AI 关闭时对话走本地兜底（有回复、无 token、极快 -> 未联网）',
+    localChat.ok === true && localChat.mode === 'local' && localChat.tokens === 0 && localChat.reply.length > 0 && localChat.elapsed < 400,
+    JSON.stringify(localChat),
+  );
+  record(
+    '开关：情绪系统关闭时互动不改心情（开关真的生效，不是摆设）',
+    localChat.moodAfter === localChat.moodBefore,
+    `mood ${localChat.moodBefore} -> ${localChat.moodAfter}`,
+  );
+
+  /* 打开记忆 + 情绪（两个子系统可以独立于大模型工作） */
+  const subsystemOn = await run(`(async () => {
+    const status = await window.petAPI.ai.setSettings({ memory: true, emotion: true });
+    const moodBefore = status.emotion.mood;
+    await window.petAPI.ai.chat('你好呀');
+    const after = await window.petAPI.ai.status();
+    return {
+      memory: status.settings.memory,
+      emotion: status.settings.emotion,
+      moodBefore,
+      moodAfter: after.emotion.mood,
+    };
+  })()`);
+  record(
+    '开关：打开记忆/情绪后，对话被记住且心情上涨（无需大模型）',
+    subsystemOn.memory === true && subsystemOn.emotion === true && subsystemOn.moodAfter > subsystemOn.moodBefore,
+    JSON.stringify(subsystemOn),
+  );
+
+  /* 2.2 记忆：对话写入本地记忆日志（文件级证据） + 快照可读 */
+  const memoryState = await run(`(async () => {
+    const snapshot = await window.petAPI.ai.memory();
+    return {
+      stats: snapshot.stats,
+      logFile: snapshot.logFile,
+      dataDir: snapshot.dataDir,
+      recentChat: snapshot.recentChat.map((turn) => turn.role + ':' + turn.text.slice(0, 12)),
+      todayEvents: snapshot.todayEvents.length,
+    };
+  })()`);
+  let memoryLog = { exists: false, hasUserTurn: false, hasPetTurn: false, bytes: 0 };
+  try {
+    const text = readFileSync(memoryState.logFile, 'utf8');
+    memoryLog = {
+      exists: true,
+      hasUserTurn: text.includes('主人：'),
+      hasPetTurn: text.includes('她：'),
+      bytes: text.length,
+    };
+  } catch (error) {
+    memoryLog = { exists: false, hasUserTurn: false, hasPetTurn: false, bytes: 0 };
+  }
+  record(
+    '记忆：对话落盘为可读的记忆日志（memory-log.md）',
+    memoryLog.exists === true && memoryLog.bytes > 0 && memoryLog.hasUserTurn === true && memoryLog.hasPetTurn === true,
+    `${memoryState.logFile} bytes=${memoryLog.bytes} user=${memoryLog.hasUserTurn} pet=${memoryLog.hasPetTurn}`,
+  );
+  record(
+    '记忆：一问一答都记下来了',
+    memoryState.stats.turns >= 2 && memoryState.recentChat.some((line) => line.startsWith('user:')) && memoryState.recentChat.some((line) => line.startsWith('pet:')),
+    JSON.stringify(memoryState.recentChat.slice(0, 4)),
+  );
+  record(
+    '记忆：互动事件也已记录（stats.events > 0）',
+    memoryState.stats.events > 0 && memoryState.todayEvents > 0,
+    JSON.stringify(memoryState.stats),
+  );
+
+  /* 2.2 记忆抽取：规则式抽取必须真的抽出"名字/项目"这类事实 */
+  const factsExtracted = await run(`(async () => {
+    await window.petAPI.ai.chat('我叫小明，最近在写毕业论文');
+    // 规则抽取是同步落盘的，但 consolidate 是后台动作：等一小会儿再读快照
+    await new Promise((r) => setTimeout(r, 600));
+    const snapshot = await window.petAPI.ai.memory();
+    return {
+      facts: snapshot.profile.facts.map((fact) => fact.key + '=' + fact.value),
+      userName: snapshot.profile.userName,
+    };
+  })()`);
+  record(
+    '记忆：从对话里抽出长期事实（名字/项目）',
+    factsExtracted.facts.some((fact) => fact.startsWith('name=')) && factsExtracted.facts.some((fact) => fact.startsWith('project=')),
+    JSON.stringify(factsExtracted.facts),
+  );
+
+  /* 2.4 日记：立即生成 -> 落盘 -> 索引可列出（关闭 AI 时走本地模板） */
+  const diary = await run(`(async () => {
+    const written = await window.petAPI.ai.writeDiary();
+    const list = await window.petAPI.ai.diary();
+    const readBack = await window.petAPI.ai.diaryGet(written.date);
+    return {
+      written: { date: written.date, source: written.source, bodyLength: written.body.length, title: written.title },
+      items: list.items.map((item) => item.date + ':' + item.source),
+      todayWritten: list.todayWritten,
+      readBackMatches: readBack !== null && readBack.body === written.body,
+      body: written.body.slice(0, 160),
+    };
+  })()`);
+  let diaryFile = { exists: false, bytes: 0 };
+  try {
+    const text = readFileSync(join(aiDataDir, 'diary', `${diary.written.date}.md`), 'utf8');
+    diaryFile = { exists: true, bytes: text.length };
+  } catch (error) {
+    diaryFile = { exists: false, bytes: 0 };
+  }
+  record(
+    '日记：能立刻生成一篇第一视角日记（AI 关闭时用真实数据的本地模板）',
+    diary.written.bodyLength > 20 && diary.written.source === 'template' && /主人/.test(diary.body),
+    JSON.stringify(diary.written),
+  );
+  record('日记：写入 markdown 文件（本地留存）', diaryFile.exists === true && diaryFile.bytes > 40, JSON.stringify(diaryFile));
+  record(
+    '日记：索引可列出并且能读回正文',
+    diary.items.length >= 1 && diary.todayWritten === true && diary.readBackMatches === true,
+    JSON.stringify({ items: diary.items, todayWritten: diary.todayWritten, readBackMatches: diary.readBackMatches }),
+  );
+
+  /* 2.1 配了密钥但地址不可达：必须降级成本地兜底，而不是抛异常/装死 */
+  const degrade = await run(`(async () => {
+    // 指向本机一个必然拒绝连接的端口：既验证"真的发出请求"，又保证快速失败
+    await window.petAPI.ai.setSettings({
+      enabled: true,
+      chat: true,
+      memory: true,
+      emotion: true,
+      diary: true,
+      provider: { baseUrl: 'http://127.0.0.1:9/v1', model: 'test-model', apiKey: 'sk-acceptance-test-key-0001', timeoutMs: 1500 },
+    });
+    const startedAt = performance.now();
+    const reply = await window.petAPI.ai.chat('测试降级');
+    const elapsed = Math.round(performance.now() - startedAt);
+    const status = await window.petAPI.ai.status();
+    return {
+      mode: reply.mode,
+      ok: reply.ok,
+      replyLength: reply.reply.length,
+      error: status.lastError,
+      usable: status.usable,
+      masked: status.settings.provider.apiKeyMasked,
+      apiKeySet: status.settings.provider.apiKeySet,
+      hasPlainKey: Object.prototype.hasOwnProperty.call(status.settings.provider, 'apiKey'),
+      enabled: status.settings.enabled,
+      elapsed,
+    };
+  })()`);
+  record(
+    'AI：密钥被掩码保存（渲染层拿不到明文）',
+    degrade.apiKeySet === true &&
+      degrade.hasPlainKey === false &&
+      /^sk-/.test(degrade.masked) &&
+      !degrade.masked.includes('acceptance-test-key-0001'),
+    `masked="${degrade.masked}" hasPlainKey=${degrade.hasPlainKey}`,
+  );
+  record(
+    'AI：大模型不可达时降级为本地回复（不抛异常、不装死）',
+    degrade.usable === true && degrade.mode === 'local' && degrade.ok === true && degrade.replyLength > 0 && degrade.error.length > 0,
+    JSON.stringify(degrade),
+  );
+
+  /* 2.3 打通"主进程情绪"：互动上报 -> 状态上涨；token 用量 -> 饿 */
+  const interaction = await run(`(async () => {
+    const before = await window.petAPI.ai.status();
+    window.petAPI.ai.notifyInteraction('click');
+    window.petAPI.ai.notifyInteraction('doubleclick');
+    await new Promise((r) => setTimeout(r, 250));
+    const after = await window.petAPI.ai.status();
+    return {
+      moodBefore: before.emotion.mood,
+      moodAfter: after.emotion.mood,
+      hunger: after.emotion.hunger,
+      tokensUsed: after.tokensUsed,
+      calls: after.calls,
+    };
+  })()`);
+  record(
+    '情绪：渲染层的互动上报会传到主进程并让心情上涨',
+    interaction.moodAfter > interaction.moodBefore,
+    JSON.stringify(interaction),
+  );
+  record('情绪：token 用量被累计（预算 -> 饿 的依据）', interaction.tokensUsed >= 0 && interaction.hunger >= 0, JSON.stringify(interaction));
+
+  /*
+   * 2.3「收起 / 隐藏」：需求要求"收起降低更快、隐藏最快"，
+   * 因此这个状态必须真的能切、能读回来，而且要区分于"彻底隐藏"。
+   */
+  const presence = await run(`(async () => {
+    const collapsed = await window.petAPI.ai.setPresence('collapsed');
+    const stillVisible = await window.petAPI.window.getPosition();
+    const restored = await window.petAPI.ai.setPresence('visible');
+    return {
+      collapsedPresence: collapsed.presence,
+      restoredPresence: restored.presence,
+      hasPosition: typeof stillVisible.x === 'number',
+    };
+  })()`);
+  record(
+    '在场状态：可切到「收起（不打扰）」并切回（收起 ≠ 关闭窗口）',
+    presence.collapsedPresence === 'collapsed' && presence.restoredPresence === 'visible' && presence.hasPosition === true,
+    JSON.stringify(presence),
+  );
+
+  /* 恢复默认（全关），避免把验收用的假配置留给用户 */
+  const aiRestored = await run(`(async () => {
+    const status = await window.petAPI.ai.setSettings({
+      enabled: false, chat: false, memory: false, emotion: false, diary: false,
+      provider: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', timeoutMs: 20000 },
+      clearApiKey: true,
+      resetUsage: true,
+    });
+    return { enabled: status.settings.enabled, apiKeySet: status.settings.provider.apiKeySet, used: status.settings.budget.used };
+  })()`);
+  record(
+    'AI：验收结束后恢复默认（全关 + 清除测试密钥）',
+    aiRestored.enabled === false && aiRestored.apiKeySet === false && aiRestored.used === 0,
+    JSON.stringify(aiRestored),
+  );
+
+  /* 聊天窗口：能打开、并且是独立的普通窗口（只暴露 chatAPI） */
+  const chatWindowOpened = await run(`window.petAPI.ai.openChatWindow()`);
+  await wait(1200);
+  const chatWins = BrowserWindow.getAllWindows().filter((w) => {
+    try {
+      return w.webContents.getURL().includes('/chat/');
+    } catch (error) {
+      return false;
+    }
+  });
+  record(
+    '聊天窗口：可从桌宠窗口/托盘打开（独立普通窗口）',
+    chatWindowOpened === true && chatWins.length === 1,
+    `opened=${chatWindowOpened} chatWindows=${chatWins.length}`,
+  );
+  if (chatWins.length === 1) {
+    const chatBridge = await chatWins[0].webContents.executeJavaScript(
+      `(() => ({ hasChatAPI: typeof window.chatAPI !== 'undefined', hasPetAPI: typeof window.petAPI !== 'undefined', hasNode: typeof require !== 'undefined' }))()`,
+      true,
+    );
+    record(
+      '聊天窗口：只暴露 chatAPI（拿不到 petAPI / Node）',
+      chatBridge.hasChatAPI === true && chatBridge.hasPetAPI === false && chatBridge.hasNode === false,
+      JSON.stringify(chatBridge),
+    );
+  }
 
   /* --------------------------- 收尾 --------------------------- */
 

@@ -43,6 +43,24 @@ export interface TrayManagerCallbacks {
   onSetAlwaysOnTop(value: boolean): void;
   onOpenSettings(): void;
   onQuit(): void;
+
+  /* ------------------- AI 认知与人格（2.1~2.4） ------------------- */
+  /** 打开聊天窗口（输入口的唯一入口，和桌宠窗口共用同一条链路）。 */
+  onOpenChat(): void;
+  /** 让她主动说一句话（不用打字也能看人格是否生效）。 */
+  onSpeakUp(): void;
+  /** 立刻写今天的日记（不等定时器）。 */
+  onWriteDiary(): void;
+  /** 打开日记目录（看历史日记）。 */
+  onOpenDiaryFolder(): void;
+  /** 把收集到的事件文本显示在气泡里（"她记住了什么"一眼可见）。 */
+  onShowMemoryDigest(text: string): void;
+  /** 切换"收起（不打扰）"：收起后不接收点击、情绪下降更快。 */
+  onToggleCollapsed(): boolean;
+  /** 情绪重置（调试与后悔药用）。 */
+  onResetEmotion(): void;
+  /** 打开设置窗口的 AI 面板（与「设置…」同一个窗口，只是提示用）。 */
+  onOpenAISettings(): void;
 }
 
 export interface TrayManagerOptions {
@@ -236,6 +254,47 @@ export class TrayManager {
     ];
   }
 
+  /**
+   * AI 认知与人格子菜单。
+   *
+   * 为什么把入口放在托盘/右键而不是塞进设置窗口：
+   * "和她说句话""看今天的日记"是**高频日常动作**，
+   * 让用户为了说一句话先开设置窗口、翻到 AI 面板，体验会很差。
+   * 设置窗口只负责配置（开关、密钥、人格），日常动作都在这里。
+   */
+  private buildAISubmenu(): MenuItemConstructorOptions[] {
+    const callbacks = this.options.callbacks;
+    const ai = this.state.ai;
+    const collapsed = this.state.presence === 'collapsed';
+    const statusLine = ai
+      ? `${ai.usable ? '已接入大模型' : '本地兜底'} · 心情 ${ai.emotion.mood} · 饿 ${ai.emotion.hunger}`
+      : '状态未就绪';
+    const enabled = ai?.settings.enabled === true;
+
+    return [
+      { label: statusLine, enabled: false },
+      ...(enabled
+        ? []
+        : [{ label: '（AI 未开启：设置 → AI 认知与人格）', enabled: false } as MenuItemConstructorOptions]),
+      { type: 'separator' },
+      { label: '和她说句话…', click: () => callbacks.onOpenChat() },
+      { label: '让她说句话', enabled: enabled, click: () => callbacks.onSpeakUp() },
+      { type: 'separator' },
+      { label: '看今天的日记', click: () => callbacks.onWriteDiary() },
+      { label: '打开日记目录', click: () => callbacks.onOpenDiaryFolder() },
+      { label: '她记住了什么？', click: () => callbacks.onShowMemoryDigest('') },
+      { type: 'separator' },
+      {
+        label: collapsed ? '展开（恢复互动）' : '收起（不打扰）',
+        type: 'checkbox',
+        checked: collapsed,
+        click: () => callbacks.onToggleCollapsed(),
+      },
+      { label: '重置情绪', click: () => callbacks.onResetEmotion() },
+      { label: 'AI 设置…', click: () => callbacks.onOpenAISettings() },
+    ];
+  }
+
   /** 托盘菜单（显示/隐藏、行为、尺寸、动画试放、插件、设置、退出）。 */
   private buildTrayMenu(): Menu {
     const visible = this.state.visible ?? true;
@@ -267,6 +326,7 @@ export class TrayManager {
       { label: '播放动画（测试）', submenu: this.buildAnimationSubmenu() },
       { label: '恢复默认动画', click: () => callbacks.onResetAnimation() },
       { label: '对话气泡（测试）', submenu: this.buildBubbleSubmenu() },
+      { label: 'AI（认知与人格）', submenu: this.buildAISubmenu() },
       { type: 'separator' },
       { label: '暂停行为', enabled: !paused, click: () => callbacks.onToggleBehavior() },
       { label: '恢复行为', enabled: paused, click: () => callbacks.onToggleBehavior() },
@@ -313,6 +373,7 @@ export class TrayManager {
       { label: '播放动画（测试）', submenu: this.buildAnimationSubmenu() },
       { label: '恢复默认动画', click: () => callbacks.onResetAnimation() },
       { label: '对话气泡（测试）', submenu: this.buildBubbleSubmenu() },
+      { label: 'AI（认知与人格）', submenu: this.buildAISubmenu() },
       { type: 'separator' },
       ...this.buildSizeItems(),
       { label: '显示桌宠', enabled: !visible, click: () => callbacks.onShow() },

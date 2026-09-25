@@ -11,6 +11,8 @@
  */
 
 import type { PetSettingsState } from './pet-size';
+import type { AIAPI } from './ipc';
+import type { AIStatusView } from './ai-types';
 
 /** 设置窗口 preload 通过 `additionalArguments` 注入的启动数据。 */
 export interface SettingsWindowBootstrap {
@@ -18,6 +20,8 @@ export interface SettingsWindowBootstrap {
   readonly state: PetSettingsState;
   /** 配置目录绝对路径（「打开配置目录」按钮用）。 */
   readonly configPath: string;
+  /** AI 状态快照（打开设置窗口时读一次，之后靠推送更新）。 */
+  readonly ai: AIStatusView;
 }
 
 /** preload 命令行参数的 key 与值。 */
@@ -43,4 +47,11 @@ export interface SettingsWindowBridge {
   close(): Promise<void>;
   /** 主进程推送的设置变化（例如托盘菜单改了尺寸）。 */
   onChanged(handler: (state: PetSettingsState) => void): () => void;
+  /**
+   * AI 认知与人格（2.1~2.4）。
+   *
+   * 与桌宠窗口的 `petAPI.ai` 是**同一个 API 面**（见 shared/ipc.ts 的 AIAPI）：
+   * 设置窗口是配置这些开关的主入口，日记与记忆也在这里查看。
+   */
+  readonly ai: AIAPI;
 }

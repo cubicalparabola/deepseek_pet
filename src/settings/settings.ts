@@ -21,6 +21,7 @@ import {
   type PetSettingsState,
 } from '../shared/pet-size';
 import type { SettingsWindowBridge } from '../shared/settings-window';
+import { mountAIPanel } from './ai-panel';
 
 function requireElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -170,4 +171,18 @@ if (!bridge) {
   detailLabel.textContent = '设置桥未注入（preload 失败）';
 } else {
   renderApplied(bridge.initial.state);
+}
+
+/*
+ * AI 认知与人格面板（2.1~2.4）。
+ *
+ * 面板自己是"闭包内聚"的：拿到容器、AI 桥与初始状态后自带事件与刷新逻辑，
+ * 因此这里只有一行接线 —— 尺寸设置与 AI 设置互不影响。
+ * 面板内部所有文本都用 textContent 落地（模型/用户输入永不进 innerHTML）。
+ */
+try {
+  if (bridge) mountAIPanel(requireElement('ai-panel-root'), bridge.ai, bridge.initial.ai);
+} catch (error) {
+  // 面板挂载失败不能连累"调尺寸"这个核心功能
+  console.error('[settings] mounting ai panel failed', error);
 }

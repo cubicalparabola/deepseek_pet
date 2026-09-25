@@ -5,6 +5,9 @@
  *   src/renderer/styles.css   -> dist/renderer/styles.css
  *   src/settings/index.html   -> dist/settings/index.html
  *   src/settings/settings.css -> dist/settings/settings.css
+ *   src/settings/ai-panel.css -> dist/settings/ai-panel.css
+ *   src/chat/index.html       -> dist/chat/index.html
+ *   src/chat/chat.css         -> dist/chat/chat.css
  *
  * assets/ 与 plugins/ 不打进 dist：
  * - 开发模式直接从仓库根目录读取；
@@ -21,6 +24,9 @@ const targets = [
   ['src/renderer/styles.css', 'dist/renderer/styles.css'],
   ['src/settings/index.html', 'dist/settings/index.html'],
   ['src/settings/settings.css', 'dist/settings/settings.css'],
+  ['src/settings/ai-panel.css', 'dist/settings/ai-panel.css'],
+  ['src/chat/index.html', 'dist/chat/index.html'],
+  ['src/chat/chat.css', 'dist/chat/chat.css'],
 ];
 
 for (const [from, to] of targets) {

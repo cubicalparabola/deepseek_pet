@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      聊天窗口页面（2.1 大模型对话的唯一输入口）。
+
+      为什么单独一个窗口：桌宠窗口是透明、无边框、点击穿透的"活体图层"，
+      里面放输入框既看不见也会被 `setIgnoreMouseEvents` 吃掉焦点。
+      聊天是有历史、要滚动、要打字的交互，天然属于普通窗口。
+
+      安全基线：与设置窗口一致 —— 不联网、不 eval，只允许本地样式与脚本。
+      大模型调用一律在主进程完成（密钥不进渲染进程）。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'none'; connect-src 'none'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>和鲸鱼娘说话</title>
+    <link rel="stylesheet" href="./chat.css" />
+  </head>
+  <body>
+    <header class="head">
+      <div class="who">
+        <span class="avatar" aria-hidden="true">🐋</span>
+        <div class="names">
+          <strong id="pet-name">鲸鱼娘</strong>
+          <span id="mode-badge" class="badge badge-local">本地兜底</span>
+        </div>
+      </div>
+      <div class="head-actions">
+        <button id="open-settings" type="button" class="ghost">设置</button>
+        <button id="close-window" type="button" class="ghost">收起</button>
+      </div>
+    </header>
+
+    <!-- 状态条：把"她现在的状态"摆在最上面，解释她为什么这样说话（2.3 的可视化） -->
+    <div id="status-bar" class="status-bar">
+      <span id="mood-line">心情 —</span>
+      <span id="hunger-line">饿 —</span>
+      <span id="token-line">token —</span>
+    </div>
+
+    <main id="messages" class="messages" aria-live="polite"></main>
+
+    <div id="empty-hint" class="empty-hint">
+      <p>还没有聊过天。</p>
+      <p class="muted">点下面的输入框跟她说句话吧。</p>
+    </div>
+
+    <!-- 出错时给一条可读的提示（例如密钥无效），而不是静默降级 -->
+    <div id="error-bar" class="error-bar" hidden></div>
+
+    <footer class="composer">
+      <textarea id="input" rows="2" placeholder="跟她说句话…（Enter 发送，Shift+Enter 换行）"></textarea>
+      <div class="composer-actions">
+        <button id="speak-up" type="button" class="ghost">让她说句话</button>
+        <button id="send" type="button" class="primary">发送</button>
+      </div>
+    </footer>
+
+    <script type="module" src="./chat.js"></script>
+  </body>
+</html>

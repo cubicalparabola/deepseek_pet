@@ -19,6 +19,16 @@ import type { PetState } from '../shared/state-types';
 import type { RuntimeInfo } from '../shared/ipc';
 import type { PetSizeInfo } from '../shared/pet-size';
 import { resolveBubbleLayout, type BubblePayload } from '../shared/bubble';
+import {
+  EMOTION,
+  applyInteraction,
+  applyTokens,
+  decayEmotion,
+  hungerFromTokens,
+  initialEmotion,
+  moodLabel,
+} from '../shared/emotion';
+import type { AIChatReply, AIStatusView, InteractionKind } from '../shared/ai-types';
 import { createLoggerFactory } from '../shared/logging';
 import { EventBus } from './core/event-bus';
 import { AnimationManager } from './core/animation-manager';
@@ -171,6 +181,15 @@ class PetApplication {
       },
       onDragMove: (x, y) => this.moveDrag(x, y),
       onDragEnd: () => this.endDrag(),
+      /*
+       * 互动上报给主进程（2.3 情绪系统）：
+       * 情绪状态住在 Main（要持久化、要随窗口显隐变化衰减），
+       * 渲染层只负责"在用户真的碰她时喊一声"。
+       * 用可选调用避免在极早/极晚时序下（petAPI 缺失）把交互打断。
+       */
+      onInteraction: (kind) => {
+        this.runtime.ai()?.notifyInteraction(kind);
+      },
     });
 
     this.pluginHost = new PluginHost({
@@ -994,6 +1013,28 @@ class PetApplication {
     readonly interactions: InteractionManager;
     readonly plugins: PluginHost;
     readonly events: EventBus;
+    /**
+     * 情绪模型（2.3）与 AI 状态。
+     *
+     * 为什么把纯函数模型挂到这里：这些规则（互动涨幅、三档衰减、token -> 饿）
+     * 是**可以被断言**的，验收脚本需要一个确定的入口去直接跑它们，
+     * 而不是只能通过 UI 间接观察。模型本身零副作用，暴露它是安全的。
+     */
+    readonly emotion: {
+      readonly applyInteraction: typeof applyInteraction;
+      readonly decayEmotion: typeof decayEmotion;
+      readonly applyTokens: typeof applyTokens;
+      readonly initialEmotion: typeof initialEmotion;
+      readonly moodLabel: typeof moodLabel;
+      readonly hungerFromTokens: typeof hungerFromTokens;
+      readonly EMOTION: typeof EMOTION;
+    };
+    /** 读取主进程的 AI 状态（异步）。 */
+    readonly aiStatus: () => Promise<AIStatusView | null>;
+    /** 让桌宠说一句话（异步，走与聊天窗口同一条链路）。 */
+    readonly aiChat: (text: string) => Promise<AIChatReply | null>;
+    /** 上报一次互动（与真实点击同一条路径）。 */
+    readonly aiInteract: (kind: InteractionKind) => void;
   } {
     return {
       bus: this.eventBus,
@@ -1004,6 +1045,27 @@ class PetApplication {
       interactions: this.interactionManager,
       plugins: this.pluginHost,
       events: this.eventBus,
+      emotion: {
+        applyInteraction,
+        decayEmotion,
+        applyTokens,
+        initialEmotion,
+        moodLabel,
+        hungerFromTokens,
+        EMOTION,
+      },
+      aiStatus: () => this.runtime.aiStatus(),
+      aiChat: async (text: string) => {
+        const bridge = this.runtime.ai();
+        if (!bridge) return null;
+        try {
+          return await bridge.chat(text);
+        } catch (error) {
+          this.logger.warn('ai chat from debug handle failed', { error: describeError(error) });
+          return null;
+        }
+      },
+      aiInteract: (kind: InteractionKind) => this.runtime.ai()?.notifyInteraction(kind),
     };
   }
 }
