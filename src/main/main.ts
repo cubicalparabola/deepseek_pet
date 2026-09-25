@@ -1492,6 +1492,25 @@ app.setName('DesktopPet');
 const devMode = process.argv.includes('--dev') || !app.isPackaged;
 const isSelfTest = process.argv.includes('--self-test');
 
+/**
+ * 启动时把**这一版是什么时候构建的**打进日志。
+ *
+ * 为什么需要（真实踩过）：桌宠带单实例锁 —— 已经有一个在跑时，`npm start` 起的新进程
+ * 会**静默退出**（退出码 0，什么都不打印），跑着的还是旧代码。用户改了东西却"看不到效果"
+ * 时，这条 `build:` 日志是第一件要核对的事：它比"我觉得我重启了"可靠。
+ */
+function logBuildStamp(): void {
+  try {
+    // 注意：main 被打包成 dist/main/main.js，所以构建戳在**上一级**目录
+    const info = JSON.parse(readFileSync(join(__dirname, '..', 'build-info.json'), 'utf8')) as { builtAt?: unknown };
+    const builtAt = typeof info.builtAt === 'string' ? info.builtAt : 'unknown';
+    console.log(`[Main] build: ${builtAt}（dist/build-info.json）`);
+  } catch (error) {
+    // 打包产物里可能没有这个文件：不影响启动，只提示"无法判断版本"
+    console.log('[Main] build: unknown（读不到 dist/build-info.json）');
+  }
+}
+
 // 单实例锁：桌宠只需要一个（第二次启动时把已存在的桌宠显示出来）
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -1508,6 +1527,7 @@ if (!gotLock) {
 
   app.whenReady().then(async () => {
     try {
+      logBuildStamp();
       application.bootstrap();
       if (isSelfTest) {
         // 自检模式：输出关键信息后退出，便于 CI / 手工验收。

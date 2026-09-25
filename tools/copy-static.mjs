@@ -14,7 +14,7 @@
  * - 打包模式由 electron-builder 的 extraResources 放到 resources/ 下。
  * 两条路径都由 main 进程解析后通过 bootstrap 告知 renderer。
  */
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -43,3 +43,19 @@ for (const [from, to] of targets) {
   copyFileSync(source, dest);
   console.log(`[copy-static] ${from} -> ${to}`);
 }
+
+/*
+ * 构建戳：写进 `dist/build-info.json`，主进程启动时读出来打进日志。
+ *
+ * 为什么需要：桌宠带**单实例锁** —— 已经有一个桌宠在跑时，`npm start` 起的新进程会
+ * **静默退出**（退出码 0），跑着的还是旧代码。用户看到"改了没用"时，第一件要确认的就是
+ * "现在跑的是哪一版"，这条日志让这个问题一眼可判。
+ */
+const buildInfoPath = join(root, 'dist', 'build-info.json');
+mkdirSync(dirname(buildInfoPath), { recursive: true });
+writeFileSync(
+  buildInfoPath,
+  JSON.stringify({ builtAt: new Date().toISOString(), node: process.version }, null, 1) + '\n',
+  'utf8',
+);
+console.log(`[copy-static] build-info -> dist/build-info.json`);

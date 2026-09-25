@@ -144,7 +144,7 @@ export class PerceptionService {
       getSensitiveKeywords: () => this.settings.sensitivityKeywords,
       getSceneFixes: () => this.settings.sceneFixes,
       storeFullUrl: () => this.settings.storeFullUrl,
-      getForegroundWindow: () => this.windows.current()?.foreground ?? null,
+      getForegroundWindow: () => this.effectiveForeground(),
     });
     this.windows = new WindowContextProbe({
       logger: options.logger,
@@ -225,7 +225,7 @@ export class PerceptionService {
    * 返回 null 表示"认不出来"（那就**不记观察**，宁可不写也不要写一条 other 污染习惯统计）。
    */
   private localObservationFromWindow(now: number): ScreenObservation | null {
-    const foreground = this.windows.current()?.foreground ?? null;
+    const foreground = this.effectiveForeground();
     if (!foreground) return null;
     const refined = refineSceneByWindow({ process: foreground.process, title: foreground.title, scene: 'other' });
     if (refined.reason === '' || refined.scene === 'other') return null;
@@ -246,17 +246,38 @@ export class PerceptionService {
   }
 
   /**
+   * **用户真正在用的那个窗口**（而不是"系统报告的前台窗口"）。
+   *
+   * 为什么不能直接用 `snapshot.foreground`：桌宠自己就是一堆 `alwaysOnTop` 的窗口，
+   * 用户点她一下、或者她的气泡刷新，前台就可能变成**我们自己的 electron 进程** ——
+   * 那时 `foreground.process === 'electron'`，任何"看用户在用什么应用"的判断都会跑偏：
+   * 终端规则不命中（于是照样去调模型）、场景判断也会把她自己当成用户的应用。
+   *
+   * 窗口列表是 **Z 序**的（最上面在前），而 `withoutOwnWindows()` 恰好按标题滤掉
+   * 桌宠设置 / 聊天窗口 / 桌宠本体，所以"列表里第一条"就是答案；一个都不剩时退回原前台。
+   */
+  private effectiveForeground(): { readonly title: string; readonly process: string } | null {
+    const snapshot = this.windows.current();
+    if (!snapshot) return null;
+    const others = withoutOwnWindows(snapshot.windows);
+    const top = others[0];
+    if (top) return { title: top.title, process: top.process };
+    return snapshot.foreground;
+  }
+
+  /**
    * 窗口上下文 -> 提示词文本（并把快照留给 `refineScene`/状态用）。
    *
    * 窗口列表会**过滤掉我们自己的窗口**（设置窗口、聊天窗口）：它们的标题
    * （"桌宠设置"）混进去只会干扰判断，而且它们常常正好是前台窗口。
+   * "最上层窗口"给的也是**用户真正在用的那个**（见 `effectiveForeground`）。
    */
   private async windowContextText(force = false): Promise<string | null> {
     if (!this.settings.windowContext || this.settings.privacyMode) return null;
     const snapshot = await this.windows.probe(force);
     if (!snapshot) return null;
     return describeWindowContext({
-      foreground: snapshot.foreground,
+      foreground: this.effectiveForeground(),
       windows: withoutOwnWindows(snapshot.windows),
       limit: this.settings.windowListLimit,
     });
@@ -439,7 +460,11 @@ export class PerceptionService {
      * - 不截图、不调模型（`mode: 'local'`、`tokens: 0`），省一次请求，也少一份把屏幕发出去的风险；
      * - 结论固定，就不会出现"看不清还硬猜"或"模型把预算花在思考过程里返回空内容"。
      */
-    const foreground = this.windows.current()?.foreground ?? null;
+    /*
+     * 终端短路**也受「用窗口信息辅助判断」这个开关约束**：它靠的正是"最上层窗口的进程名"，
+     * 开关关掉就不该再拿窗口信息做决策（否则关掉窗口上下文也照样会被终端规则拦下）。
+     */
+    const foreground = this.settings.windowContext ? this.effectiveForeground() : null;
     if (foreground && isTerminalProcess(foreground.process)) {
       const terminalObservation = terminalObservationFor(foreground.process, foreground.title, now);
       observation = terminalObservation;
@@ -452,6 +477,14 @@ export class PerceptionService {
         this.store.saveHabits(this.habits);
       }
       this.lastError = '';
+      /*
+       * 明确记一条：**这一轮没有截图、没有调模型**。
+       * 用户此前报过"终端开着还是调了模型"，这条日志（配合启动时的 `build:` 构建戳）
+       * 让"规则到底命中没命中"一眼可判。
+       */
+      this.logger.info('terminal foreground; fixed conclusion (no capture, no model)', {
+        data: { process: foreground.process, scene: terminalObservation.scene },
+      });
       this.decide(terminalObservation, now);
       this.emitStatus();
       return this.status();
@@ -543,7 +576,7 @@ export class PerceptionService {
      * "如果是终端，那就直接表示正在使用控制台就可以了，不用分析做什么了"）。
      * 放在"有没有密钥"之前：结论是固定的，没配密钥时也该答得出来。
      */
-    const foregroundView = this.windows.current()?.foreground ?? null;
+    const foregroundView = this.settings.windowContext ? this.effectiveForeground() : null;
     if (foregroundView && isTerminalProcess(foregroundView.process)) {
       this.store.log('observation', `用户请求「${viewModeLabel(mode)}」：${TERMINAL_ACTIVITY_TEXT}`);
       this.emitStatus();
@@ -682,8 +715,8 @@ export class PerceptionService {
         const list = snapshot ? withoutOwnWindows(snapshot.windows) : [];
         return {
           count: list.length,
-          foregroundTitle: snapshot?.foreground?.title ?? '',
-          foregroundProcess: snapshot?.foreground?.process ?? '',
+          foregroundTitle: this.effectiveForeground()?.title ?? '',
+          foregroundProcess: this.effectiveForeground()?.process ?? '',
           sample: list.slice(0, 5).map((item) => `${item.title}（${item.process || '未知'}）`),
           backingOff: this.windows.backingOff,
         };

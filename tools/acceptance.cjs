@@ -890,9 +890,24 @@ app.whenReady().then(async () => {
     };
 
     // ---- 6) 隐藏：窗口应收回纯宠物尺寸 ----
+    /*
+     * ⚠️ 这里原来是固定 wait(900) 后直接读 —— 实测会**偶发红**（约 5 次里 1~2 次）：
+     * 主进程的收缩是"排一次 60ms 的定时器再收敛"，再加上窗口尺寸本身要等 Windows 那边同步，
+     * 900ms 有时刚好卡在中间，读到的还是气泡尺寸（visible: true / 595x487）。
+     * 改成**等它真的收敛**：轮询到"不可见且窗口=宠物尺寸"为止，最多等 3 秒。
+     * 这不是放水：失败仍然会红，只是不再因为"差几十毫秒"而红。
+     */
     await window.petAPI.bubble.set(null);
-    await wait(900);
-    const afterHide = window.petApp.describeBubble();
+    let afterHide = window.petApp.describeBubble();
+    for (let attempt = 0; attempt < 15; attempt += 1) {
+      const settled =
+        afterHide?.visible === false &&
+        afterHide?.windowInner?.width === afterHide?.petSize?.width &&
+        afterHide?.windowInner?.height === afterHide?.petSize?.height;
+      if (settled) break;
+      await wait(200);
+      afterHide = window.petApp.describeBubble();
+    }
 
     return {
       hidden, shortPayload, shortState, longPayload, longState, scrolled, scaleProbe, afterHide, layout,
@@ -3426,15 +3441,22 @@ app.whenReady().then(async () => {
    *   1. 截屏 + 调用模型这条路径能跑起来，失败时**只是记一条 lastError**，
    *      不会崩、不会把脏数据当成观察结果；
    *   2. **磁盘上没有任何图像文件**（这是本模块最核心的隐私承诺）。
+   *
+   * ⚠️ 这一段必须先把「用窗口信息辅助判断」关掉：**验收自身就是从一个终端跑起来的**，
+   * 而"最上层非自家窗口"恰好就是那个终端 —— 于是"前台是终端 → 固定结论"会正常命中，
+   * 截屏与模型这条链路根本不会被走到（实测因此红过一次）。
+   * 关掉窗口上下文后终端短路不会触发（它本来也受这个开关约束），这段才测的是它该测的东西。
    */
   const capturePath = await run(`(async () => {
+    await window.petAPI.perception.setSettings({ windowContext: false });
     await window.petAPI.ai.setSettings({
       enabled: true, chat: true,
       provider: { baseUrl: 'http://127.0.0.1:9/v1', model: 'acceptance-vision', apiKey: 'sk-acceptance-vision-0001', timeoutMs: 1500 },
     });
     const status = await window.petAPI.perception.sampleNow();
-    // 收尾：把假密钥清掉（本段只验证链路）
+    // 收尾：把假密钥清掉、窗口上下文恢复（本段只验证链路）
     await window.petAPI.ai.setSettings({ clearApiKey: true });
+    await window.petAPI.perception.setSettings({ windowContext: true });
     return {
       capturing: status.capturing,
       lastError: status.lastError,
