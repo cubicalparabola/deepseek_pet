@@ -75,6 +75,8 @@ export class BubbleController {
   private awaitingMeasure = false;
   /** 测量兜底定时器：万一 Renderer 没回报，也要把气泡显示出来。 */
   private measureFallback: ReturnType<typeof setTimeout> | null = null;
+  /** 揭示定时器：窗口生效 + 宠物重排之后再让气泡可见。 */
+  private revealTimer: ReturnType<typeof setTimeout> | null = null;
 
   public constructor(deps: BubbleControllerDeps) {
     this.deps = deps;
@@ -165,15 +167,43 @@ export class BubbleController {
     this.textLines = lines;
     this.clearMeasureFallback();
     /*
-     * 首次测量完成：这一次才是"真正把窗口调成含气泡尺寸"。
-     * 之前窗口一直保持宠物尺寸、气泡也没画出来，因此不会"先撑大再收缩"。
+     * 首次测量完成：这一次才把窗口调成含气泡尺寸。
+     * 之前窗口保持宠物尺寸、气泡也没画出来，因此不会"先撑大再收缩"。
      */
     const wasWaiting = this.awaitingMeasure;
     this.awaitingMeasure = false;
-    this.state = { ...this.state, ready: true };
     this.deps.logger.debug('bubble layout finalized', { data: { wasWaiting, lines } });
+
+    /*
+     * ⚠️ 这里**还不能**让气泡可见。
+     *
+     * 调整窗口会让渲染层的舞台变大、宠物随之重排（在窗内的纵向位置从
+     * "宠物尺寸上方"变成"气泡带下方"）。若此刻立刻显示气泡，它会被画在
+     * **重排前的位置**（用户描述："气泡出现在宠物中央才闪上去"）。
+     * 因此先应用布局并保持隐藏，隔一小段时间（等窗口生效 + 宠物重排 + 合成器
+     * 画出一帧）再单独推一次"可以显示了"。
+     */
+    this.state = { ...this.state, ready: false };
     this.applyLayout(this.deps.getPetSize());
+    this.scheduleReveal();
     return this.payload();
+  }
+
+  /**
+   * 延后揭示气泡：等窗口尺寸生效、宠物完成重排之后再让它可见。
+   *
+   * 60ms 约等于 3~4 帧，足够覆盖"setBounds 生效 + 渲染层重排 + 合成器出帧"；
+   * 再长就会让用户感觉"点了没反应"。
+   */
+  private scheduleReveal(): void {
+    if (this.revealTimer !== null) clearTimeout(this.revealTimer);
+    this.revealTimer = setTimeout(() => {
+      this.revealTimer = null;
+      if (!this.state.visible) return;
+      this.state = { ...this.state, ready: true };
+      this.deps.logger.debug('bubble revealed');
+      this.notifyOnly();
+    }, 60);
   }
 
   /** 测量兜底：Renderer 若没回报，也要把气泡显示出来（否则永远不出现）。 */
@@ -199,6 +229,10 @@ export class BubbleController {
   public hide(): BubblePayload {
     const wasVisible = this.state.visible;
     this.clearMeasureFallback();
+    if (this.revealTimer !== null) {
+      clearTimeout(this.revealTimer);
+      this.revealTimer = null;
+    }
     this.awaitingMeasure = false;
     this.state = { visible: false, text: this.state.text, ready: false };
     this.textLines = null;

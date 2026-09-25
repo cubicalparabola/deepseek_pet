@@ -53,6 +53,14 @@ export const IpcChannels = {
    * 气泡状态与窗口尺寸必须成对更新，不能只由渲染层自己藏起来。
    */
   BubbleAcknowledge: 'pet:bubble-acknowledge',
+  /**
+   * Renderer -> Main：指针在窗口内的位置（归一化 0~1）。
+   *
+   * 用途：透明区域要**穿透**（点得到下面的窗口），而"哪个区域该接收点击"
+   * 的几何只有主进程知道（宠物尺寸 + 气泡布局都在它手里），
+   * 因此渲染层只上报指针位置，由主进程判定并切换 `setIgnoreMouseEvents`。
+   */
+  PointerPosition: 'pet:pointer-position',
 
   /* 设置窗口（独立的小窗口，只暴露尺寸/置顶） */
   SettingsWindowShow: 'pet:settings-window-show',
@@ -215,6 +223,13 @@ export interface WindowAPI {
   hide(): void;
   setAlwaysOnTop(value: boolean): void;
   setIgnoreMouseEvents(ignore: boolean, forward?: boolean): void;
+  /**
+   * 上报指针在窗口内的归一化位置（0~1）。
+   *
+   * 主进程据此判断指针是否落在"宠物/气泡"上，从而切换鼠标穿透 ——
+   * 透明区域应当点得到下面的窗口。
+   */
+  reportPointer(nx: number, ny: number): void;
   /** 打开设置窗口（滚动条调尺寸）。与托盘「设置…」是同一条路径。 */
   showSettingsWindow(): Promise<boolean>;
 }

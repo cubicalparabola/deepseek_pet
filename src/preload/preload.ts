@@ -186,6 +186,7 @@ function buildPetBridge(): PetBridge {
       setAlwaysOnTop: (value: boolean): void => send(IpcChannels.WindowSetAlwaysOnTop, value),
       setIgnoreMouseEvents: (ignore: boolean, forward = true): void =>
         send(IpcChannels.WindowSetIgnoreMouse, ignore, forward),
+      reportPointer: (nx: number, ny: number): void => send(IpcChannels.PointerPosition, { nx, ny }),
       showSettingsWindow: (): Promise<boolean> =>
         ipcRenderer.invoke(IpcChannels.SettingsWindowShow) as Promise<boolean>,
     },
