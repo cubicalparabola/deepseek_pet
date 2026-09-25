@@ -2794,6 +2794,73 @@ app.whenReady().then(async () => {
       perceptionModel.sceneLabel === '写代码',
     JSON.stringify(perceptionModel.normalize),
   );
+
+  /*
+   * 场景纠正：**用户实测反馈**"浏览网页总是被识别成笔记软件记笔记"。
+   *
+   * 这类误判只靠提示词说服模型不稳（模型看得见 Chrome 却把长文页面判成 writing），
+   * 因此代码里按应用名/界面线索做了一轮确定性纠正，并留了用户自定义规则的入口。
+   * 这条断言把三种情形都钉住，免得以后调提示词时又退回去。
+   */
+  const sceneRefine = await run(`(() => {
+    const model = window.petDebug.perception;
+    const cases = {
+      // ① 浏览器里看长文被模型判成"写东西" -> 纠正为浏览网页
+      browserWriting: model.refineScene({ scene: 'writing', app: 'Google Chrome' }),
+      // ② 笔记软件被判成"浏览网页" -> 纠正为写东西（反向也要管）
+      editorBrowsing: model.refineScene({ scene: 'browsing', app: 'Obsidian' }),
+      // ③ 影音应用被判成写东西 -> 看视频
+      videoWriting: model.refineScene({ scene: 'writing', app: 'bilibili' }),
+      // ④ 界面线索：只有浏览器界面、没有编辑器界面
+      chromeOnly: model.refineScene({ scene: 'writing', app: '', browserChrome: true, editorChrome: false }),
+      // ⑤ 信息不足时不乱纠正（既没看到浏览器也没看到编辑器界面）
+      noClue: model.refineScene({ scene: 'writing', app: '未知应用' }),
+      // ⑥ 用户自定义规则优先于一切
+      userFix: model.refineScene({ scene: 'writing', app: 'MyWeirdApp', fixes: ['myweirdapp=browsing'] }),
+      // ⑦ 非法规则行被忽略
+      badFixes: model.parseSceneFixes(['', '# 注释', '没有等号', 'Chrome=不存在的场景', 'Chrome=browsing']),
+      // ⑧ 应用名判类
+      kinds: [model.appKind('Google Chrome'), model.appKind('Microsoft Edge'), model.appKind('Notion'), model.appKind('VS Code'), model.appKind('')],
+      // ⑨ 默认配置里带了两条开箱即用的浏览器纠正
+      defaultFixes: window.petDebug.perception.DEFAULT_PERCEPTION_SETTINGS.sceneFixes.length,
+    };
+    return cases;
+  })()`);
+  record(
+    '感知：浏览器里的长文不再被当成"写笔记"（应用名判类 + 界面线索）',
+    sceneRefine.browserWriting.scene === 'browsing' &&
+      sceneRefine.browserWriting.reason.length > 0 &&
+      sceneRefine.videoWriting.scene === 'video' &&
+      sceneRefine.chromeOnly.scene === 'browsing',
+    JSON.stringify({
+      browserWriting: sceneRefine.browserWriting,
+      videoWriting: sceneRefine.videoWriting,
+      chromeOnly: sceneRefine.chromeOnly,
+    }),
+  );
+  record(
+    '感知：反向也管（笔记软件不会被认成浏览网页）且信息不足时不乱改',
+    sceneRefine.editorBrowsing.scene === 'writing' && sceneRefine.noClue.scene === 'writing' && sceneRefine.noClue.reason === '',
+    JSON.stringify({ editorBrowsing: sceneRefine.editorBrowsing, noClue: sceneRefine.noClue }),
+  );
+  record(
+    '感知：用户自定义纠正规则优先，且非法规则被忽略',
+    sceneRefine.userFix.scene === 'browsing' &&
+      sceneRefine.badFixes.length === 1 &&
+      sceneRefine.badFixes[0].keyword === 'chrome' &&
+      sceneRefine.badFixes[0].scene === 'browsing' &&
+      sceneRefine.defaultFixes >= 1,
+    JSON.stringify({ userFix: sceneRefine.userFix, badFixes: sceneRefine.badFixes, defaultFixes: sceneRefine.defaultFixes }),
+  );
+  record(
+    '感知：应用名能判出浏览器/编辑器/未知三类',
+    sceneRefine.kinds[0] === 'browser' &&
+      sceneRefine.kinds[1] === 'browser' &&
+      sceneRefine.kinds[2] === 'editor' &&
+      sceneRefine.kinds[3] === 'unknown' &&
+      sceneRefine.kinds[4] === 'unknown',
+    JSON.stringify(sceneRefine.kinds),
+  );
   record(
     '感知：习惯学习按小时聚合，并能预测当前时段（按你平时的习惯…）',
     perceptionModel.habitSamples === 4 &&

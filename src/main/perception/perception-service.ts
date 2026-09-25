@@ -133,6 +133,7 @@ export class PerceptionService {
       getClient: options.getClient,
       logger: options.logger,
       getSensitiveKeywords: () => this.settings.sensitivityKeywords,
+      getSceneFixes: () => this.settings.sceneFixes,
       isVisionEnabled: () => this.settings.vision && this.settings.screen,
     });
     this.behavior = buildBehaviorSnapshot({

@@ -194,6 +194,169 @@ export function buildBehaviorSnapshot(input: {
 }
 
 /* -------------------------------------------------------------------------- */
+/* 二点五、场景纠正（"浏览器被认成笔记软件"这类误判的确定性补救）                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 常见的**浏览器**应用名片段。
+ *
+ * 为什么需要一张表：视觉模型经常能正确读出应用名（"Chrome"），
+ * 却把"浏览器里看一篇长文"判成 `writing`（写东西/记笔记）——
+ * 用户实测反馈："浏览网页总是被识别成笔记软件记笔记"。
+ * 只靠提示词说服模型不可靠，这里按**应用名**做一次确定性纠正。
+ */
+export const BROWSER_APPS: readonly string[] = [
+  'chrome',
+  'edge',
+  'firefox',
+  'brave',
+  'vivaldi',
+  'opera',
+  'safari',
+  'arc',
+  '浏览器',
+  '360se',
+  'qqbrowser',
+];
+
+/** 笔记/文档编辑类应用（这些被判成 writing 才是对的）。 */
+export const EDITOR_APPS: readonly string[] = [
+  'obsidian',
+  'notion',
+  'logseq',
+  'roam',
+  'typora',
+  'onenote',
+  'evernote',
+  'joplin',
+  'word',
+  'pages',
+  'docs',
+  '语雀',
+  '印象笔记',
+  '有道云',
+  '为知',
+  '备忘录',
+  'notes',
+  'ulysses',
+  'scrivener',
+];
+
+/** 影音类应用。 */
+export const VIDEO_APPS: readonly string[] = ['bilibili', 'youtube', 'netflix', 'potplayer', 'vlc', 'mpv', 'iqiyi', '腾讯视频', '爱奇艺', '斗鱼', 'twitch'];
+
+/** 游戏平台（与"看视频"区分开）。 */
+export const GAME_APPS: readonly string[] = ['steam', 'epic', 'battle.net', 'wegame', '原神', 'minecraft'];
+
+export type AppKind = 'browser' | 'editor' | 'video' | 'game' | 'unknown';
+
+/** 从应用名（模型给的，可能是"Google Chrome"这种）判断大致类别。 */
+export function appKind(app: string): AppKind {
+  const name = (app ?? '').toLowerCase();
+  if (name.trim() === '') return 'unknown';
+  if (VIDEO_APPS.some((item) => name.includes(item))) return 'video';
+  if (GAME_APPS.some((item) => name.includes(item))) return 'game';
+  if (EDITOR_APPS.some((item) => name.includes(item))) return 'editor';
+  if (BROWSER_APPS.some((item) => name.includes(item))) return 'browser';
+  return 'unknown';
+}
+
+/**
+ * 解析用户自定义的纠正规则（每行 `关键词=场景`，例如 `Chrome=browsing`）。
+ *
+ * 词表与模型输出用的是同一套受控值，非法行直接忽略（宁可少纠正，不要乱纠正）。
+ */
+export function parseSceneFixes(lines: readonly string[]): { keyword: string; scene: SceneKind }[] {
+  const out: { keyword: string; scene: SceneKind }[] = [];
+  for (const line of lines) {
+    const text = (line ?? '').trim();
+    if (text === '' || text.startsWith('#')) continue;
+    const separator = /[=＝:：]/.exec(text);
+    if (!separator) continue;
+    const keyword = text.slice(0, separator.index).trim().toLowerCase();
+    const rawScene = text.slice(separator.index + 1).trim().toLowerCase();
+    if (keyword === '') continue;
+    const scene = normalizeScene(rawScene);
+    // normalizeScene 会把不认识的值收敛成 'other'：显式写 'other' 才算数，否则视为无效行
+    if (scene === 'other' && rawScene !== 'other') continue;
+    out.push({ keyword: keyword.slice(0, 40), scene });
+  }
+  return out.slice(0, 100);
+}
+
+export interface SceneRefineInput {
+  /** 模型给出的场景。 */
+  readonly scene: SceneKind;
+  /** 模型读到的应用名。 */
+  readonly app: string;
+  /** 模型是否看到浏览器界面（地址栏/标签页/书签栏）。 */
+  readonly browserChrome?: boolean;
+  /** 模型是否看到编辑器界面（光标、行号、笔记侧栏、编辑工具栏）。 */
+  readonly editorChrome?: boolean;
+  /** 用户自定义纠正规则。 */
+  readonly fixes?: readonly string[];
+}
+
+/**
+ * 对模型给出的场景做**确定性纠正**（纯函数，可被验收直接断言）。
+ *
+ * 规则优先级（越靠前越优先）：
+ * 1. **用户自定义纠正**（`Chrome=browsing`）—— 用户说了算；
+ * 2. **应用名判类**：
+ *    - 浏览器/影音/游戏应用里出现 `writing`，一律纠正为 `browsing`
+ *      （在浏览器里看文档不等于在写笔记 —— 这正是用户反馈的那个误判）；
+ *    - 笔记/文档应用里出现 `browsing`/`other`，纠正为 `writing`；
+ *    - 影音应用只把 `other`/`idle` 之外的"做事类"标签收敛到 `video`/`gaming` 时保守处理：
+ *      仅纠正模型自相矛盾的组合（影音应用 + writing/reading/coding）。
+ * 3. **界面线索**：只有"看到浏览器界面且没有编辑器界面"时才把 `writing` 拉回 `browsing`；
+ *    两条线索同时缺失或同时存在时**不做纠正**（信息不足时保持模型判断）。
+ *
+ * 说明：这里刻意**不做**"看到代码就改成 coding"之类的猜测 —— 纠正必须能解释，
+ * 否则只是把一种误判换成另一种。
+ */
+export function refineScene(input: SceneRefineInput): { scene: SceneKind; reason: string } {
+  const rawScene = input.scene;
+  const app = input.app ?? '';
+  const kind = appKind(app);
+
+  // 1) 用户自定义规则优先（关键词匹配应用名或场景名）
+  const fixes = parseSceneFixes(input.fixes ?? []);
+  const loweredApp = app.toLowerCase();
+  for (const fix of fixes) {
+    if (loweredApp.includes(fix.keyword)) {
+      return { scene: fix.scene, reason: `用户规则「${fix.keyword}=${fix.scene}」` };
+    }
+  }
+
+  // 2) 应用名判类
+  if (kind === 'browser' && (rawScene === 'writing' || rawScene === 'terminal')) {
+    return { scene: 'browsing', reason: `浏览器应用（${app.trim()}）里不算写笔记` };
+  }
+  if (kind === 'browser' && rawScene === 'other' && input.browserChrome === true && input.editorChrome !== true) {
+    return { scene: 'browsing', reason: '看到浏览器界面且没有编辑器界面' };
+  }
+  if (kind === 'editor' && (rawScene === 'browsing' || rawScene === 'other')) {
+    return { scene: 'writing', reason: `笔记/文档应用（${app.trim()}）` };
+  }
+  if (kind === 'video' && (rawScene === 'writing' || rawScene === 'reading' || rawScene === 'coding')) {
+    return { scene: 'video', reason: `影音应用（${app.trim()}）` };
+  }
+  if (kind === 'game' && (rawScene === 'writing' || rawScene === 'reading' || rawScene === 'coding')) {
+    return { scene: 'gaming', reason: `游戏应用（${app.trim()}）` };
+  }
+
+  // 3) 界面线索（信息不足时不纠正）
+  if (rawScene === 'writing' && input.browserChrome === true && input.editorChrome !== true) {
+    return { scene: 'browsing', reason: '看到浏览器界面（地址栏/标签页），没有编辑器界面' };
+  }
+  if (rawScene === 'browsing' && input.editorChrome === true && input.browserChrome !== true) {
+    return { scene: 'writing', reason: '看到编辑器界面（光标/行号/笔记侧栏）' };
+  }
+
+  return { scene: rawScene, reason: '' };
+}
+
+/* -------------------------------------------------------------------------- */
 /* 三、主动打扰闸门（3.4 的"重点控制主动交互频率"）                                */
 /* -------------------------------------------------------------------------- */
 

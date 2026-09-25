@@ -179,7 +179,29 @@ app.whenReady().then(async () => {
   })()`);
   step('面板：感知日志能列出来（可审计她看见了什么）', log, log.count >= 1);
 
-  /* 6) 滚到感知面板并截图（肉眼验收排版） */
+  /* 6) 场景纠正规则：面板上改完必须落到主进程（"浏览器被认成笔记软件"的兜底口子） */
+  const fixes = await run(`(async () => {
+    const before = await window.settingsAPI.perception.status();
+    const input = document.getElementById('perception-scene-fixes');
+    if (!input) return { ok: false, reason: 'missing-input' };
+    input.value = 'Chrome=browsing\\nMyWeirdApp=browsing';
+    document.getElementById('perception-scene-fixes-save').click();
+    await new Promise((r) => setTimeout(r, 1200));
+    const after = await window.settingsAPI.perception.status();
+    return {
+      ok: true,
+      before: before.settings.sceneFixes.length,
+      after: after.settings.sceneFixes.slice(),
+      input: input.value.split('\\n').length,
+    };
+  })()`);
+  step(
+    '感知面板：场景纠正规则可保存到主进程（用于修掉"浏览器被认成笔记软件"这类误判）',
+    fixes,
+    fixes.ok === true && fixes.after.includes('Chrome=browsing') && fixes.after.includes('MyWeirdApp=browsing'),
+  );
+
+  /* 7) 滚到感知面板并截图（肉眼验收排版） */
   await run(`(() => {
     const target = document.getElementById('perception-panel-root');
     if (target) target.scrollIntoView({ block: 'start' });

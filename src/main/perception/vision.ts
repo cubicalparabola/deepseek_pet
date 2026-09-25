@@ -16,7 +16,7 @@
  */
 
 import type { CameraFrameResult, PerceptionViewMode, PerceptionViewResult, SceneKind, ScreenObservation } from '../../shared/perception-types';
-import { SCENE_LABELS, matchesSensitiveKeywords, normalizeScene } from '../../shared/perception';
+import { SCENE_LABELS, matchesSensitiveKeywords, normalizeScene, refineScene } from '../../shared/perception';
 import type { LLMClient } from '../ai/llm-client';
 import { LLMError } from '../ai/llm-client';
 import type { Logger } from '../../shared/logger';
@@ -28,6 +28,8 @@ export interface VisionAnalyzerOptions {
   readonly logger: Logger;
   /** 敏感词（第二道闸）。 */
   readonly getSensitiveKeywords: () => readonly string[];
+  /** 用户自定义的场景纠正规则（每行 `关键词=场景`）。 */
+  readonly getSceneFixes: () => readonly string[];
   /** 是否允许做"内容理解"（3.2 的开关）。 */
   readonly isVisionEnabled: () => boolean;
 }
@@ -50,9 +52,18 @@ const SCENE_SYSTEM = [
   `- scene: 只能是这些值之一：${SCENE_LIST}`,
   '- app: 你判断当前正在使用的应用名（尽量短，例如 "VS Code"、"Chrome"、"PDF 阅读器"；判断不出就写 ""）',
   '- activity: 一句话说明用户在做什么（不超过 20 字，中文）',
+  '- browserChrome: 布尔值。画面上是否能看到**浏览器界面**（地址栏、标签页、书签栏、前进后退按钮）',
+  '- editorChrome: 布尔值。画面上是否能看到**编辑器界面**（闪烁的文本光标、行号、笔记列表侧栏、格式工具栏）',
   '- sensitive: 布尔值。**如果画面包含明显的私人内容（密码、银行/支付、私信、身份信息、私密照片等）必须为 true**',
   '- focus: "deep"（专注做一件事）或 "shallow"（看起来在频繁切换/分心），不确定写 "unknown"',
   '- suggestion: 如果画面里有明显的报错/失败信息且你能给出简短建议，就用一句话给出（中文，不超过 30 字）；否则为空字符串',
+  '',
+  '⚠️ 判断 scene 的判据（很重要，请严格按此，不要凭页面内容多不多猜）：',
+  '- **在浏览器里看文章、文档、论坛、维基、新闻、GitHub 网页，都是 browsing（浏览网页）**，',
+  '  即使页面上有很多文字、看起来像一份文档 —— 只要看不到编辑器界面，就**不是** writing。',
+  '- 只有看到**编辑器/笔记软件的界面**（光标、行号、笔记侧栏、格式工具栏），或者明确是 Word/Notion/Obsidian 这类应用，才是 writing。',
+  '- 在浏览器里看论文 PDF 属于 reading；看视频/直播属于 video；玩游戏属于 gaming。',
+  '- 拿不准时，先用 browserChrome / editorChrome 两个字段描述你**确实看到**的界面，再据此选 scene。',
   '',
   '注意：只描述你**确实看到**的内容，不要猜测用户身份，不要复述敏感信息的具体内容。',
 ].join('\n');
@@ -108,9 +119,26 @@ export class VisionAnalyzer {
       const app = stringOr(parsed?.app, '');
       const activity = stringOr(parsed?.activity, '');
       const modelSensitive = parsed?.sensitive === true;
+      /*
+       * 场景纠正：模型给的 scene 先过一遍确定性规则（纯函数，见 shared/perception.ts 的
+       * refineScene）—— 用户实测"浏览网页总被认成笔记软件"，只靠提示词说服模型不稳，
+       * 这里按应用名/界面线索再纠一次，并允许用户自定义规则兜底。
+       */
+      const refined = refineScene({
+        scene: normalizeScene(parsed?.scene),
+        app,
+        browserChrome: parsed?.browserChrome === true,
+        editorChrome: parsed?.editorChrome === true,
+        fixes: this.options.getSceneFixes(),
+      });
+      if (refined.reason !== '') {
+        this.logger.info('scene corrected', {
+          data: { from: normalizeScene(parsed?.scene), to: refined.scene, app, reason: refined.reason },
+        });
+      }
       const observation: ScreenObservation = {
         at: new Date().toISOString(),
-        scene: normalizeScene(parsed?.scene),
+        scene: refined.scene,
         app: app.slice(0, 60),
         activity: activity.slice(0, 120),
         // 两道闸：模型判定 + 关键词命中（见 shared/perception 的 isSensitive 说明）

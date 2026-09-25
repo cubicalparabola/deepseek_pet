@@ -77,6 +77,15 @@ export interface PerceptionSettings {
   readonly lateNightHour: number;
   /** 敏感内容关键词（匹配模型给出的 app/activity/summary，命中则按敏感处理）。 */
   readonly sensitivityKeywords: readonly string[];
+  /**
+   * 用户自定义的**场景纠正**规则（每行 `关键词=场景`，例如 `Chrome=browsing`）。
+   *
+   * 为什么需要：视觉模型会稳定地把某类画面判错（用户实测："浏览网页总是被识别成
+   * 笔记软件记笔记"）。代码里已经按应用名做了一轮确定性纠正，
+   * 但总会有它认不出的应用 —— 这时给用户一个"我说了算"的口子，
+   * 比让他反复看到同一个错误要好。
+   */
+  readonly sceneFixes: readonly string[];
 }
 
 export const DEFAULT_PERCEPTION_SETTINGS: PerceptionSettings = {
@@ -99,6 +108,11 @@ export const DEFAULT_PERCEPTION_SETTINGS: PerceptionSettings = {
   longSessionMinutes: 120,
   lateNightHour: 1,
   sensitivityKeywords: ['密码', '银行', '支付', '身份证', '私密', 'password', 'bank', 'paypal', '1password'],
+  /**
+   * 默认给两条**最常见**的纠正（浏览器 → 浏览网页），开箱即用；
+   * 用户可以在设置里改/加（空串表示不用这一条）。
+   */
+  sceneFixes: ['Chrome=browsing', 'Edge=browsing'],
 };
 
 /** 设置补丁（部分字段）。 */
@@ -120,6 +134,7 @@ export interface PerceptionSettingsPatch {
   readonly longSessionMinutes?: number;
   readonly lateNightHour?: number;
   readonly sensitivityKeywords?: readonly string[];
+  readonly sceneFixes?: readonly string[];
 }
 
 /* -------------------------------------------------------------------------- */
@@ -302,6 +317,12 @@ export function sanitizePerceptionSettings(
         .map((item) => item.trim().slice(0, 40))
         .slice(0, 100)
     : fallback.sensitivityKeywords;
+  const fixes = Array.isArray(record.sceneFixes)
+    ? (record.sceneFixes as unknown[])
+        .filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+        .map((item) => item.trim().slice(0, 60))
+        .slice(0, 100)
+    : fallback.sceneFixes;
 
   return {
     screen: bool(record.screen, fallback.screen),
@@ -324,6 +345,7 @@ export function sanitizePerceptionSettings(
     longSessionMinutes: num(record.longSessionMinutes, fallback.longSessionMinutes, 10, 1440),
     lateNightHour: num(record.lateNightHour, fallback.lateNightHour, 0, 6),
     sensitivityKeywords: keywords,
+    sceneFixes: fixes,
   };
 }
 

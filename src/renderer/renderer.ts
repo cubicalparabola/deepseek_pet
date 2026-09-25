@@ -50,6 +50,8 @@ import {
   suggestNodes,
 } from '../shared/growth';
 import {
+  BROWSER_APPS,
+  appKind,
   capturePermission,
   emptyHabitProfile,
   gateIntervention,
@@ -61,7 +63,9 @@ import {
   learnHabit,
   matchesSensitiveKeywords,
   normalizeScene,
+  parseSceneFixes,
   planIntervention,
+  refineScene,
   sceneLabel,
   topSceneAtHour,
 } from '../shared/perception';
@@ -1104,6 +1108,11 @@ class PetApplication {
       readonly isPlanEnabled: typeof isPlanEnabled;
       readonly normalizeScene: typeof normalizeScene;
       readonly sceneLabel: typeof sceneLabel;
+      /** 场景纠正（"浏览器被认成笔记软件"这类误判的确定性补救）。 */
+      readonly refineScene: typeof refineScene;
+      readonly appKind: typeof appKind;
+      readonly parseSceneFixes: typeof parseSceneFixes;
+      readonly BROWSER_APPS: typeof BROWSER_APPS;
     };
     readonly perceptionStatus: () => Promise<PerceptionStatus | null>;
     /**
@@ -1179,6 +1188,10 @@ class PetApplication {
         isPlanEnabled,
         normalizeScene,
         sceneLabel,
+        refineScene,
+        appKind,
+        parseSceneFixes,
+        BROWSER_APPS,
       },
       perceptionStatus: async () => {
         const bridge = this.runtime.perception();

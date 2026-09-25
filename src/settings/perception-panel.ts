@@ -275,6 +275,27 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   const clearDataButton = makeButton('perception-clear-data', '清空感知数据', 'ghost');
   privacySection.appendChild(actionRow(keywordsSave, openLogButton, clearDataButton));
 
+  /*
+   * 场景纠正规则（`关键词=场景`）。
+   *
+   * 由来：用户实测反馈"浏览网页总是被识别成笔记软件记笔记"。
+   * 代码里已经按应用名做了一轮确定性纠正（浏览器里的 writing 会被拉回 browsing），
+   * 但总会有模型认不出的应用 —— 这里给用户一个"我说了算"的口子：
+   * 命中关键词就强制用你指定的场景，优先级高于一切自动判断。
+   */
+  const fixesInput = el('textarea', 'perception-textarea');
+  fixesInput.id = 'perception-scene-fixes';
+  fixesInput.rows = 4;
+  fixesInput.setAttribute('aria-label', '场景纠正规则');
+  const fixesRow = fieldRow('perception-scene-fixes', '场景纠正规则', fixesInput,
+    '一行一条：关键词=场景（例如 Chrome=browsing）。命中应用名就强制用你指定的场景，优先级最高；' +
+      '可用场景名：coding / reading / video / gaming / meeting / browsing / chatting / writing / terminal / idle / sensitive / other。');
+  fixesRow.classList.add('perception-field-block');
+  privacySection.appendChild(fixesRow);
+
+  const fixesSave = makeButton('perception-scene-fixes-save', '保存纠正规则', 'primary');
+  privacySection.appendChild(actionRow(fixesSave));
+
   /* 四、采样与频率（控制打扰） */
 
   const samplingSection = makeSection('采样与频率');
@@ -624,6 +645,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     if (scope === 'privacy') {
       if (!editing(hideInput)) hideInput.checked = settings.hideFromCapture;
       setValue(keywordsInput, settings.sensitivityKeywords.join('\n'));
+      setValue(fixesInput, settings.sceneFixes.join('\n'));
       // 隐私模式开关可能被托盘菜单改掉：勾选态与提示整块由 status 刷新
       renderPrivacy(status);
       return;
@@ -733,6 +755,21 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     return { sensitivityKeywords: parseKeywords() };
   }
 
+  /**
+   * 场景纠正规则（`关键词=场景`）。
+   *
+   * 与关键词同理：清空 = 清空列表（也就是"不要任何自定义纠正，全交给自动判断"）。
+   * 非法行的过滤在主进程的 `parseSceneFixes` 里做一次，面板不重复实现规则解析。
+   */
+  function buildFixesPatch(): PerceptionSettingsPatch {
+    return {
+      sceneFixes: fixesInput.value
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line !== ''),
+    };
+  }
+
   function buildSamplingPatch(): PerceptionSettingsPatch | null {
     // 先读一遍只用来判断"有没有空/非数字"，错误提示要具体到这一步
     const fields = [
@@ -813,6 +850,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   }
 
   keywordsSave.addEventListener('click', () => savePatch(keywordsSave, 'privacy', buildKeywordsPatch));
+  fixesSave.addEventListener('click', () => savePatch(fixesSave, 'privacy', buildFixesPatch));
   samplingSave.addEventListener('click', () => savePatch(samplingSave, 'sampling', buildSamplingPatch));
 
   openLogButton.addEventListener('click', () => {
