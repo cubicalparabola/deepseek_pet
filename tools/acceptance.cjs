@@ -1066,14 +1066,23 @@ app.whenReady().then(async () => {
         last = h;
       }
     };
+    /*
+     * 气泡的显隐现在由 CSS visibility 控制（元素常驻 DOM，只切 style，见
+     * bubble-view.ts 的 pet-bubble-off / pet-bubble-pending），因此"看不见"
+     * 必须看**计算样式**，不能只看 hidden 属性。
+     */
+    const invisible = (el) => {
+      const s = getComputedStyle(el);
+      return el.hidden === true || s.display === 'none' || s.visibility === 'hidden';
+    };
     const snap = () => {
       const b = bubble();
       const a = ack();
       const ar = a.getBoundingClientRect();
       const br = b.getBoundingClientRect();
       return {
-        bubbleHidden: b.hidden,
-        ackHidden: a.hidden,
+        bubbleHidden: invisible(b),
+        ackHidden: invisible(a),
         ackText: (a.textContent || '').trim(),
         ackSize: { w: Math.round(ar.width), h: Math.round(ar.height) },
         /** 按钮必须完整落在气泡容器内 */
@@ -1161,7 +1170,10 @@ app.whenReady().then(async () => {
     ack.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, clientX: point.x, clientY: point.y, screenX: point.x, screenY: point.y }));
     ack.click();
     await wait(900);
-    const bubbleHidden = document.getElementById('pet-bubble').hidden;
+    const bubbleHidden = (() => {
+      const s = getComputedStyle(document.getElementById('pet-bubble'));
+      return s.display === 'none' || s.visibility === 'hidden';
+    })();
     subs.forEach((s) => s.unsubscribe());
     return { point, eventsDuringAck: seen, bubbleHidden };
   })()`);
@@ -1847,6 +1859,75 @@ app.whenReady().then(async () => {
   record('非循环动画触发 animation:end (completed)', ended.endEvent && ended.endEvent.completed === true, JSON.stringify(ended.endEvent));
   record('动画结束后状态回到 IDLE', ended.stateRightAfter === 'IDLE', `stateRightAfter=${ended.stateRightAfter}`);
   record('结束后自动接回兜底 idle 循环', ended.animationAfter === 'idle', `animationAfter=${ended.animationAfter}, stateAfter=${ended.stateAfter}`);
+
+  /*
+   * 逐帧检查**一次性动画的开始与结束**是否有"闪一下"。
+   *
+   * 用户反馈"所有动画开始和结束都要闪一次"。逐帧量化（tools/diag-transition-composite.cjs）
+   * 定位到原因是**硬切**：`startVideo` 原来用 `commitVideoSwap()` 直接换缓冲，
+   * 而两段素材的首末帧并不相同，切换那一帧就是一次可见跳变。修复方式是与持续动画
+   * 切段一致，走 140ms 交叉淡化（`crossfadeToSpare`）。
+   *
+   * 这里用 rAF 采样把"闪"的两种形态都钉住：
+   *   - blankOpacity：所有媒体层都不可见（桌宠整只消失一帧）；
+   *   - blankTex    ：可见层 opacity>0.5 但 readyState<2（画不出内容 = 透明一帧）；
+   *   - fadeFrames  ：同时有两层处于中间不透明度 = 正在交叉淡化。
+   * 断言：切换窗口内 blankOpacity=0、blankTex=0，且确实出现了淡化帧。
+   *
+   * 嵌入 JS 里没有反引号（模板字符串到此为止），改文字时请只写 CSS visibility 这类词。
+   */
+  const transition = await run(`(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const anim = window.petDebug.anim;
+    const vids = () => Array.from(document.querySelectorAll('#pet-pet video'));
+    const st = { frames: 0, blankOpacity: 0, blankTex: 0, fadeFrames: 0, maxFadeLayers: 0 };
+    const reset = () => { st.frames = 0; st.blankOpacity = 0; st.blankTex = 0; st.fadeFrames = 0; st.maxFadeLayers = 0; };
+    let stopped = false;
+    const sample = () => requestAnimationFrame(() => {
+      if (stopped) return;
+      const list = vids();
+      const ops = list.map((v) => Number(getComputedStyle(v).opacity));
+      const shown = ops.filter((o) => o > 0.001).length;
+      const mid = ops.filter((o) => o > 0.001 && o < 0.999).length;
+      st.frames++;
+      if (shown === 0) st.blankOpacity++;
+      for (let i = 0; i < list.length; i++) {
+        if (ops[i] > 0.5 && list[i].readyState < 2) st.blankTex++;
+      }
+      if (mid >= 2) st.fadeFrames++;
+      if (mid > st.maxFadeLayers) st.maxFadeLayers = mid;
+      sample();
+    });
+    sample();
+
+    anim.resetCooldowns();
+    anim.stop('fade-reset');
+    anim.play('idle', { interrupt: 'force', reason: 'fade-baseline', bypassCooldown: true });
+    await wait(1200);
+
+    /* 开始：idle -> cute */
+    reset();
+    await anim.play('cute', { interrupt: 'force', reason: 'fade-start', bypassCooldown: true });
+    await wait(700);
+    const start = { ...st };
+
+    /* 结束：cute -> 兜底 idle（等它自然播完） */
+    reset();
+    await wait(6000);
+    const end = { ...st, animation: anim.getCurrentAnimation() };
+    stopped = true;
+    return { start, end };
+  })()`);
+  record(
+    '一次性动画开始走交叉淡化（无空帧、无空白纹理帧）',
+    transition.start?.blankOpacity === 0 && transition.start?.blankTex === 0 && transition.start?.fadeFrames >= 2,
+    JSON.stringify(transition.start),
+  );
+  record(
+    '一次性动画结束走交叉淡化（无空帧、无空白纹理帧）',
+    transition.end?.blankOpacity === 0 && transition.end?.blankTex === 0 && transition.end?.fadeFrames >= 2 && transition.end?.animation === 'idle',
+    JSON.stringify(transition.end),
+  );
 
   /* --------------------------- 状态机 --------------------------- */
   const smInfo = await run(`(() => {

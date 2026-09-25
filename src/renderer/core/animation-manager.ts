@@ -825,6 +825,16 @@ export class AnimationManager {
 
     // 换源：在隐藏的备用缓冲上加载
     const incoming = this.layers.spareVideo;
+    /*
+     * ⚠️ 必须**在动这个缓冲之前**换代，和 playSegment 一致。
+     *
+     * 为什么：上一次交叉淡化会挂一个"140ms 后暂停并释放旧缓冲"的定时器，
+     * 而旧缓冲**就是**这次的 incoming。若此刻还拿着旧代次，那个定时器会在
+     * 我们加载到一半时 `releaseVideo()` 把这个缓冲的 src 清掉 ——
+     * 表现是素材永远等不到 readyState>=2，6s 后报
+     * "animation load failed ... 视频加载超时"（实测踩到：read-start.webm）。
+     */
+    const generation = this.layers.beginSegmentGeneration();
     incoming.loop = definition.loop;
     incoming.muted = true;
     incoming.playsInline = true;
@@ -840,9 +850,34 @@ export class AnimationManager {
     await nextFrame();
     if (!this.isStillCurrent(playback)) return;
 
-    this.layers.commitVideoSwap();
+    /*
+     * 一次性动画的**进入**（兜底 idle -> 反应动画）与**退出**（反应动画 ->
+     * 兜底 idle）不能硬切，要和持续动画切段一样走交叉淡化。
+     *
+     * 为什么：两段素材的首末帧并不相同，`commitVideoSwap()` 会在切换的那一帧
+     * 露出"上一段的末帧 + 这一段的空纹理"，就是用户报告的
+     * "所有动画开始和结束都要闪一次"。
+     *
+     * 只在本层**确实露着画面**时才淡化：从空白切过来（启动第一条动画、
+     * 上一次交换刚清空缓冲）时没有旧画面可淡，直接提交更干净。
+     */
+    if (!this.layers.isVideoLayerVisible()) {
+      this.layers.commitVideoSwap();
+      this.layers.showLayer('video');
+      await this.layers.playVideo();
+      this.armCompletionWatchdog(playback, incoming);
+      return;
+    }
+
+    const outgoing = this.layers.crossfadeToSpare(SEGMENT_CROSSFADE_MS);
     this.layers.showLayer('video');
     await this.layers.playVideo();
+    window.setTimeout(() => {
+      /* 这次淡化已被后续切换顶掉：不要动缓冲，它可能已经在播新内容 */
+      if (!this.layers.isCurrentSegmentGeneration(generation)) return;
+      outgoing.pause();
+      this.layers.releaseVideo(outgoing);
+    }, SEGMENT_CROSSFADE_MS + 40);
     this.armCompletionWatchdog(playback, incoming);
   }
 

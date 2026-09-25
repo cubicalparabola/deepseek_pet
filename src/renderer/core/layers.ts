@@ -265,6 +265,11 @@ export class PetLayers {
    * 清空 src 可以强制走一遍完整加载，用于从僵死状态恢复。
    */
   public forceVideoSource(video: HTMLVideoElement, source: string): void {
+    /*
+     * 这个缓冲马上要装新素材，就不再是"淡化中暂不释放"的那个了：
+     * 清掉 hold，避免上一次淡化留下的延时释放/样式继续影响它。
+     */
+    delete video.dataset.hold;
     try {
       video.removeAttribute('src');
       video.load();
@@ -335,6 +340,17 @@ export class PetLayers {
     } catch (error) {
       this.logger.warn('video pause failed', { error: describeError(error) });
     }
+  }
+
+  /**
+   * 当前露出来的画面是否**就是视频层**、并且画得出来。
+   *
+   * 与 {@link isVideoReady} 的区别：后者只看"可见缓冲解码好了没"，
+   * 若此刻露的是静态图（image 层），视频层其实在背后，不该拿它当"旧画面"
+   * 去做交叉淡化 —— 那样淡出来的会是图忽然消失。
+   */
+  public isVideoLayerVisible(): boolean {
+    return this.activeVideo.classList.contains('layer-active') && this.isVideoReady();
   }
 
   /** 当前缓冲的元数据是否可用。 */
