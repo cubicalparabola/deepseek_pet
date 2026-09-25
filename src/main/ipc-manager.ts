@@ -32,6 +32,13 @@ import type {
   InteractionKind,
   MemorySnapshot,
 } from '../shared/ai-types';
+import type {
+  PerceptionLogItem,
+  PerceptionSettingsPatch,
+  PerceptionStatus,
+  PerceptionViewMode,
+  PerceptionViewResult,
+} from '../shared/perception-types';
 import type { PetAction } from '../shared/action-types';
 import type { DiscoveredPlugin, PluginRecord } from '../shared/plugin-types';
 import type { Logger } from '../shared/logger';
@@ -104,6 +111,18 @@ export interface IpcManagerDependencies {
   aiInteraction(kind: InteractionKind): void;
   aiResetEmotion(): AIStatusView;
   aiSetPresence(presence: 'visible' | 'collapsed' | 'hidden'): AIStatusView;
+
+  /* --------------------- 环境与用户感知（3.1~3.6） --------------------- */
+  getPerceptionStatus(): PerceptionStatus;
+  setPerceptionSettings(patch: PerceptionSettingsPatch): PerceptionStatus;
+  perceptionLog(limit: number): readonly PerceptionLogItem[];
+  perceptionView(mode: PerceptionViewMode): Promise<PerceptionViewResult>;
+  perceptionAuthorizeCamera(authorized: boolean): PerceptionStatus;
+  perceptionClearData(): PerceptionStatus;
+  perceptionOpenLog(): boolean;
+  perceptionSampleNow(): Promise<PerceptionStatus>;
+  perceptionCameraFrame(dataUrl: string): void;
+  perceptionCameraReady(ready: boolean, error: string): void;
   aiOpenChat(): boolean;
   closeChatWindow(): boolean;
 }
@@ -372,6 +391,51 @@ export class IpcManager {
     this.handle(IpcChannels.AIOpenChat, () => this.deps.aiOpenChat());
     this.handle(IpcChannels.ChatWindowClose, () => this.deps.closeChatWindow());
 
+    /* -------------------- 环境与用户感知（3.1~3.6） -------------------- */
+    /*
+     * 这一组的隐私含义最重，因此两条规矩：
+     * 1. 摄像头授权只能通过**显式的** `PerceptionCameraAuthorize` 设置，
+     *    而且渲染层回传的帧只走 `perceptionCameraFrame`（不落盘、不回显）；
+     * 2. 帧大小有上限（8MB），超过直接丢弃 —— 防止渲染层被利用来撑爆内存。
+     */
+    this.handle(IpcChannels.PerceptionStatusGet, () => this.deps.getPerceptionStatus());
+    this.handle(IpcChannels.PerceptionSettingsSet, (_event, patch) => {
+      const record = asRecord(patch);
+      if (record === null) {
+        throw new IpcError('perception settings patch must be an object', {
+          code: 'IPC_HANDLER_FAILED',
+          module: 'IpcManager',
+        });
+      }
+      return this.deps.setPerceptionSettings(record as PerceptionSettingsPatch);
+    });
+    this.handle(IpcChannels.PerceptionLog, (_event, limit) => this.deps.perceptionLog(Math.max(1, Math.min(500, Math.round(asNumber(limit, 60))))));
+    this.handle(IpcChannels.PerceptionViewNow, async (_event, mode) => {
+      const allowed: readonly PerceptionViewMode[] = ['scene', 'ocr', 'summarize', 'error', 'code'];
+      const value = asString(mode, 'scene') as PerceptionViewMode;
+      if (!allowed.includes(value)) {
+        throw new IpcError('unknown perception view mode', { code: 'IPC_HANDLER_FAILED', module: 'IpcManager' });
+      }
+      return this.deps.perceptionView(value);
+    });
+    this.handle(IpcChannels.PerceptionCameraAuthorize, (_event, authorized) =>
+      this.deps.perceptionAuthorizeCamera(asBoolean(authorized, false)),
+    );
+    this.handle(IpcChannels.PerceptionClearData, () => this.deps.perceptionClearData());
+    this.handle(IpcChannels.PerceptionOpenLog, () => this.deps.perceptionOpenLog());
+    this.handle(IpcChannels.PerceptionSampleNow, async () => this.deps.perceptionSampleNow());
+    this.handle(IpcChannels.PerceptionCameraFrame, (_event, dataUrl) => {
+      const value = asString(dataUrl, '');
+      if (value.length === 0 || value.length > 8 * 1024 * 1024) return false;
+      this.deps.perceptionCameraFrame(value);
+      return true;
+    });
+    this.handle(IpcChannels.PerceptionCameraReady, (_event, payload) => {
+      const record = asRecord(payload) ?? {};
+      this.deps.perceptionCameraReady(asBoolean(record.ready, false), asString(record.error, ''));
+      return true;
+    });
+
     this.handle(IpcChannels.PluginDiscover, () => this.deps.discoverPlugins());    this.handle(IpcChannels.PluginFetchCode, async (_event, id) => this.deps.fetchPluginCode(asString(id)));
     this.handle(IpcChannels.PluginReload, async (_event, id) => this.deps.reloadPlugin(asString(id)));
     this.handle(IpcChannels.PluginList, () => this.deps.listPlugins());
@@ -452,6 +516,16 @@ export class IpcManager {
   /** 通知 Renderer：对话气泡状态 / 布局变化（可能同时伴随窗口尺寸变化）。 */
   public notifyBubble(payload: BubblePayload): void {
     this.broadcast(IpcChannels.CommandBubble, payload);
+  }
+
+  /** 通知渲染层与设置窗口：感知状态变化。 */
+  public notifyPerceptionStatus(status: PerceptionStatus): void {
+    this.broadcast(IpcChannels.CommandPerceptionStatus, status);
+  }
+
+  /** 请求渲染层采集一帧摄像头画面（3.5）。 */
+  public requestCameraFrame(): void {
+    this.broadcast(IpcChannels.CommandPerceptionCameraRequest, {});
   }
 
   public notifyShutdown(): void {

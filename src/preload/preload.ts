@@ -44,6 +44,15 @@ import type {
   PetPresence,
 } from '../shared/ai-types';
 import { createDefaultAIStatus } from '../shared/ai-types';
+import type { PerceptionAPI } from '../shared/ipc';
+import type {
+  PerceptionLogItem,
+  PerceptionSettingsPatch,
+  PerceptionStatus,
+  PerceptionViewMode,
+  PerceptionViewResult,
+} from '../shared/perception-types';
+import { DEFAULT_PERCEPTION_SETTINGS } from '../shared/perception-types';
 import { ASSET_HOST, ASSET_SCHEME } from '../shared/protocol';
 import {
   SETTINGS_BOOTSTRAP_FLAG,
@@ -179,6 +188,33 @@ function buildAIAPI(): AIAPI {
 }
 
 /* -------------------------------------------------------------------------- */
+/* 环境与用户感知（3.1~3.6）：桌宠窗口与设置窗口共用一份实现                       */
+/* -------------------------------------------------------------------------- */
+
+function buildPerceptionAPI(): PerceptionAPI {
+  return {
+    status: (): Promise<PerceptionStatus> => ipcRenderer.invoke(IpcChannels.PerceptionStatusGet) as Promise<PerceptionStatus>,
+    setSettings: (patch: PerceptionSettingsPatch): Promise<PerceptionStatus> =>
+      ipcRenderer.invoke(IpcChannels.PerceptionSettingsSet, patch) as Promise<PerceptionStatus>,
+    log: (limit?: number): Promise<readonly PerceptionLogItem[]> =>
+      ipcRenderer.invoke(IpcChannels.PerceptionLog, limit) as Promise<readonly PerceptionLogItem[]>,
+    viewNow: (mode: PerceptionViewMode): Promise<PerceptionViewResult> =>
+      ipcRenderer.invoke(IpcChannels.PerceptionViewNow, mode) as Promise<PerceptionViewResult>,
+    authorizeCamera: (authorized: boolean): Promise<PerceptionStatus> =>
+      ipcRenderer.invoke(IpcChannels.PerceptionCameraAuthorize, authorized) as Promise<PerceptionStatus>,
+    clearData: (): Promise<PerceptionStatus> => ipcRenderer.invoke(IpcChannels.PerceptionClearData) as Promise<PerceptionStatus>,
+    openLog: (): Promise<boolean> => ipcRenderer.invoke(IpcChannels.PerceptionOpenLog) as Promise<boolean>,
+    sampleNow: (): Promise<PerceptionStatus> => ipcRenderer.invoke(IpcChannels.PerceptionSampleNow) as Promise<PerceptionStatus>,
+    setCameraReady: (ready: boolean, error = ''): void => send(IpcChannels.PerceptionCameraReady, { ready, error }),
+    cameraFrame: (dataUrl: string): void => send(IpcChannels.PerceptionCameraFrame, dataUrl),
+    onStatus: (handler: (status: PerceptionStatus) => void): Unsubscribe =>
+      subscribe<PerceptionStatus>(IpcChannels.CommandPerceptionStatus, handler),
+    onCameraRequest: (handler: () => void): Unsubscribe =>
+      subscribe(IpcChannels.CommandPerceptionCameraRequest, () => handler()),
+  };
+}
+
+/* -------------------------------------------------------------------------- */
 /* window.settingsAPI（仅设置窗口）                                             */
 /* -------------------------------------------------------------------------- */
 
@@ -207,7 +243,26 @@ const settingsFallback: SettingsWindowBootstrap = {
   },
   configPath: '',
   ai: createDefaultAIStatus(),
+  perception: createDefaultPerceptionStatus(),
 };
+
+/** 感知状态的兜底值（preload 早于主进程数据就绪时使用）。 */
+function createDefaultPerceptionStatus(): PerceptionStatus {
+  return {
+    settings: DEFAULT_PERCEPTION_SETTINGS,
+    capturing: false,
+    pausedReason: '尚未初始化',
+    lastObservation: null,
+    behavior: { idleSeconds: 0, sessionMinutes: 0, switchesLastHour: 0, hour: new Date().getHours(), lateNight: false, userState: 'unknown' },
+    presence: { present: true, source: 'unknown', at: '' },
+    habits: { samples: 0, activeDays: 0, latestActiveHour: null, earliestActiveHour: null, typicalNow: null },
+    lastIntervention: null,
+    interventionsToday: 0,
+    cameraReady: false,
+    dataDir: '',
+    lastError: '',
+  };
+}
 
 function buildSettingsBridge(): SettingsWindowBridge {
   return {
@@ -222,6 +277,7 @@ function buildSettingsBridge(): SettingsWindowBridge {
     onChanged: (handler: (state: PetSettingsState) => void): Unsubscribe =>
       subscribe<PetSettingsState>(IpcChannels.CommandSettingsChanged, handler),
     ai: buildAIAPI(),
+    perception: buildPerceptionAPI(),
   };
 }
 
@@ -348,6 +404,7 @@ function buildPetBridge(): PetBridge {
     },
 
     ai: buildAIAPI(),
+    perception: buildPerceptionAPI(),
 
     notifyAnimationChanged: (payload: AnimationChangedPayload): void =>
       send(IpcChannels.AnimationChanged, payload),

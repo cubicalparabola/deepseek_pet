@@ -62,6 +62,11 @@ export class ChatWindowManager {
     return this.window !== null && !this.window.isDestroyed();
   }
 
+  /** 窗口引用（例如主进程要统一设置"不出现在截屏里"）。 */
+  public getWindow(): BrowserWindow | null {
+    return this.exists() ? this.window : null;
+  }
+
   public isVisible(): boolean {
     return this.exists() && (this.window as BrowserWindow).isVisible();
   }

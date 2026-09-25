@@ -2202,12 +2202,12 @@ app.whenReady().then(async () => {
     };
   })()`);
   record(
-    'AI 默认全部关闭（不影响第一版行为）',
-    aiInitial.enabled === false &&
-      aiInitial.chat === false &&
-      aiInitial.memory === false &&
-      aiInitial.emotion === false &&
-      aiInitial.diary === false &&
+    'AI 按需求默认全开（但没密钥时仍只走本地兜底）',
+    aiInitial.enabled === true &&
+      aiInitial.chat === true &&
+      aiInitial.memory === true &&
+      aiInitial.emotion === true &&
+      aiInitial.diary === true &&
       aiInitial.usable === false &&
       aiInitial.mode === 'local',
     JSON.stringify(aiInitial),
@@ -2227,21 +2227,56 @@ app.whenReady().then(async () => {
   record('AI 数据目录可解析（记忆/日记落盘位置）', typeof aiInitial.dataDir === 'string' && aiInitial.dataDir.length > 0, aiInitial.dataDir);
 
   /*
-   * "默认全关"必须真的**什么都不写**：数据目录在进程启动前被清空过，
-   * 桌宠已经跑了十几分钟（前面所有用例），此时目录里应当仍然空空如也。
-   * 这条断言是"关掉 = 与第一版一致"最硬的证据（不然用户会以为它一直在记他）。
+   * "关掉开关就不该留痕迹"：默认全开是需求，但**关掉必须干净**。
+   *
+   * 做法：把所有开关关掉 -> 主进程侧清空数据目录 -> 触发一次互动与一次对话
+   * -> 等一会儿（覆盖情绪心跳）-> 目录必须仍然是空的。
+   * 这条是"可配置开关真的生效"最硬的证据（不然用户会以为关不掉）。
    */
-  let aiDirEntries = [];
+  await run(`(async () => {
+    await window.petAPI.ai.setSettings({ enabled: false, chat: false, memory: false, emotion: false, diary: false });
+    return true;
+  })()`);
+  await wait(400);
   try {
-    aiDirEntries = readdirSync(aiDataDir);
+    rmSync(aiDataDir, { recursive: true, force: true });
   } catch (error) {
-    aiDirEntries = [`(读取失败: ${String(error)})`];
+    /* 目录不存在也无所谓 */
+  }
+  mkdirSync(aiDataDir, { recursive: true });
+  const offBehaviour = await run(`(async () => {
+    const before = await window.petAPI.ai.status();
+    window.petAPI.ai.notifyInteraction('click');
+    window.petAPI.ai.notifyInteraction('doubleclick');
+    await window.petAPI.ai.chat('开关都关掉时不应该写盘');
+    await window.petAPI.ai.chat('再试一次');
+    await new Promise((r) => setTimeout(r, 600));
+    const after = await window.petAPI.ai.status();
+    return { moodBefore: before.emotion.mood, moodAfter: after.emotion.mood, turns: (await window.petAPI.ai.memory()).stats.turns };
+  })()`);
+  await wait(2000);
+  let aiDirEntriesAfterOff = [];
+  try {
+    aiDirEntriesAfterOff = readdirSync(aiDataDir);
+  } catch (error) {
+    aiDirEntriesAfterOff = [`(读取失败: ${String(error)})`];
   }
   record(
-    'AI 默认全关时不产生任何用户数据文件（不建目录、不写记忆/日记）',
-    aiDirEntries.length === 0,
-    `entries=${JSON.stringify(aiDirEntries)}`,
+    '关闭全部开关后不落盘（不建目录、不写记忆/日记/情绪）',
+    aiDirEntriesAfterOff.length === 0,
+    `entries=${JSON.stringify(aiDirEntriesAfterOff)}`,
   );
+  record(
+    '关闭开关后互动不改心情、对话不记入记忆（开关真的生效，不是摆设）',
+    offBehaviour.moodAfter === offBehaviour.moodBefore && offBehaviour.turns === 0,
+    JSON.stringify(offBehaviour),
+  );
+  /* 后面的用例需要记忆与情绪是开的：改回来 */
+  await run(`(async () => {
+    await window.petAPI.ai.setSettings({ enabled: true, chat: true, memory: true, emotion: true, diary: true });
+    return true;
+  })()`);
+  await wait(300);
 
   /* 2.3 情绪模型：纯函数直接断言（互动上涨 / 三档衰减 / token -> 饿） */
   const emotionModel = await run(`(() => {
@@ -2303,7 +2338,7 @@ app.whenReady().then(async () => {
     `clamped=${emotionModel.clamped} sad=${emotionModel.labelSad} great=${emotionModel.labelGreat}`,
   );
 
-  /* 2.1 未开启 AI 时：本地兜底回复 + 情绪上涨 + 不联网（用耗时证明） */
+  /* 2.1 没配密钥时：本地兜底回复 + 情绪上涨 + 不联网（用耗时证明） */
   const localChat = await run(`(async () => {
     const before = await window.petAPI.ai.status();
     const startedAt = performance.now();
@@ -2323,13 +2358,13 @@ app.whenReady().then(async () => {
     };
   })()`);
   record(
-    'AI 关闭时对话走本地兜底（有回复、无 token、极快 -> 未联网）',
+    '没配密钥时对话走本地兜底（有回复、无 token、极快 -> 未联网）',
     localChat.ok === true && localChat.mode === 'local' && localChat.tokens === 0 && localChat.reply.length > 0 && localChat.elapsed < 400,
     JSON.stringify(localChat),
   );
   record(
-    '开关：情绪系统关闭时互动不改心情（开关真的生效，不是摆设）',
-    localChat.moodAfter === localChat.moodBefore,
+    '默认开启情绪后，对话让心情上涨（人格不依赖大模型）',
+    localChat.moodAfter > localChat.moodBefore,
     `mood ${localChat.moodBefore} -> ${localChat.moodAfter}`,
   );
 
@@ -2484,6 +2519,10 @@ app.whenReady().then(async () => {
 
   /* 2.3 打通"主进程情绪"：互动上报 -> 状态上涨；token 用量 -> 饿 */
   const interaction = await run(`(async () => {
+    // 先把心情复位：前面几十次互动已经把它推到 100 封顶了，
+    // 封顶状态下再互动也是 100，断言会假失败（实测踩过）。
+    await window.petAPI.ai.resetEmotion();
+    await new Promise((r) => setTimeout(r, 300));
     const before = await window.petAPI.ai.status();
     window.petAPI.ai.notifyInteraction('click');
     window.petAPI.ai.notifyInteraction('doubleclick');
@@ -2524,19 +2563,24 @@ app.whenReady().then(async () => {
     JSON.stringify(presence),
   );
 
-  /* 恢复默认（全关），避免把验收用的假配置留给用户 */
+  /* 恢复成产品默认（全开 + 无密钥），别把验收用的假配置留下 */
   const aiRestored = await run(`(async () => {
     const status = await window.petAPI.ai.setSettings({
-      enabled: false, chat: false, memory: false, emotion: false, diary: false,
+      enabled: true, chat: true, memory: true, emotion: true, diary: true,
       provider: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', timeoutMs: 20000 },
       clearApiKey: true,
       resetUsage: true,
     });
-    return { enabled: status.settings.enabled, apiKeySet: status.settings.provider.apiKeySet, used: status.settings.budget.used };
+    const ai = status.settings;
+    return { enabled: ai.enabled, chat: ai.chat, memory: ai.memory, apiKeySet: ai.provider.apiKeySet, used: ai.budget.used };
   })()`);
   record(
-    'AI：验收结束后恢复默认（全关 + 清除测试密钥）',
-    aiRestored.enabled === false && aiRestored.apiKeySet === false && aiRestored.used === 0,
+    'AI：验收结束后恢复默认（全开 + 清除测试密钥 + 重置用量）',
+    aiRestored.enabled === true &&
+      aiRestored.chat === true &&
+      aiRestored.memory === true &&
+      aiRestored.apiKeySet === false &&
+      aiRestored.used === 0,
     JSON.stringify(aiRestored),
   );
 
@@ -2566,6 +2610,397 @@ app.whenReady().then(async () => {
       JSON.stringify(chatBridge),
     );
   }
+
+  /* ------------------ 环境与用户感知（3.1~3.6） ------------------ */
+
+  /*
+   * 这一组的重点是**隐私与频率**，不是"能不能截图"：
+   *   1. 默认全开，但摄像头必须显式授权（否则一帧都不采）；
+   *   2. 隐私模式一键停；关掉开关不落盘；
+   *   3. 主动打扰必须受频率闸门约束（需求 3.4 反复强调的那句话）；
+   *   4. 判断规则全部是纯函数，因此可以逐条钉死（深夜/久坐/敏感/习惯预测）。
+   */
+  const perceptionInitial = await run(`(async () => {
+    const status = await window.petAPI.perception.status();
+    const methods = Object.keys(window.petAPI.perception).sort();
+    return {
+      screen: status.settings.screen,
+      vision: status.settings.vision,
+      behavior: status.settings.behavior,
+      camera: status.settings.camera,
+      habits: status.settings.habits,
+      privacyMode: status.settings.privacyMode,
+      cameraAuthorized: status.settings.cameraAuthorized,
+      cameraReady: status.cameraReady,
+      dataDir: status.dataDir,
+      methods,
+    };
+  })()`);
+  record(
+    '感知：按需求默认全开（摄像头除外，必须显式授权）',
+    perceptionInitial.screen === true &&
+      perceptionInitial.vision === true &&
+      perceptionInitial.behavior === true &&
+      perceptionInitial.camera === true &&
+      perceptionInitial.habits === true &&
+      perceptionInitial.privacyMode === false &&
+      perceptionInitial.cameraAuthorized === false &&
+      perceptionInitial.cameraReady === false,
+    JSON.stringify(perceptionInitial),
+  );
+  record(
+    '感知：桥暴露了完整能力面（状态/设置/日志/看屏幕/授权/清空/采样）',
+    ['status', 'setSettings', 'log', 'viewNow', 'authorizeCamera', 'clearData', 'sampleNow', 'cameraFrame'].every((name) =>
+      perceptionInitial.methods.includes(name),
+    ),
+    JSON.stringify(perceptionInitial.methods),
+  );
+  record(
+    '感知：数据目录可解析（观察记录与习惯画像落盘位置）',
+    typeof perceptionInitial.dataDir === 'string' && perceptionInitial.dataDir.length > 0,
+    perceptionInitial.dataDir,
+  );
+
+  /* 纯函数：行为推测 / 深夜 / 免打扰 / 频率闸门 / 敏感判定 / 习惯学习与预测 */
+  const perceptionModel = await run(`(() => {
+    const model = window.petDebug.perception;
+    const now = Date.now();
+    const settings = Object.assign({}, model.DEFAULT_PERCEPTION_SETTINGS, {
+      quietHours: { start: 0, end: 0 },
+      proactiveMinIntervalMs: 600000,
+      proactiveMaxPerHour: 4,
+      longSessionMinutes: 120,
+      lateNightHour: 1,
+    });
+    const behavior = {
+      idleSeconds: 5, sessionMinutes: 130, switchesLastHour: 2, hour: new Date(now).getHours(),
+      lateNight: false, userState: 'deep',
+    };
+    const obs = (scene, extra) => Object.assign({
+      at: new Date(now).toISOString(), scene, app: 'VS Code', activity: '写代码', sensitive: false,
+      focus: 'deep', summary: '', suggestion: '', mode: 'llm', tokens: 1,
+    }, extra || {});
+    const gate = (over) => model.gateIntervention(Object.assign({
+      now, kind: 'scene-change', settings, lastInterventionAt: 0, lastHourCount: 0, behavior,
+    }, over || {}));
+    const planLong = model.planIntervention({ observation: obs('coding'), behavior, settings, previousScene: 'reading', habitText: null });
+    const planSensitive = model.planIntervention({ observation: obs('sensitive', { sensitive: true }), behavior, settings, previousScene: 'coding', habitText: null });
+    const planLate = model.planIntervention({
+      observation: obs('coding'), behavior: Object.assign({}, behavior, { lateNight: true, hour: 3 }), settings, previousScene: 'coding', habitText: null,
+    });
+    const planScene = model.planIntervention({
+      observation: obs('gaming'), behavior: Object.assign({}, behavior, { sessionMinutes: 10 }), settings, previousScene: 'coding', habitText: null,
+    });
+    let profile = model.emptyHabitProfile();
+    for (let i = 0; i < 3; i++) profile = model.learnHabit(profile, Object.assign(obs('coding'), { at: new Date(2025, 0, 1 + i, 10, 0, 0).toISOString() }));
+    profile = model.learnHabit(profile, Object.assign(obs('reading'), { at: new Date(2025, 0, 5, 10, 0, 0).toISOString() }));
+    const predict = model.habitPredictionText({
+      profile, now: new Date(2025, 0, 6, 10, 30, 0).getTime(), settings, behavior,
+    });
+    return {
+      states: {
+        deep: model.inferUserState(5, 1),
+        shallow: model.inferUserState(5, 12),
+        idle: model.inferUserState(200, 0),
+        away: model.inferUserState(400, 0),
+      },
+      lateNight: { three: model.isLateNight(3, 1), noon: model.isLateNight(12, 1) },
+      quiet: { inside: model.isQuietHour(23, { start: 23, end: 8 }), outside: model.isQuietHour(12, { start: 23, end: 8 }), morning: model.isQuietHour(3, { start: 23, end: 8 }) },
+      gateFirst: gate(),
+      gateTooSoon: gate({ lastInterventionAt: now - 60000 }),
+      gateAtLimit: gate({ lastHourCount: 4 }),
+      gateAway: gate({ behavior: Object.assign({}, behavior, { userState: 'away' }) }),
+      gateUrgent: model.gateIntervention({ now, kind: 'sensitive', settings, lastInterventionAt: now - 120000, lastHourCount: 99, behavior }),
+      planLong, planSensitive, planLate, planScene,
+      sensitiveKeyword: model.matchesSensitiveKeywords('这是我的银行密码', settings.sensitivityKeywords),
+      harmless: model.matchesSensitiveKeywords('VS Code 里在写测试', settings.sensitivityKeywords),
+      sceneLabel: model.sceneLabel('coding'),
+      normalize: [model.normalizeScene('CODE'), model.normalizeScene('pdf'), model.normalizeScene('乱写的'), model.normalizeScene('game')],
+      habitSamples: profile.samples,
+      habitObservedHours: profile.observedHours,
+      habitTop: model.topSceneAtHour(profile, 10),
+      predict,
+      permission: {
+        normal: model.capturePermission(settings),
+        privacy: model.capturePermission(Object.assign({}, settings, { privacyMode: true })),
+        off: model.capturePermission(Object.assign({}, settings, { screen: false })),
+      },
+    };
+  })()`);
+  record(
+    '感知：行为状态推测（专注/频繁切换/走神/离开）',
+    perceptionModel.states.deep === 'deep' &&
+      perceptionModel.states.shallow === 'shallow' &&
+      perceptionModel.states.idle === 'idle' &&
+      perceptionModel.states.away === 'away',
+    JSON.stringify(perceptionModel.states),
+  );
+  record(
+    '感知：深夜判定与免打扰时段（含跨零点）',
+    perceptionModel.lateNight.three === true &&
+      perceptionModel.lateNight.noon === false &&
+      perceptionModel.quiet.inside === true &&
+      perceptionModel.quiet.morning === true &&
+      perceptionModel.quiet.outside === false,
+    JSON.stringify({ lateNight: perceptionModel.lateNight, quiet: perceptionModel.quiet }),
+  );
+  record(
+    '感知：主动打扰受频率闸门约束（首次放行 / 太频繁拦截 / 超上限拦截 / 用户不在拦截）',
+    perceptionModel.gateFirst.allow === true &&
+      perceptionModel.gateTooSoon.allow === false &&
+      perceptionModel.gateAtLimit.allow === false &&
+      perceptionModel.gateAway.allow === false,
+    JSON.stringify({
+      first: perceptionModel.gateFirst,
+      tooSoon: perceptionModel.gateTooSoon,
+      atLimit: perceptionModel.gateAtLimit,
+      away: perceptionModel.gateAway,
+    }),
+  );
+  record(
+    '感知：敏感/陌生人属于紧急行为（不受每小时上限限制）',
+    perceptionModel.gateUrgent.allow === true,
+    JSON.stringify(perceptionModel.gateUrgent),
+  );
+  record(
+    '感知：干预规划正确（久坐提醒 / 敏感捂眼睛躲起来 / 深夜劝睡 / 场景变化打招呼）',
+    perceptionModel.planLong !== null &&
+      perceptionModel.planLong.kind === 'long-session' &&
+      perceptionModel.planSensitive !== null &&
+      perceptionModel.planSensitive.kind === 'sensitive' &&
+      perceptionModel.planSensitive.hide === true &&
+      perceptionModel.planLate !== null &&
+      perceptionModel.planLate.kind === 'late-night' &&
+      perceptionModel.planScene !== null &&
+      perceptionModel.planScene.kind === 'scene-change',
+    JSON.stringify({
+      long: perceptionModel.planLong,
+      sensitive: perceptionModel.planSensitive,
+      late: perceptionModel.planLate,
+      scene: perceptionModel.planScene,
+    }),
+  );
+  record(
+    '感知：敏感关键词是第二道闸（模型没看出来也不能漏）',
+    perceptionModel.sensitiveKeyword === true && perceptionModel.harmless === false,
+    `hit=${perceptionModel.sensitiveKeyword} miss=${perceptionModel.harmless}`,
+  );
+  record(
+    '感知：场景词表归一（大小写/近义词/脏数据都收敛到受控值）',
+    perceptionModel.normalize[0] === 'coding' &&
+      perceptionModel.normalize[1] === 'reading' &&
+      perceptionModel.normalize[2] === 'other' &&
+      perceptionModel.normalize[3] === 'gaming' &&
+      perceptionModel.sceneLabel === '写代码',
+    JSON.stringify(perceptionModel.normalize),
+  );
+  record(
+    '感知：习惯学习按小时聚合，并能预测当前时段（按你平时的习惯…）',
+    perceptionModel.habitSamples === 4 &&
+      perceptionModel.habitObservedHours === 1 &&
+      perceptionModel.habitTop === 'coding' &&
+      typeof perceptionModel.predict === 'string' &&
+      perceptionModel.predict.includes('写代码'),
+    JSON.stringify({
+      samples: perceptionModel.habitSamples,
+      hours: perceptionModel.habitObservedHours,
+      top: perceptionModel.habitTop,
+      predict: perceptionModel.predict,
+    }),
+  );
+  record(
+    '感知：采集闸门（正常允许 / 隐私模式停 / 开关关闭停）',
+    perceptionModel.permission.normal.allowed === true &&
+      perceptionModel.permission.privacy.allowed === false &&
+      perceptionModel.permission.off.allowed === false,
+    JSON.stringify(perceptionModel.permission),
+  );
+
+  /*
+   * 每一类干预都必须归属到具体开关：只关掉"行为观察"时，久坐/深夜提醒也必须停
+   * （否则用户会觉得开关是假的 —— 文档评审抓到过这一条）。
+   */
+  const planOwnership = await run(`(() => {
+    const model = window.petDebug.perception;
+    const base = model.DEFAULT_PERCEPTION_SETTINGS;
+    const noBehavior = Object.assign({}, base, { behavior: false });
+    const noHabits = Object.assign({}, base, { habits: false });
+    const noCamera = Object.assign({}, base, { camera: false });
+    const noScreenNoCamera = Object.assign({}, base, { screen: false, camera: false });
+    return {
+      longOff: model.isPlanEnabled('long-session', noBehavior),
+      lateOff: model.isPlanEnabled('late-night', noBehavior),
+      habitWhenNoHabits: model.isPlanEnabled('habit', noHabits),
+      presenceWhenNoCamera: model.isPlanEnabled('presence', noCamera),
+      strangerWhenNoCamera: model.isPlanEnabled('stranger', noCamera),
+      sensitiveWhenNoScreen: model.isPlanEnabled('sensitive', noScreenNoCamera),
+      allOn: [
+        model.isPlanEnabled('long-session', base),
+        model.isPlanEnabled('habit', base),
+        model.isPlanEnabled('presence', base),
+        model.isPlanEnabled('sensitive', base),
+      ],
+    };
+  })()`);
+  record(
+    '感知：干预归属到具体开关（关掉行为观察后久坐/深夜不再提醒；关掉摄像头后不管在场）',
+    planOwnership.longOff === false &&
+      planOwnership.lateOff === false &&
+      planOwnership.habitWhenNoHabits === false &&
+      planOwnership.presenceWhenNoCamera === false &&
+      planOwnership.strangerWhenNoCamera === false &&
+      planOwnership.sensitiveWhenNoScreen === false &&
+      planOwnership.allOn.every((value) => value === true),
+    JSON.stringify(planOwnership),
+  );
+
+  /*
+   * 采样频率：心跳周期与 `captureIntervalMs` 必须分开。
+   *
+   * 早期版本把心跳周期写成 `captureIntervalMs / 2`，默认 30000 就变成**每 15 秒截一帧**
+   * （token 成本翻倍，且与面板上写的"默认 30000"不符）。这里直接读主进程日志里的
+   * `perception loop started` 一行，把"心跳周期 = 采样间隔"这件事钉住。
+   */
+  let perceptionLoopLog = '';
+  try {
+    const text = readFileSync(logFile, 'utf8');
+    perceptionLoopLog = text.split('\n').find((line) => line.includes('perception loop started')) ?? '';
+  } catch (error) {
+    perceptionLoopLog = '';
+  }
+  record(
+    '感知：心跳周期与采样间隔分离（默认 30s 采样就真的是 30s，不是 15s）',
+    /"tickMs":30000/.test(perceptionLoopLog) && /"captureIntervalMs":30000/.test(perceptionLoopLog),
+    perceptionLoopLog.slice(0, 200),
+  );
+
+  /* 隐私模式：真的停止采集，并且"看屏幕"被拒 */
+  const privacy = await run(`(async () => {
+    await window.petAPI.perception.setSettings({ privacyMode: true });
+    const before = await window.petAPI.perception.status();
+    const sampled = await window.petAPI.perception.sampleNow();
+    const view = await window.petAPI.perception.viewNow('ocr');
+    const list = await window.petAPI.perception.log(10);
+    await window.petAPI.perception.setSettings({ privacyMode: false });
+    return {
+      capturingWhilePrivate: before.capturing,
+      pausedReason: before.pausedReason,
+      sampledCapturing: sampled.capturing,
+      viewOk: view.ok,
+      viewText: view.text,
+      logKinds: list.map((item) => item.kind),
+    };
+  })()`);
+  record(
+    '感知：隐私模式真的一键停止采集（采样不动、看屏幕被拒）',
+    privacy.capturingWhilePrivate === false &&
+      privacy.pausedReason.length > 0 &&
+      privacy.viewOk === false &&
+      /隐私模式/.test(privacy.viewText) === true &&
+      privacy.sampledCapturing === false,
+    JSON.stringify(privacy),
+  );
+
+  /* 摄像头授权：未授权时不采帧；授权状态可读回、可撤销 */
+  const cameraConsent = await run(`(async () => {
+    const before = await window.petAPI.perception.status();
+    await window.petAPI.perception.sampleNow();
+    const stillDenied = await window.petAPI.perception.status();
+    const authorized = await window.petAPI.perception.authorizeCamera(true);
+    const afterAuthorize = await window.petAPI.perception.status();
+    const revoked = await window.petAPI.perception.authorizeCamera(false);
+    return {
+      authorizedBefore: before.settings.cameraAuthorized,
+      cameraReadyBefore: before.cameraReady,
+      cameraReadyDenied: stillDenied.cameraReady,
+      authorizedAfter: authorized.settings.cameraAuthorized,
+      cameraReadyAfterAuthorize: afterAuthorize.cameraReady,
+      revokedAfter: revoked.settings.cameraAuthorized,
+    };
+  })()`);
+  record(
+    '感知：摄像头必须显式授权（默认不授权、不采帧，可授权可撤销）',
+    cameraConsent.authorizedBefore === false &&
+      cameraConsent.cameraReadyBefore === false &&
+      cameraConsent.cameraReadyDenied === false &&
+      cameraConsent.authorizedAfter === true &&
+      cameraConsent.revokedAfter === false,
+    JSON.stringify(cameraConsent),
+  );
+
+  /* 手动采样：能跑、不抛异常（没配密钥时不会产生观察记录） */
+  const perceptionSample = await run(`(async () => {
+    const status = await window.petAPI.perception.sampleNow();
+    return {
+      capturing: status.capturing,
+      lastError: status.lastError,
+      hasObservation: status.lastObservation !== null,
+      idle: status.behavior.idleSeconds,
+      userState: status.behavior.userState,
+    };
+  })()`);
+  record(
+    '感知：手动采样可运行（没配密钥时不写观察，但没有崩、没有抛异常）',
+    typeof perceptionSample.capturing === 'boolean' &&
+      typeof perceptionSample.idle === 'number' &&
+      perceptionSample.hasObservation === false,
+    JSON.stringify(perceptionSample),
+  );
+
+  /* 清空感知数据（隐私要求：用户可以一键抹掉她观察到的一切） */
+  const perceptionCleared = await run(`(async () => {
+    const before = await window.petAPI.perception.status();
+    const after = await window.petAPI.perception.clearData();
+    return { samplesBefore: before.habits.samples, samplesAfter: after.habits.samples };
+  })()`);
+  record('感知：可以一键清空观察记录与习惯画像', perceptionCleared.samplesAfter === 0, JSON.stringify(perceptionCleared));
+
+  /* 感知日志：可审计（她看见了什么 / 为什么开口） */
+  const perceptionLog = await run(`window.petAPI.perception.log(20)`);
+  record(
+    '感知：感知日志可读（至少能拿到加载与隐私相关的记录）',
+    Array.isArray(perceptionLog) && perceptionLog.some((item) => item.kind === 'privacy' || item.kind === 'system'),
+    JSON.stringify(perceptionLog.slice(0, 3)),
+  );
+
+  /*
+   * 真的走一遍截屏链路（配一个不可达的模型地址）：
+   * 目的是钉住两件事 ——
+   *   1. 截屏 + 调用模型这条路径能跑起来，失败时**只是记一条 lastError**，
+   *      不会崩、不会把脏数据当成观察结果；
+   *   2. **磁盘上没有任何图像文件**（这是本模块最核心的隐私承诺）。
+   */
+  const capturePath = await run(`(async () => {
+    await window.petAPI.ai.setSettings({
+      enabled: true, chat: true,
+      provider: { baseUrl: 'http://127.0.0.1:9/v1', model: 'acceptance-vision', apiKey: 'sk-acceptance-vision-0001', timeoutMs: 1500 },
+    });
+    const status = await window.petAPI.perception.sampleNow();
+    // 收尾：把假密钥清掉（本段只验证链路）
+    await window.petAPI.ai.setSettings({ clearApiKey: true });
+    return {
+      capturing: status.capturing,
+      lastError: status.lastError,
+      hasObservation: status.lastObservation !== null,
+      dataDir: status.dataDir,
+    };
+  })()`);
+  let perceptionFiles = [];
+  try {
+    perceptionFiles = readdirSync(capturePath.dataDir);
+  } catch (error) {
+    perceptionFiles = [];
+  }
+  record(
+    '感知：截屏 -> 视觉模型链路可运行，模型不可达时只记一条错误（不崩、不写脏观察）',
+    capturePath.capturing === true && capturePath.hasObservation === false && capturePath.lastError.length > 0,
+    JSON.stringify(capturePath),
+  );
+  record(
+    '感知：磁盘上不出现任何图像文件（截图只在内存里活一次）',
+    perceptionFiles.every((name) => !/\.(png|jpe?g|webp|bmp|gif)$/i.test(name)),
+    `dir=${capturePath.dataDir} files=${JSON.stringify(perceptionFiles.slice(0, 8))}`,
+  );
 
   /* --------------------------- 收尾 --------------------------- */
 

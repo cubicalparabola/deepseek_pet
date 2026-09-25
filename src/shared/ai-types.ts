@@ -85,12 +85,20 @@ export const DEFAULT_PERSONA = [
   '你记得和主人聊过的事情，会在合适的时候自然提起，不要生硬复述。',
 ].join('\n');
 
+/**
+ * 默认配置：**全部打开**（需求："默认模式全开"）。
+ *
+ * 为什么敢默认打开：没配密钥时 `usable=false`，聊天走本地兜底——
+ * 记忆、情绪、日记、习惯这些**本地能力**不依赖大模型，默认开着才有陪伴感。
+ * 隐私相关的两处例外（见感知模块）：摄像头必须**用户显式授权**后才采集，
+ * 「隐私模式」默认关闭但一键可停一切感知。
+ */
 export const DEFAULT_AI_SETTINGS: AISettings = {
-  enabled: false,
-  chat: false,
-  memory: false,
-  emotion: false,
-  diary: false,
+  enabled: true,
+  chat: true,
+  memory: true,
+  emotion: true,
+  diary: true,
   persona: DEFAULT_PERSONA,
   petName: '鲸鱼娘',
   userName: '',

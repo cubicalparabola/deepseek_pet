@@ -126,8 +126,12 @@ export class AIService {
      * 用户会以为"它一直在记我"。开关打开时才真正落盘（见 setSettings）。
      */
     if (this.settings.memory) {
+      this.memory.setEnabled(true);
       this.memory.load();
       this.memory.setUserName(this.memory.getProfile().userName || this.settings.userName);
+    } else {
+      // 关着就明确告诉记忆层"别写盘"（它会拦住 recordEvent / 跨天分隔线等所有写路径）
+      this.memory.setEnabled(false);
     }
     this.emotion.load();
     // 日记同理：没打开就不建目录（load 只读索引，不 mkdir）
@@ -158,6 +162,16 @@ export class AIService {
 
   public get settings(): AISettings {
     return this.config.get();
+  }
+
+  /**
+   * 大模型客户端（只读）。
+   *
+   * 感知模块（3.1/3.2/3.5 的视觉理解）复用**同一个**客户端：
+   * 密钥与网关只配一次，视觉能力立刻跟着生效；也避免出现"两个客户端两套配置"。
+   */
+  public get llmClient(): LLMClient {
+    return this.llm;
   }
 
   public get memoryStore(): MemoryStore {
@@ -204,9 +218,13 @@ export class AIService {
     }
     if (after.memory && !before.memory) {
       // 打开记忆系统时才真正开始落盘（加载 + 建目录 + 记一条系统事件）
+      this.memory.setEnabled(true);
       this.memory.load();
       if (after.userName.trim() !== '') this.memory.setUserName(after.userName.trim());
       this.memory.recordEvent('system', '记忆系统已开启');
+    } else if (!after.memory && before.memory) {
+      // 关掉立刻停止落盘（连跨天分隔线都不写）
+      this.memory.setEnabled(false);
     }
     if (after.emotion && !before.emotion) {
       this.emotion.refreshTokens();

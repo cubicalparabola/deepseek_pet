@@ -23,6 +23,7 @@ import { IpcChannels } from '../shared/ipc';
 import type { PetConfig } from '../shared/config';
 import type { PetSettingsState } from '../shared/pet-size';
 import type { AIStatusView } from '../shared/ai-types';
+import type { PerceptionStatus } from '../shared/perception-types';
 import {
   SETTINGS_BOOTSTRAP_FLAG,
   SETTINGS_WINDOW_FLAG,
@@ -41,6 +42,8 @@ export interface SettingsWindowOptions {
   readonly setAlwaysOnTop: (value: boolean) => PetSettingsState;
   /** AI 状态快照（AI 面板的初始数据 + 推送更新）。 */
   readonly getAIStatus: () => AIStatusView;
+  /** 感知状态快照（感知面板的初始数据 + 推送更新）。 */
+  readonly getPerceptionStatus: () => PerceptionStatus;
 }
 
 /**
@@ -70,9 +73,10 @@ export class SettingsWindowManager {
       if (window.isMinimized()) window.restore();
       window.show();
       window.focus();
-      // 重新打开时把最新设置推回页面（托盘菜单可能刚改过尺寸/情绪）
+      // 重新打开时把最新设置推回页面（托盘菜单可能刚改过尺寸/情绪/隐私模式）
       this.pushState();
       this.pushAIStatus();
+      this.pushPerceptionStatus();
       return;
     }
     this.create();
@@ -80,6 +84,11 @@ export class SettingsWindowManager {
 
   public exists(): boolean {
     return this.window !== null && !this.window.isDestroyed();
+  }
+
+  /** 窗口引用（例如主进程要统一设置"不出现在截屏里"）。 */
+  public getWindow(): BrowserWindow | null {
+    return this.exists() ? this.window : null;
   }
 
   public isVisible(): boolean {
@@ -105,13 +114,22 @@ export class SettingsWindowManager {
 
   /** 把最新 AI 状态推给设置窗口（情绪心跳会让"心情"数字自己动）。 */
   public pushAIStatus(): void {
+    this.sendToWindow(IpcChannels.CommandAIStatus, this.options.getAIStatus(), 'ai status');
+  }
+
+  /** 把最新感知状态推给设置窗口（当前场景/行为快照会随采样变化）。 */
+  public pushPerceptionStatus(): void {
+    this.sendToWindow(IpcChannels.CommandPerceptionStatus, this.options.getPerceptionStatus(), 'perception status');
+  }
+
+  private sendToWindow(channel: string, payload: unknown, what: string): void {
     if (!this.exists()) return;
     const window = this.window as BrowserWindow;
     if (window.isDestroyed()) return;
     try {
-      window.webContents.send(IpcChannels.CommandAIStatus, this.options.getAIStatus());
+      window.webContents.send(channel, payload);
     } catch (error) {
-      this.logger.warn('pushing ai status to settings window failed', { error: describeError(error) });
+      this.logger.warn(`pushing ${what} to settings window failed`, { error: describeError(error) });
     }
   }
 
@@ -148,6 +166,7 @@ export class SettingsWindowManager {
       state: this.options.getState(),
       configPath: this.options.config.configPath,
       ai: this.options.getAIStatus(),
+      perception: this.options.getPerceptionStatus(),
     };
 
     const webPreferences: BrowserWindowConstructorOptions['webPreferences'] = {

@@ -77,6 +77,21 @@ export class MemoryStore {
     this.profile = emptyProfile();
   }
 
+  /** 是否允许写盘（记忆开关关闭时必须为 false）。 */
+  private enabled = false;
+
+  /**
+   * 开关状态由 AIService 同步过来。
+   *
+   * 为什么需要它：`rollDayIfNeeded()` 这类"顺手写一行"的路径会在
+   * 用户**刚把开关关掉**之后仍然落盘（内存里 `today` 还记着上一次加载的日期），
+   * 于是"关掉开关不落盘"这条承诺就被绕过了 —— 实测被验收抓到。
+   * 因此所有写路径都先问一句 `enabled`。
+   */
+  public setEnabled(enabled: boolean): void {
+    this.enabled = enabled;
+  }
+
   /* ------------------------------------------------------------------ */
   /* 初始化 / 路径                                                        */
   /* ------------------------------------------------------------------ */
@@ -120,8 +135,9 @@ export class MemoryStore {
   /* 写入                                                                */
   /* ------------------------------------------------------------------ */
 
-  /** 记一条事件（互动、开关、情绪突变…）。 */
-  public recordEvent(kind: MemoryEventKind, text: string, data?: Record<string, unknown>): MemoryEvent {
+  /** 记一条事件（互动、开关、情绪突变…）。记忆关闭时**不写盘**。 */
+  public recordEvent(kind: MemoryEventKind, text: string, data?: Record<string, unknown>): MemoryEvent | null {
+    if (!this.enabled) return null;
     const event: MemoryEvent = {
       at: new Date().toISOString(),
       kind,
@@ -135,8 +151,9 @@ export class MemoryStore {
     return event;
   }
 
-  /** 记一轮对话（用户 / 宠物各调一次）。 */
-  public recordTurn(turn: ChatTurn): ChatTurn {
+  /** 记一轮对话（用户 / 宠物各调一次）。记忆关闭时**不写盘**。 */
+  public recordTurn(turn: ChatTurn): ChatTurn | null {
+    if (!this.enabled) return null;
     const entry: ChatTurn = { ...turn, text: turn.text.slice(0, 2000) };
     this.rollDayIfNeeded();
     this.todayTurns.push(entry);
@@ -155,6 +172,7 @@ export class MemoryStore {
    * - 超过上限时按 `confidence * hits` 淘汰最弱的（记忆也有取舍）。
    */
   public mergeFacts(facts: readonly ExtractedFact[]): { added: number; updated: number } {
+    if (!this.enabled) return { added: 0, updated: 0 };
     if (facts.length === 0) return { added: 0, updated: 0 };
     const now = new Date().toISOString();
     const next = [...this.profile.facts];
@@ -220,16 +238,18 @@ export class MemoryStore {
     return { added, updated };
   }
 
-  /** 更新主人的称呼（名字由对话里抽取，也允许手动改）。 */
+  /** 更新主人的称呼（名字由对话里抽取，也允许手动改）。记忆关闭时不写盘。 */
   public setUserName(name: string): MemoryProfile {
+    if (!this.enabled) return this.profile;
     const now = new Date().toISOString();
     this.profile = { ...this.profile, userName: name.slice(0, 40), updatedAt: now };
     this.saveProfile();
     return this.profile;
   }
 
-  /** 保存模型整理出的记忆摘要（供 prompt 用）。 */
+  /** 保存模型整理出的记忆摘要（供 prompt 用）。记忆关闭时不写盘。 */
   public setSummary(summary: string): MemoryProfile {
+    if (!this.enabled) return this.profile;
     const now = new Date().toISOString();
     this.profile = { ...this.profile, summary: summary.slice(0, 2000), updatedAt: now };
     this.saveProfile();
@@ -414,7 +434,8 @@ export class MemoryStore {
     this.today = key;
     this.todayEvents = [];
     this.todayTurns = [];
-    if (wasLoaded) this.appendLog(`\n## ${key}\n`);
+    // 只有"记忆系统当前是打开的"才写跨天分隔线（否则只读快照也会建目录/写文件）
+    if (wasLoaded && this.enabled) this.appendLog(`\n## ${key}\n`);
   }
 
   private readProfile(): MemoryProfile {

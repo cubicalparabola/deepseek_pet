@@ -11,8 +11,9 @@
  */
 
 import type { PetSettingsState } from './pet-size';
-import type { AIAPI } from './ipc';
+import type { AIAPI, PerceptionAPI } from './ipc';
 import type { AIStatusView } from './ai-types';
+import type { PerceptionStatus } from './perception-types';
 
 /** 设置窗口 preload 通过 `additionalArguments` 注入的启动数据。 */
 export interface SettingsWindowBootstrap {
@@ -22,6 +23,8 @@ export interface SettingsWindowBootstrap {
   readonly configPath: string;
   /** AI 状态快照（打开设置窗口时读一次，之后靠推送更新）。 */
   readonly ai: AIStatusView;
+  /** 感知状态快照（同上）。 */
+  readonly perception: PerceptionStatus;
 }
 
 /** preload 命令行参数的 key 与值。 */
@@ -54,4 +57,11 @@ export interface SettingsWindowBridge {
    * 设置窗口是配置这些开关的主入口，日记与记忆也在这里查看。
    */
   readonly ai: AIAPI;
+  /**
+   * 环境与用户感知（3.1~3.6）。
+   *
+   * 设置窗口是这两个"可配置开关"的主入口：屏幕/内容理解/行为/摄像头/习惯
+   * 五个开关、隐私模式、采样间隔、主动打扰频率、敏感词黑名单都在这里。
+   */
+  readonly perception: PerceptionAPI;
 }

@@ -12,6 +12,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { PetConfig } from '../shared/config';
 import type { TrayStatePayload } from '../shared/ipc';
+import type { PerceptionViewMode } from '../shared/perception-types';
 import {
   PET_BASE_HEIGHT,
   PET_SCALE_DEFAULT,
@@ -61,6 +62,20 @@ export interface TrayManagerCallbacks {
   onResetEmotion(): void;
   /** 打开设置窗口的 AI 面板（与「设置…」同一个窗口，只是提示用）。 */
   onOpenAISettings(): void;
+
+  /* ---------------- 环境与用户感知（3.1~3.6） ---------------- */
+  /** 3.2 按需"看屏幕"：场景 / 读文字 / 总结内容 / 看报错 / 看代码。 */
+  onLookScreen(mode: PerceptionViewMode): void;
+  /** 隐私模式开关：一键停止一切采集（返回切换后的状态）。 */
+  onTogglePrivacyMode(): boolean;
+  /** 把"她看见了什么"整理出来显示在气泡里。 */
+  onShowPerceptionDigest(): void;
+  /** 打开感知日志文件。 */
+  onOpenPerceptionLog(): void;
+  /** 立刻采一次（验证感知是否工作）。 */
+  onSamplePerception(): void;
+  /** 摄像头授权开关（返回切换后的授权状态）。 */
+  onToggleCameraConsent(): boolean;
 }
 
 export interface TrayManagerOptions {
@@ -295,6 +310,49 @@ export class TrayManager {
     ];
   }
 
+  /**
+   * 环境与用户感知子菜单（3.1~3.6）。
+   *
+   * 隐私模式的入口**必须在菜单里**（不能只藏在设置窗口深处）：
+   * 用户觉得"被看着"不舒服时，应该两次点击就能停掉一切采集。
+   */
+  private buildPerceptionSubmenu(): MenuItemConstructorOptions[] {
+    const callbacks = this.options.callbacks;
+    const perception = this.state.perception;
+    const privacy = perception?.settings.privacyMode === true;
+    const cameraOn = perception?.settings.camera === true && perception?.settings.cameraAuthorized === true;
+    const statusLine = perception
+      ? `${perception.capturing ? '感知中' : `已暂停（${perception.pausedReason || '未开启'}）`}` +
+        `${perception.lastObservation ? ` · ${perception.lastObservation.scene}` : ''}` +
+        ` · 打扰 ${perception.interventionsToday} 次`
+      : '状态未就绪';
+
+    return [
+      { label: statusLine, enabled: false },
+      {
+        label: privacy ? '关闭隐私模式（恢复感知）' : '隐私模式（停止一切采集）',
+        type: 'checkbox',
+        checked: privacy,
+        click: () => callbacks.onTogglePrivacyMode(),
+      },
+      { type: 'separator' },
+      { label: '看我在做什么（场景）', enabled: !privacy, click: () => callbacks.onLookScreen('scene') },
+      { label: '读屏幕上的文字（OCR）', enabled: !privacy, click: () => callbacks.onLookScreen('ocr') },
+      { label: '总结屏幕内容', enabled: !privacy, click: () => callbacks.onLookScreen('summarize') },
+      { label: '帮我看看这个报错', enabled: !privacy, click: () => callbacks.onLookScreen('error') },
+      { label: '看看屏幕上的代码', enabled: !privacy, click: () => callbacks.onLookScreen('code') },
+      { type: 'separator' },
+      { label: '她看见了什么？', click: () => callbacks.onShowPerceptionDigest() },
+      { label: '立刻感知一次', enabled: !privacy, click: () => callbacks.onSamplePerception() },
+      { label: '打开感知日志', click: () => callbacks.onOpenPerceptionLog() },
+      {
+        label: cameraOn ? '摄像头：已授权（点击撤销）' : '摄像头：未授权（点击授权）',
+        click: () => callbacks.onToggleCameraConsent(),
+      },
+      { label: '感知设置…', click: () => callbacks.onOpenAISettings() },
+    ];
+  }
+
   /** 托盘菜单（显示/隐藏、行为、尺寸、动画试放、插件、设置、退出）。 */
   private buildTrayMenu(): Menu {
     const visible = this.state.visible ?? true;
@@ -327,6 +385,7 @@ export class TrayManager {
       { label: '恢复默认动画', click: () => callbacks.onResetAnimation() },
       { label: '对话气泡（测试）', submenu: this.buildBubbleSubmenu() },
       { label: 'AI（认知与人格）', submenu: this.buildAISubmenu() },
+      { label: '感知（环境与用户）', submenu: this.buildPerceptionSubmenu() },
       { type: 'separator' },
       { label: '暂停行为', enabled: !paused, click: () => callbacks.onToggleBehavior() },
       { label: '恢复行为', enabled: paused, click: () => callbacks.onToggleBehavior() },
@@ -374,6 +433,7 @@ export class TrayManager {
       { label: '恢复默认动画', click: () => callbacks.onResetAnimation() },
       { label: '对话气泡（测试）', submenu: this.buildBubbleSubmenu() },
       { label: 'AI（认知与人格）', submenu: this.buildAISubmenu() },
+      { label: '感知（环境与用户）', submenu: this.buildPerceptionSubmenu() },
       { type: 'separator' },
       ...this.buildSizeItems(),
       { label: '显示桌宠', enabled: !visible, click: () => callbacks.onShow() },

@@ -26,6 +26,13 @@ import type {
   MemorySnapshot,
   PetPresence,
 } from './ai-types';
+import type {
+  PerceptionLogItem,
+  PerceptionSettingsPatch,
+  PerceptionStatus,
+  PerceptionViewMode,
+  PerceptionViewResult,
+} from './perception-types';
 
 /* -------------------------------------------------------------------------- */
 /* 通道名                                                                      */
@@ -153,6 +160,32 @@ export const IpcChannels = {
   /** 让桌宠主动说一句话（聊天窗口的「让她说句话」，也是"主动搭话"的手动入口）。 */
   AISpeakUp: 'pet:ai-speak-up',
 
+  /* --------------- 环境与用户感知（3.1~3.6） ---------------
+   *
+   * 与 AI 一样，采集与判断全在主进程；渲染层只有两件事：
+   * 上报"摄像头是否就绪"和"回传一帧"（getUserMedia 只能在渲染层调）。
+   */
+  /** 感知状态（开关、当前场景、行为快照、在场、习惯、最近干预）。 */
+  PerceptionStatusGet: 'pet:perception-status',
+  /** 修改感知配置（部分补丁；隐私模式也在其中）。 */
+  PerceptionSettingsSet: 'pet:perception-settings-set',
+  /** 感知日志（她看见了什么 / 为什么开口）。 */
+  PerceptionLog: 'pet:perception-log',
+  /** 3.2 按需"看屏幕"：场景 / OCR / 总结 / 报错 / 看代码。 */
+  PerceptionViewNow: 'pet:perception-view',
+  /** 摄像头授权（只能由界面上显式按钮置为 true）。 */
+  PerceptionCameraAuthorize: 'pet:perception-camera-authorize',
+  /** 清空感知数据（观察记录 + 习惯画像）。 */
+  PerceptionClearData: 'pet:perception-clear',
+  /** 在文件管理器里打开感知日志文件。 */
+  PerceptionOpenLog: 'pet:perception-open-log',
+  /** 立刻采一次（验收与手动调试用）。 */
+  PerceptionSampleNow: 'pet:perception-sample-now',
+  /** Renderer -> Main：一帧摄像头画面（JPEG data URL，**不落盘**）。 */
+  PerceptionCameraFrame: 'pet:perception-camera-frame',
+  /** Renderer -> Main：摄像头就绪/失败。 */
+  PerceptionCameraReady: 'pet:perception-camera-ready',
+
   /* Main -> Renderer 指令 */
   CommandAction: 'pet:command-action',
   CommandSetBehaviorPaused: 'pet:command-set-behavior-paused',
@@ -164,6 +197,10 @@ export const IpcChannels = {
   CommandAIStatus: 'pet:command-ai-status',
   /** Main -> 聊天窗口：一条新消息（用户/宠物/系统提示）。 */
   CommandChatMessage: 'pet:command-chat-message',
+  /** Main -> 感知状态变化（设置窗口的感知面板靠它刷新）。 */
+  CommandPerceptionStatus: 'pet:command-perception-status',
+  /** Main -> 渲染层：请采集一帧摄像头画面并回传（3.5）。 */
+  CommandPerceptionCameraRequest: 'pet:command-perception-camera-request',
   CommandShutdown: 'pet:command-shutdown',
 } as const;
 
@@ -261,6 +298,8 @@ export interface TrayStatePayload {
   readonly ai?: AIStatusView;
   /** 在场状态（可见 / 收起 / 隐藏），子菜单据此显示"收起/展开"。 */
   readonly presence?: PetPresence;
+  /** 感知状态（仅供主进程构造「感知（环境与用户）」子菜单使用）。 */
+  readonly perception?: PerceptionStatus;
 }
 
 /** 菜单展示用的动画摘要（主进程从 Manifest 解析）。 */
@@ -418,9 +457,42 @@ export interface AIAPI {
   onChatMessage(handler: (message: ChatMessagePush) => void): () => void;
 }
 
+/**
+ * 环境与用户感知 API（3.1~3.6）。
+ *
+ * 与 `AIAPI` 一样，桌宠窗口（`petAPI.perception`）与设置窗口（`settingsAPI.perception`）
+ * 共用同一个面；区别是这里还多了**渲染层负责的两件事**：
+ * `setCameraReady` 与 `cameraFrame` —— 因为 `getUserMedia` 只能在渲染层调用。
+ */
+export interface PerceptionAPI {
+  /** 状态快照（开关、当前场景、行为、在场、习惯、最近一次干预）。 */
+  status(): Promise<PerceptionStatus>;
+  /** 修改配置（含 `privacyMode`：一键停止一切采集）。 */
+  setSettings(patch: PerceptionSettingsPatch): Promise<PerceptionStatus>;
+  /** 感知日志（倒序，最多 limit 条）。 */
+  log(limit?: number): Promise<readonly PerceptionLogItem[]>;
+  /** 3.2 按需看屏幕（场景 / OCR / 总结 / 报错 / 看代码）。 */
+  viewNow(mode: PerceptionViewMode): Promise<PerceptionViewResult>;
+  /** 摄像头授权开关（界面上必须是**显式**按钮，不允许偷偷打开）。 */
+  authorizeCamera(authorized: boolean): Promise<PerceptionStatus>;
+  /** 清空她观察到的一切（观察记录 + 习惯画像）。 */
+  clearData(): Promise<PerceptionStatus>;
+  /** 打开感知日志文件（人可读那份）。 */
+  openLog(): Promise<boolean>;
+  /** 立刻采一次（验收/调试入口）。 */
+  sampleNow(): Promise<PerceptionStatus>;
+  /** 渲染层：摄像头可用性上报。 */
+  setCameraReady(ready: boolean, error?: string): void;
+  /** 渲染层：回传一帧摄像头画面（JPEG data URL）。 */
+  cameraFrame(dataUrl: string): void;
+  /** 订阅状态变化（采样后与开关变化时推送）。 */
+  onStatus(handler: (status: PerceptionStatus) => void): () => void;
+  /** 订阅"请采集一帧"的请求（渲染层据此调用 getUserMedia 取帧）。 */
+  onCameraRequest(handler: () => void): () => void;
+}
+
 /** `window.petAPI` 的完整形状。 */
-export interface PetBridge {
-  readonly runtime: RuntimeInfo;
+export interface PetBridge {  readonly runtime: RuntimeInfo;
   readonly assets: AssetAPI;
   readonly window: WindowAPI;
   readonly menu: MenuAPI;
@@ -434,6 +506,8 @@ export interface PetBridge {
   readonly bubble: BubbleAPI;
   /** AI 认知与人格（2.1~2.4）。 */
   readonly ai: AIAPI;
+  /** 环境与用户感知（3.1~3.6）。 */
+  readonly perception: PerceptionAPI;
   notifyAnimationChanged(payload: AnimationChangedPayload): void;
   notifyStateChanged(payload: StateChangedPayload): void;
   notifyBehaviorPaused(paused: boolean): void;

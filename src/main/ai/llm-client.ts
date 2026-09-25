@@ -16,8 +16,19 @@ import { describeError } from '../../shared/errors';
 
 export interface LLMMessage {
   readonly role: 'system' | 'user' | 'assistant';
-  readonly content: string;
+  /**
+   * 文本，或**多模态分片**（3.1/3.2/3.5 要把屏幕截图/摄像头帧交给视觉模型）。
+   *
+   * 保持 `string` 这个常见形态不变，多模态只在真正需要时用数组 ——
+   * 这样已有的纯文本调用一行都不用改。
+   */
+  readonly content: string | readonly LLMContentPart[];
 }
+
+/** 多模态分片（目前只有文本与图片两种）。 */
+export type LLMContentPart =
+  | { readonly type: 'text'; readonly text: string }
+  | { readonly type: 'image'; readonly mimeType: string; readonly dataBase64: string };
 
 export interface LLMCompletionRequest {
   readonly messages: readonly LLMMessage[];
@@ -145,7 +156,10 @@ export class LLMClient {
   ): Promise<Omit<LLMCompletionResult, 'latencyMs'>> {
     const body = {
       model: this.config.model,
-      messages: request.messages,
+      messages: request.messages.map((message) => ({
+        role: message.role,
+        content: toOpenAIContent(message.content),
+      })),
       temperature: request.temperature ?? this.config.temperature,
       max_tokens: request.maxTokens ?? this.config.maxTokens,
       stream: false,
@@ -192,11 +206,11 @@ export class LLMClient {
   ): Promise<Omit<LLMCompletionResult, 'latencyMs'>> {
     const system = request.messages
       .filter((message) => message.role === 'system')
-      .map((message) => message.content)
+      .map((message) => toPlainText(message.content))
       .join('\n\n');
     const chat = request.messages
       .filter((message) => message.role !== 'system')
-      .map((message) => ({ role: message.role, content: message.content }));
+      .map((message) => ({ role: message.role, content: toAnthropicContent(message.content) }));
 
     const body = {
       model: this.config.model,
@@ -268,6 +282,34 @@ export class LLMClient {
 /* -------------------------------------------------------------------------- */
 /* 解析辅助（各家返回结构略有差异，这里做宽松解析）                                */
 /* -------------------------------------------------------------------------- */
+
+/** 把多模态分片拍平成纯文本（Anthropic 的 system 只能是字符串）。 */
+function toPlainText(content: string | readonly LLMContentPart[]): string {
+  if (typeof content === 'string') return content;
+  return content
+    .map((part) => (part.type === 'text' ? part.text : '[图片]'))
+    .join('\n');
+}
+
+/** OpenAI 兼容：图片走 `image_url` + data URL。 */
+function toOpenAIContent(content: string | readonly LLMContentPart[]): unknown {
+  if (typeof content === 'string') return content;
+  return content.map((part) =>
+    part.type === 'text'
+      ? { type: 'text', text: part.text }
+      : { type: 'image_url', image_url: { url: `data:${part.mimeType};base64,${part.dataBase64}` } },
+  );
+}
+
+/** Anthropic：图片走 `source: {type:'base64', media_type, data}`。 */
+function toAnthropicContent(content: string | readonly LLMContentPart[]): unknown {
+  if (typeof content === 'string') return content;
+  return content.map((part) =>
+    part.type === 'text'
+      ? { type: 'text', text: part.text }
+      : { type: 'image', source: { type: 'base64', media_type: part.mimeType, data: part.dataBase64 } },
+  );
+}
 
 function safeParse(text: string): Record<string, unknown> | null {
   try {

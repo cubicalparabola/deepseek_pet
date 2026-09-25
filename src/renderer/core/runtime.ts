@@ -244,6 +244,16 @@ export class RuntimeCapabilities {
     return this.bridge?.ai;
   }
 
+  /**
+   * 感知桥（3.1~3.6）。
+   *
+   * 渲染层只用到其中两件事：**摄像头**（getUserMedia 只能在渲染层调）
+   * 与桌宠窗口自己的状态查询；屏幕截图与判断全在主进程。
+   */
+  public perception() {
+    return this.bridge?.perception;
+  }
+
   /** 读取 AI 状态（桌宠窗口自检/调试用）。 */
   public async aiStatus() {
     const bridge = this.bridge;

@@ -14,7 +14,7 @@
  * 主进程只负责系统能力，并把它们通过 preload + IPC 暴露出去。
  */
 
-import { app, dialog, screen, shell } from 'electron';
+import { app, dialog, screen, session, shell } from 'electron';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -53,6 +53,10 @@ import { FALLBACK_ASPECT_RATIO, resolvePetSize } from './pet-size';
 import { resolveBubbleLayout, type BubblePayload, type BubbleState } from '../shared/bubble';
 import type { AIStatusView, DiaryEntry, PetPresence } from '../shared/ai-types';
 import { createDefaultAIStatus } from '../shared/ai-types';
+import type { PerceptionStatus, PerceptionViewMode } from '../shared/perception-types';
+import { DEFAULT_PERCEPTION_SETTINGS } from '../shared/perception-types';
+import { sceneLabel } from '../shared/perception';
+import { PerceptionService, viewModeLabel } from './perception/perception-service';
 import { registerAssetProtocolHandler, registerAssetScheme } from './asset-protocol';
 import { AIService } from './ai/ai-service';
 import { ChatWindowManager } from './chat-window-manager';
@@ -75,9 +79,13 @@ class DesktopPetApplication {
   private bubbleController: BubbleController | null = null;
   /** AI 认知与人格（2.1~2.4）：大模型、记忆、情绪、日记都在这里。 */
   private aiService: AIService | null = null;
+  /** 环境与用户感知（3.1~3.6）：屏幕/内容理解/行为/摄像头/习惯。 */
+  private perception: PerceptionService | null = null;
   private chatWindow: ChatWindowManager | null = null;
   /** 桌宠"在不在场"（影响情绪衰减与是否接收点击）。 */
   private presence: PetPresence = 'visible';
+  /** "捂住眼睛躲起来"后的自动恢复定时器（见 handleIntervention）。 */
+  private revealTimer: NodeJS.Timeout | null = null;
 
   private animationManifest: AnimationManifest = {};
   private bootstrapData: PetBootstrap | null = null;
@@ -173,6 +181,7 @@ class DesktopPetApplication {
      */
     this.createAIService();
     this.createChatWindow();
+    this.createPerceptionService();
 
     this.bootstrapData = this.createBootstrap();
 
@@ -262,6 +271,25 @@ class DesktopPetApplication {
         return this.aiStatus();
       },
       aiOpenChat: () => this.openChatWindow(),
+
+      /* ------------------ 环境与用户感知（3.1~3.6） ------------------ */
+      getPerceptionStatus: () => this.perceptionStatus(),
+      setPerceptionSettings: (patch) => this.perception?.setSettings(patch) ?? this.perceptionStatus(),
+      perceptionLog: (limit) => this.perception?.log(limit) ?? [],
+      perceptionView: (mode) => this.perception?.viewNow(mode) ?? Promise.resolve({ ok: false, mode, text: '感知模块未就绪', scene: 'other' as const, sensitive: false, tokens: 0, error: 'not-ready' }),
+      perceptionAuthorizeCamera: (authorized) => {
+        const status = this.perception?.authorizeCamera(authorized) ?? this.perceptionStatus();
+        // 授权后让渲染层立刻去开摄像头（否则要等下一个采样周期）
+        if (authorized) this.ipcManager?.requestCameraFrame();
+        return status;
+      },
+      perceptionClearData: () => this.perception?.clearData() ?? this.perceptionStatus(),
+      perceptionOpenLog: () => this.openPath(this.perception?.logPath ?? ''),
+      perceptionSampleNow: async () => this.perception?.tick(Date.now(), true) ?? this.perceptionStatus(),
+      perceptionCameraFrame: (dataUrl) => {
+        void this.perception?.ingestCameraFrame(dataUrl);
+      },
+      perceptionCameraReady: (ready, error) => this.perception?.setCameraReady(ready, error),
       closeChatWindow: () => {
         this.chatWindow?.hide();
         return true;
@@ -273,6 +301,7 @@ class DesktopPetApplication {
     this.createWindow();
     this.createTray();
     this.createSettingsWindow();
+    this.wireMediaPermissions();
 
     app.on('activate', () => this.showPet());
   }
@@ -322,8 +351,199 @@ class DesktopPetApplication {
       setScale: (scale) => this.applyScale(scale),
       setAlwaysOnTop: (value) => this.applyAlwaysOnTop(value),
       getAIStatus: () => this.aiStatus(),
+      getPerceptionStatus: () => this.perceptionStatus(),
     });
   }
+
+  /* ------------------------------------------------------------------ */
+  /* 环境与用户感知（3.1~3.6）                                            */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * 装配感知服务。
+   *
+   * 与 AI 模块共用同一个 `LLMClient`（`aiService` 持有一个），因此：
+   * - 密钥/网关/模型只在设置里配**一次**，视觉理解立刻跟着生效；
+   * - 没配密钥时视觉部分自然降级，但**本地行为信号照常工作**
+   *   （连续使用过久、深夜提醒不需要任何模型）。
+   */
+  private createPerceptionService(): void {
+    this.perception = new PerceptionService({
+      dataDir: aiDataDir(),
+      logger: this.loggerFactory.create('Perception'),
+      getClient: () => this.aiService?.llmClient ?? null,
+      isLLMUsable: () => this.aiService?.status().usable === true,
+      getAvailableAnimations: () => this.animationSummaries().map((item) => item.id),
+      onIntervene: (plan, reason) => this.handleIntervention(plan, reason),
+      onStatus: (status) => this.ipcManager?.notifyPerceptionStatus(status),
+      requestCameraFrame: () => this.ipcManager?.requestCameraFrame(),
+      onSettingsChanged: (settings) => this.applyCapturePrivacy(settings),
+    });
+    this.perception.load();
+    this.perception.start();
+    this.logger.info('perception module ready', { data: { summary: this.perception.describe() } });
+  }
+
+  /**
+   * 摄像头权限闸门（3.5 的"明确授权"在 Electron 层的落点）。
+   *
+   * 渲染层调 `getUserMedia` 时 Electron 会问主进程的权限处理器：
+   * 只有"摄像头开关打开 + 用户已显式授权 + 没有开隐私模式"三者同时成立才放行，
+   * 其余情况一律拒绝（并且**不弹出**系统权限提示）。
+   * 这样"授权"这件事只有一条路径：用户在界面上点过那个按钮。
+   */
+  private wireMediaPermissions(): void {
+    try {
+      session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => {
+        if (permission !== 'media') {
+          callback(false);
+          return;
+        }
+        const settings = this.perception?.settings;
+        const allowed =
+          settings !== undefined && settings.camera && settings.cameraAuthorized && !settings.privacyMode;
+        if (!allowed) {
+          this.logger.info('camera permission denied by policy', {
+            data: {
+              camera: settings?.camera ?? false,
+              authorized: settings?.cameraAuthorized ?? false,
+              privacyMode: settings?.privacyMode ?? false,
+            },
+          });
+        }
+        callback(allowed);
+      });
+      session.defaultSession.setPermissionCheckHandler((_contents, permission) => {
+        if (permission !== 'media') return false;
+        const settings = this.perception?.settings;
+        return settings !== undefined && settings.camera && settings.cameraAuthorized && !settings.privacyMode;
+      });
+      this.logger.info('media permission handler installed');
+    } catch (error) {
+      this.logger.error('installing media permission handler failed', { error: describeError(error) });
+    }
+  }
+
+  /** 隐私相关的窗口副作用：要不要让自己从截屏/录屏里消失。 */  private applyCapturePrivacy(settings: { hideFromCapture: boolean }): void {
+    const windows = [
+      this.windowManager?.getWindow() ?? null,
+      this.chatWindow?.getWindow() ?? null,
+      this.settingsWindow?.getWindow() ?? null,
+    ].filter((window): window is NonNullable<typeof window> => window !== null);
+    this.perception?.applyContentProtection(windows, settings.hideFromCapture);
+  }
+
+  /**
+   * "她看见了什么？"——把感知状态整理成一段可读文本（托盘菜单入口）。
+   *
+   * 与记忆一样，感知必须**可审计**：用户点一下就能看到她掌握了什么信息、
+   * 最近一次为什么开口。这是"感知"能被接受的前提。
+   */
+  private perceptionDigest(): string {
+    const status = this.perceptionStatus();
+    const observation = status.lastObservation;
+    const lines = [
+      status.capturing ? '感知中' : `暂停感知（${status.pausedReason || '未开启'}）`,
+      observation
+        ? `最近看到：${sceneLabel(observation.scene)}${observation.app ? `（${observation.app}）` : ''}${observation.sensitive ? ' · 私人内容' : ''}`
+        : '还没看到什么（需要接上大模型才能看懂屏幕）',
+      `行为：空闲 ${status.behavior.idleSeconds}s · 连续使用 ${status.behavior.sessionMinutes} 分钟 · 本小时切换 ${status.behavior.switchesLastHour} 次`,
+      `在场：${status.presence.present ? '在电脑前' : '不在'}（来源：${status.presence.source}）`,
+      `习惯：采样 ${status.habits.samples} 次 · 覆盖 ${status.habits.activeDays} 天` +
+        (status.habits.typicalNow ? ` · 这个点通常在做${sceneLabel(status.habits.typicalNow)}` : ''),
+      status.lastIntervention
+        ? `上次开口：${status.lastIntervention.text}（${status.lastIntervention.reason}）`
+        : '还没主动开口过',
+      `今天主动打扰：${status.interventionsToday} 次（上限 ${status.settings.proactiveMaxPerHour}/小时）`,
+      `感知日志：${status.dataDir}`,
+    ];
+    return lines.join('\n');
+  }
+
+  /** 采了一帧后要在窗口上"躲起来"（敏感内容 / 陌生人）。 */
+  private handleIntervention(plan: { text: string; animation: string | null; hide: boolean }, reason: string): void {
+    this.logger.info('perception intervention', { data: { reason, text: plan.text.slice(0, 40) } });
+    if (plan.text.trim() !== '') {
+      this.applyBubble({ visible: true, text: plan.text, ready: false });
+    }
+    if (plan.animation) {
+      this.ipcManager?.setAnimation(plan.animation);
+    }
+    if (plan.hide) {
+      /*
+       * "捂住眼睛躲起来"：把桌宠藏起来一小会儿。
+       *
+       * ⚠️ 必须有**自动恢复**：早期版本只 hide 不 restore，她会一直藏着直到用户
+       * 自己去托盘点「显示桌宠」—— 用户会以为她崩了（文档评审抓到）。
+       * 这里 20 秒后自动回来；期间用户手动显示过就不再干预。
+       */
+      this.setPresence('hidden');
+      if (this.revealTimer !== null) clearTimeout(this.revealTimer);
+      this.revealTimer = setTimeout(() => {
+        this.revealTimer = null;
+        if (this.presence === 'hidden') {
+          this.logger.info('pet reveals itself after hiding for sensitive content');
+          this.setPresence('visible');
+        }
+      }, SELF_HIDE_MS);
+      this.revealTimer.unref?.();
+      this.logger.info('pet hid itself due to sensitive content / stranger', { data: { revealInMs: SELF_HIDE_MS } });
+    }
+    if (this.aiService) {
+      // 干预也进记忆（日记里能看到"她提醒过你休息"）
+      this.aiService.recordEvent('interaction', `感知干预：${plan.text}`, { reason });
+    }
+  }
+
+  private perceptionStatus(): PerceptionStatus {
+    if (this.perception) return this.perception.status();
+    return {
+      settings: DEFAULT_PERCEPTION_SETTINGS,
+      capturing: false,
+      pausedReason: '感知模块未就绪',
+      lastObservation: null,
+      behavior: { idleSeconds: 0, sessionMinutes: 0, switchesLastHour: 0, hour: new Date().getHours(), lateNight: false, userState: 'unknown' },
+      presence: { present: true, source: 'unknown', at: '' },
+      habits: { samples: 0, activeDays: 0, latestActiveHour: null, earliestActiveHour: null, typicalNow: null },
+      lastIntervention: null,
+      interventionsToday: 0,
+      cameraReady: false,
+      dataDir: aiDataDir(),
+      lastError: '',
+    };
+  }
+
+  /** 3.2 按需看屏幕：结果同时进气泡与聊天窗口（和 AI 回复走同一套展示）。 */
+  private async viewScreen(mode: PerceptionViewMode): Promise<void> {
+    if (!this.perception) return;
+    const result = await this.perception.viewNow(mode);
+    const prefix = mode === 'scene' ? '' : `【${viewModeLabel(mode)}】\n`;
+    this.handleSpeak({ text: `${prefix}${result.text}`, animation: this.animationForScene(result.scene), kind: 'reply' });
+    if (this.aiService) {
+      this.aiService.recordEvent('interaction', `看屏幕（${viewModeLabel(mode)}）：${result.text.slice(0, 60)}`);
+    }
+  }
+
+  /** 场景 -> 动画（挑不到就交给 AI 模块按情绪决定）。 */
+  private animationForScene(scene: string): string | null {
+    const candidates = this.animationSummaries().map((item) => item.id);
+    const pick = (ids: readonly string[]): string | null => ids.find((id) => candidates.includes(id)) ?? null;
+    switch (scene) {
+      case 'coding':
+      case 'terminal':
+        return pick(['work', 'read', 'talk']);
+      case 'reading':
+        return pick(['read', 'work', 'talk']);
+      case 'video':
+      case 'gaming':
+        return pick(['cute', 'fawning', 'talk']);
+      case 'idle':
+        return pick(['lie', 'sleep', 'read']);
+      default:
+        return pick(['talk', 'cute']);
+    }
+  }
+
 
   /* ------------------------------------------------------------------ */
   /* AI 认知与人格（2.1~2.4）                                             */
@@ -586,6 +806,40 @@ class DesktopPetApplication {
         },
         onOpenAISettings: () => this.settingsWindow?.open(),
 
+        /* ------------------ 环境与用户感知（3.1~3.6） ------------------ */
+        onLookScreen: (mode) => {
+          void this.viewScreen(mode);
+        },
+        onTogglePrivacyMode: () => {
+          const before = this.perception?.settings.privacyMode ?? false;
+          const status = this.perception?.setSettings({ privacyMode: !before }) ?? this.perceptionStatus();
+          this.applyBubble({
+            visible: true,
+            text: status.settings.privacyMode
+              ? '好，我不看了（隐私模式已开启）。'
+              : '隐私模式关掉了，我又可以陪着你了。',
+            ready: false,
+          });
+          return status.settings.privacyMode;
+        },
+        onShowPerceptionDigest: () => {
+          this.applyBubble({ visible: true, text: this.perceptionDigest(), ready: false });
+        },
+        onOpenPerceptionLog: () => {
+          this.openPath(this.perception?.logPath ?? '');
+        },
+        onSamplePerception: () => {
+          // force = true：菜单点「立刻感知一次」就是要**现在**采一次，
+          // 不能被采样节流挡掉（否则用户点了没反应，只有行为数字动了一下）
+          void this.perception?.tick(Date.now(), true);
+        },
+        onToggleCameraConsent: () => {
+          const authorized = this.perception?.settings.cameraAuthorized === true;
+          this.perception?.authorizeCamera(!authorized);
+          if (!authorized) this.ipcManager?.requestCameraFrame();
+          return !authorized;
+        },
+
         onQuit: () => this.quit(),
       },
     });
@@ -838,6 +1092,8 @@ class DesktopPetApplication {
       // 「AI（认知与人格）」子菜单需要状态与在场状态（心情会随心跳变化）
       ai: this.aiStatus(),
       presence: this.presence,
+      // 「感知（环境与用户）」子菜单需要当前场景/打扰次数/隐私模式
+      perception: this.perceptionStatus(),
     });
   }
 
@@ -926,6 +1182,8 @@ class DesktopPetApplication {
     this.logger.info('shutting down');
     // AI 侧要收尾：停心跳/日记定时器，并把情绪写盘（下次打开接着掉）
     this.aiService?.dispose();
+    // 感知侧要收尾：停采样与摄像头请求（摄像头句柄由渲染层随窗口销毁释放）
+    this.perception?.dispose();
     this.windowManager?.markQuitting();
     this.ipcManager?.notifyShutdown();
     this.settingsWindow?.destroy();
@@ -1005,6 +1263,10 @@ class DesktopPetApplication {
       aiSettingsFile: join(app.getPath('userData'), 'ai-settings.json'),
       aiMemoryDir: join(app.getPath('userData'), 'memory'),
       aiDiaryDir: join(app.getPath('userData'), 'diary'),
+      // 环境与用户感知（3.1~3.6）：开关状态与数据目录
+      perception: this.perceptionStatus(),
+      perceptionSettingsFile: join(app.getPath('userData'), 'perception-settings.json'),
+      perceptionDir: join(app.getPath('userData'), 'perception'),
     };
   }
 
@@ -1033,6 +1295,14 @@ function aiDataDir(): string {
 }
 
 /**
+ * "捂住眼睛躲起来"持续多久后自动回来（毫秒）。
+ *
+ * 取 20 秒：足够表达"我不看"，又不至于让用户以为她崩了。
+ * 期间用户从托盘点「显示桌宠」会更早回来（定时器里会检查当前状态）。
+ */
+const SELF_HIDE_MS = 20000;
+
+/**
  * AI 服务尚未装配时的兜底回复。
  *
  * 为什么不在 IPC 层抛异常：桌宠的所有能力都必须是"可降级"的 ——
@@ -1051,8 +1321,7 @@ function localChatFallback(reason: string): {
   return { ok: false, reply: '我还没准备好……等我一下下。', mode: 'local', tokens: 0, error: reason, mood: 62, hunger: 0 };
 }
 
-function emptyMemorySnapshot(): {
-  profile: { userName: string; petName: string; facts: never[]; summary: string; updatedAt: string };
+function emptyMemorySnapshot(): {  profile: { userName: string; petName: string; facts: never[]; summary: string; updatedAt: string };
   todayEvents: never[];
   recentChat: never[];
   logFile: string;

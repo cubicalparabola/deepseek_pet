@@ -22,6 +22,7 @@ import {
 } from '../shared/pet-size';
 import type { SettingsWindowBridge } from '../shared/settings-window';
 import { mountAIPanel } from './ai-panel';
+import { mountPerceptionPanel } from './perception-panel';
 
 function requireElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -185,4 +186,17 @@ try {
 } catch (error) {
   // 面板挂载失败不能连累"调尺寸"这个核心功能
   console.error('[settings] mounting ai panel failed', error);
+}
+
+/*
+ * 环境与用户感知面板（3.1~3.6）。
+ *
+ * 与 AI 面板一样是"闭包内聚"的：容器 + 感知桥 + 初始状态，自带事件与刷新。
+ * 面板里最要紧的两个控件是**隐私模式**与**摄像头授权**：
+ * 它们的状态一律以主进程回读为准（可能被托盘菜单改掉），不信任本地点击状态。
+ */
+try {
+  if (bridge) mountPerceptionPanel(requireElement('perception-panel-root'), bridge.perception, bridge.initial.perception);
+} catch (error) {
+  console.error('[settings] mounting perception panel failed', error);
 }

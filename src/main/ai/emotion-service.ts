@@ -184,6 +184,12 @@ export class EmotionService {
   }
 
   private save(): void {
+    /*
+     * 情绪开关关闭时**不写盘**：需求要求"可配置开关"，关掉就不该在用户磁盘上
+     * 留下 emotion.json / mood-*.jsonl（不然用户会以为关不掉）。
+     * 内存里的数值照常变化，只是不持久化。
+     */
+    if (!this.options.isEnabled()) return;
     try {
       mkdirSync(this.options.dataDir, { recursive: true });
       const temp = `${this.file}.tmp`;

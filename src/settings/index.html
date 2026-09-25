@@ -16,6 +16,8 @@
     <link rel="stylesheet" href="./settings.css" />
     <!-- AI 认知与人格面板的样式（内容由 ai-panel.ts 动态挂载） -->
     <link rel="stylesheet" href="./ai-panel.css" />
+    <!-- 环境与用户感知面板的样式（内容由 perception-panel.ts 动态挂载） -->
+    <link rel="stylesheet" href="./perception-panel.css" />
   </head>
   <body>
     <main class="panel">
@@ -69,6 +71,13 @@
         分文件后两边互不影响，面板也可以独立演进。
       -->
       <section id="ai-panel-root" aria-label="AI 认知与人格"></section>
+
+      <!--
+        环境与用户感知（3.1~3.6）：内容由 src/settings/perception-panel.ts 动态挂载。
+        与 AI 面板同理分文件：五类感知开关 + 隐私模式 + 采样频率 + 摄像头授权
+        是另一套心智模型（"她能不能看我"），不该和人格设定混在一起。
+      -->
+      <section id="perception-panel-root" aria-label="环境与用户感知"></section>
     </main>
 
     <footer class="footer">

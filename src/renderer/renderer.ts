@@ -29,6 +29,24 @@ import {
   moodLabel,
 } from '../shared/emotion';
 import type { AIChatReply, AIStatusView, InteractionKind } from '../shared/ai-types';
+import type { PerceptionStatus } from '../shared/perception-types';
+import { DEFAULT_PERCEPTION_SETTINGS } from '../shared/perception-types';
+import {
+  capturePermission,
+  emptyHabitProfile,
+  gateIntervention,
+  habitPredictionText,
+  inferUserState,
+  isLateNight,
+  isPlanEnabled,
+  isQuietHour,
+  learnHabit,
+  matchesSensitiveKeywords,
+  normalizeScene,
+  planIntervention,
+  sceneLabel,
+  topSceneAtHour,
+} from '../shared/perception';
 import { createLoggerFactory } from '../shared/logging';
 import { EventBus } from './core/event-bus';
 import { AnimationManager } from './core/animation-manager';
@@ -40,6 +58,7 @@ import { PluginHost } from './core/plugin-host';
 import { PetLayers } from './core/layers';
 import { BubbleView } from './core/bubble-view';
 import { RuntimeCapabilities, readBridge } from './core/runtime';
+import { CameraSensor } from './core/camera-sensor';
 
 /**
  * 区域 -> 互动动画（第一版默认映射；插件可用更高的 Action 覆盖）。
@@ -92,6 +111,8 @@ class PetApplication {
   private readonly behaviorManager: BehaviorManager;
   private readonly interactionManager: InteractionManager;
   private readonly pluginHost: PluginHost;
+  /** 摄像头采集（3.5）：只在主进程要求时采一帧并回传。 */
+  private readonly cameraSensor: CameraSensor;
 
   private plugins: readonly DiscoveredPlugin[] = [];
   private currentRegion: PetRegion = 'outside';
@@ -212,6 +233,15 @@ class PetApplication {
         fetchPluginCode: (id) => this.runtime.fetchPluginCode(id),
       },
     });
+
+    /*
+     * 摄像头传感器（3.5）：渲染层只负责"被要求时采一帧并回传"。
+     * 是否该采、采到的帧意味着什么，全部由主进程的感知服务决定。
+     */
+    this.cameraSensor = new CameraSensor({
+      logger: this.loggerFactory.create('CameraSensor'),
+      getApi: () => this.runtime.perception(),
+    });
   }
 
   /* ------------------------------------------------------------------ */
@@ -225,6 +255,7 @@ class PetApplication {
     this.logger.info('pet renderer starting');
     this.layers.disableNativeDrag();
     this.interactionManager.attach();
+    this.cameraSensor.attach();
     this.wireManagers();
     this.wireCommands();
 
@@ -1030,11 +1061,34 @@ class PetApplication {
       readonly EMOTION: typeof EMOTION;
     };
     /** 读取主进程的 AI 状态（异步）。 */
-    readonly aiStatus: () => Promise<AIStatusView | null>;
-    /** 让桌宠说一句话（异步，走与聊天窗口同一条链路）。 */
+    readonly aiStatus: () => Promise<AIStatusView | null>;    /** 让桌宠说一句话（异步，走与聊天窗口同一条链路）。 */
     readonly aiChat: (text: string) => Promise<AIChatReply | null>;
     /** 上报一次互动（与真实点击同一条路径）。 */
     readonly aiInteract: (kind: InteractionKind) => void;
+    /**
+     * 感知模型（3.1~3.6）与状态。
+     *
+     * 与情绪同理：频率闸门、深夜判定、习惯预测这些规则**必须能被断言**，
+     * 所以把纯函数暴露给验收脚本；采集与截图仍然只在主进程发生。
+     */
+    readonly perception: {
+      readonly DEFAULT_PERCEPTION_SETTINGS: typeof DEFAULT_PERCEPTION_SETTINGS;
+      readonly gateIntervention: typeof gateIntervention;
+      readonly planIntervention: typeof planIntervention;
+      readonly inferUserState: typeof inferUserState;
+      readonly isLateNight: typeof isLateNight;
+      readonly isQuietHour: typeof isQuietHour;
+      readonly learnHabit: typeof learnHabit;
+      readonly emptyHabitProfile: typeof emptyHabitProfile;
+      readonly habitPredictionText: typeof habitPredictionText;
+      readonly topSceneAtHour: typeof topSceneAtHour;
+      readonly matchesSensitiveKeywords: typeof matchesSensitiveKeywords;
+      readonly capturePermission: typeof capturePermission;
+      readonly isPlanEnabled: typeof isPlanEnabled;
+      readonly normalizeScene: typeof normalizeScene;
+      readonly sceneLabel: typeof sceneLabel;
+    };
+    readonly perceptionStatus: () => Promise<PerceptionStatus | null>;
   } {
     return {
       bus: this.eventBus,
@@ -1066,6 +1120,33 @@ class PetApplication {
         }
       },
       aiInteract: (kind: InteractionKind) => this.runtime.ai()?.notifyInteraction(kind),
+      perception: {
+        DEFAULT_PERCEPTION_SETTINGS,
+        gateIntervention,
+        planIntervention,
+        inferUserState,
+        isLateNight,
+        isQuietHour,
+        learnHabit,
+        emptyHabitProfile,
+        habitPredictionText,
+        topSceneAtHour,
+        matchesSensitiveKeywords,
+        capturePermission,
+        isPlanEnabled,
+        normalizeScene,
+        sceneLabel,
+      },
+      perceptionStatus: async () => {
+        const bridge = this.runtime.perception();
+        if (!bridge) return null;
+        try {
+          return await bridge.status();
+        } catch (error) {
+          this.logger.warn('reading perception status failed', { error: describeError(error) });
+          return null;
+        }
+      },
     };
   }
 }
