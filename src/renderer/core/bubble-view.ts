@@ -251,12 +251,22 @@ export class BubbleView {
   /** 应用状态（显隐 + 文本）。 */
   public applyState(state: BubbleState): void {
     const visible = state.visible;
-    this.element.hidden = !visible;
+    /*
+     * 隐藏时**不摘掉元素**，只设为不可见（`pet-bubble-off`）。
+     *
+     * 为什么：主进程隐藏气泡分两拍（先不可见 -> 再收缩窗口）。若这一拍就用
+     * `display: none` 摘掉元素，元素尺寸立刻塌成 0、布局随之变化，那一帧的
+     * 像素还没画出去窗口就收缩了 —— 宠物重排（纵向位置从"气泡带下方"回到
+     * "宠物尺寸上方"）时屏幕上残留旧画面，看起来就是关闭时闪一下。
+     * 保留元素、只设 `visibility: hidden` 不触发布局变化，
+     * 才能保证"不可见"真的先画出去。
+     */
+    this.element.hidden = false;
+    this.element.classList.toggle('pet-bubble-off', !visible);
     /*
      * `ready === false` 表示布局还没定型（首次显示、行数还没量出来）。
-     * 这时**尺寸照常计算**（量行数需要宽度与字号）但**不画出来** ——
-     * 否则会先渲染一帧"按最大高度"的气泡，等行数回报后收缩，看起来就是闪一下
-     * （逐帧诊断实测：窗口 resize 两次、气泡 419px 闪到 197px、宠物跳 400+px）。
+     * 这时尺寸照常计算（量行数需要宽度与字号）但**不画出来** ——
+     * 否则会先渲染一帧"按最大高度"的气泡，等行数回报后收缩，看起来就是闪一下。
      */
     this.element.classList.toggle('pet-bubble-pending', visible && !state.ready);
     // 写**正文元素**而不是滚动容器：容器里还有正文这一层结构，不能被覆盖
@@ -268,7 +278,8 @@ export class BubbleView {
   }
 
   public isVisible(): boolean {
-    return !this.element.hidden;
+    /* 元素现在常驻（用 visibility 控制显隐），因此看类名而不是 hidden 属性 */
+    return !this.element.classList.contains('pet-bubble-off');
   }
 
   /** 当前气泡高度（px）—— 渲染层用它判断"回报后布局是否真的变了"。 */

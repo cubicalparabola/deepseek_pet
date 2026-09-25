@@ -55,6 +55,19 @@ export interface BubbleControllerDeps {
   notify(payload: BubblePayload): void;
 }
 
+/**
+ * 隐藏气泡时"先不可见、后收缩窗口"的**第二拍延迟**（毫秒）。
+ *
+ * 60ms ≈ 3~4 帧，足够让"气泡不可见"画出去再收缩窗口。
+ * 可用环境变量 `DESKTOP_PET_SHRINK_MS` 覆盖 —— 抓屏诊断
+ * （`tools/diag-hide-two-beat.cjs`）需要把它拉长到 1s 以上才能逐帧看清，
+ * 因为 `desktopCapturer` 每帧要约 800ms。
+ */
+function shrinkDelayMs(): number {
+  const raw = Number(process.env.DESKTOP_PET_SHRINK_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 60;
+}
+
 export class BubbleController {
   private readonly deps: BubbleControllerDeps;
   private state: BubbleState = { visible: false, text: '', ready: false };
@@ -77,6 +90,8 @@ export class BubbleController {
   private measureFallback: ReturnType<typeof setTimeout> | null = null;
   /** 揭示定时器：窗口生效 + 宠物重排之后再让气泡可见。 */
   private revealTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 收缩定时器：气泡先不可见，再延后收缩窗口。 */
+  private shrinkTimer: ReturnType<typeof setTimeout> | null = null;
 
   public constructor(deps: BubbleControllerDeps) {
     this.deps = deps;
@@ -132,6 +147,11 @@ export class BubbleController {
     const wasVisible = this.state.visible;
     const textChanged = text !== this.state.text;
     if (textChanged) this.textLines = null;
+    /* 取消可能还在等待的"收缩窗口"，否则它会把刚展开的窗口又收回去 */
+    if (this.shrinkTimer !== null) {
+      clearTimeout(this.shrinkTimer);
+      this.shrinkTimer = null;
+    }
 
     const needsMeasure = (!wasVisible || textChanged) && this.textLines === null;
     this.state = { visible: true, text, ready: !needsMeasure };
@@ -225,7 +245,17 @@ export class BubbleController {
     this.measureFallback = null;
   }
 
-  /** 隐藏气泡（窗口收回宠物尺寸）。 */
+  /**
+   * 隐藏气泡。
+   *
+   * 与显示对称，也分两拍：
+   *   1. 先让气泡**不可见**（但先不收缩窗口、也不改布局）；
+   *   2. 等一帧多（≈60ms）再收缩窗口。
+   *
+   * 为什么要这样：若"收缩窗口"和"隐藏气泡"同帧发生，气泡会在被隐藏之前
+   * 先按**收缩后的布局**重新定位（被推到宠物中央那一带）再消失，
+   * 看起来就是关闭时也闪一下（用户反馈）。
+   */
   public hide(): BubblePayload {
     const wasVisible = this.state.visible;
     this.clearMeasureFallback();
@@ -234,10 +264,33 @@ export class BubbleController {
       this.revealTimer = null;
     }
     this.awaitingMeasure = false;
-    this.state = { visible: false, text: this.state.text, ready: false };
     this.textLines = null;
-    this.applyLayout(wasVisible ? this.deps.getPetSize() : null);
+    this.state = { visible: false, text: this.state.text, ready: false };
+
+    if (!wasVisible) {
+      /* 本来就是隐藏的：什么都不用做 */
+      this.notifyOnly();
+      return this.payload();
+    }
+
+    /* 第一拍：只让气泡不可见（布局与窗口都先不动） */
+    this.notifyOnly();
+    this.scheduleShrink();
     return this.payload();
+  }
+
+  /**
+   * 第二拍：收缩窗口回宠物尺寸。
+   *
+   * 延后 60ms（≈3~4 帧）确保"气泡不可见"已经画出去，
+   * 再做窗口收缩与布局回收。
+   */
+  private scheduleShrink(): void {
+    if (this.shrinkTimer !== null) clearTimeout(this.shrinkTimer);
+    this.shrinkTimer = setTimeout(() => {
+      this.shrinkTimer = null;
+      this.applyLayout(this.deps.getPetSize());
+    }, shrinkDelayMs());
   }
 
   /**
