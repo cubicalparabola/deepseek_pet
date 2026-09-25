@@ -51,7 +51,7 @@ export interface TerminalTextOptions {
   readonly ttlMs?: number;
   /** 单次读取超时（毫秒，默认 8000）。 */
   readonly timeoutMs?: number;
-  /** 尾部保留行数 / 字符数（默认 30 行 / 1200 字）。 */
+  /** 尾部保留行数 / 字符数（默认 **20 行 / 800 字**；见下面 `probe()` 里的说明）。 */
   readonly maxLines?: number;
   readonly maxChars?: number;
   /** 失败退避（毫秒，默认 10 分钟；与窗口探针同样的策略）。 */
@@ -186,12 +186,16 @@ export class TerminalTextProbe {
       const raw = record.text;
       /*
        * 顺序很重要：先去控制字符 → 再打码 → 最后截尾（截尾之后才不会再漏出长串）。
-       * 默认值写在这里而不是只留在纯函数里：`PerceptionService` 目前不传这两个数，
-       * 把 30 行 / 1200 字显式写出来，读代码的人一眼就知道"实际保留多少"。
+       *
+       * 默认 **20 行 / 800 字**（一开始是 30 行 / 1200 字）：用户日志里出现过
+       * `terminal text captured` 紧接着 `模型返回了空内容` —— 终端那段原样文本
+       * 把预算吃在了思考过程里。文本短一点，触发这种情况的概率就低一点，
+       * 而"最后十几行"对判断"在跑什么"已经够了。视觉分析侧另有兜底重试
+       * （`vision.ts` 的 `analyzeScene`：空内容时**不带终端文本**再试一次）。
        */
       const cleaned = tailTerminalText(redactTerminalSecrets(stripAnsiEscape(raw)), {
-        maxLines: this.options.maxLines ?? 30,
-        maxChars: this.options.maxChars ?? 1200,
+        maxLines: this.options.maxLines ?? 20,
+        maxChars: this.options.maxChars ?? 800,
       });
       const result: TerminalTextResult & { at: number; process: string } = {
         text: cleaned,
