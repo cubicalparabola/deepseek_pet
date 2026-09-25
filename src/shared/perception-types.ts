@@ -218,6 +218,14 @@ export interface ScreenObservation {
   readonly summary: string;
   /** 建议（可为空）。 */
   readonly suggestion: string;
+  /**
+   * **凭什么这么判断**（场景纠正的理由，例如"编辑器窗口标题（code）"）。
+   *
+   * 为什么值得落进观察记录：用户复盘时会问"她当时依据什么认成写代码"，
+   * 而理由原来只进了主进程日志（debug 级），面板与感知日志里看不到。
+   * 空串/缺省 = 没有纠正（用的是模型原判）。
+   */
+  readonly evidence?: string;
   /** 这次观察是否真的调用了模型。 */
   readonly mode: 'llm' | 'local';
   readonly tokens: number;

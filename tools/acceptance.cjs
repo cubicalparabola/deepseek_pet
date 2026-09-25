@@ -3300,6 +3300,64 @@ app.whenReady().then(async () => {
     JSON.stringify(timelineStatus),
   );
 
+  /*
+   * 感知日志的**时间与详细程度**（用户实测报的两个问题）。
+   *
+   * 时间：原来写的是 `observation.at.slice(11,16)` —— 那是 ISO(**UTC**) 的时分，
+   * UTC+8 下整份日志差 8 小时。现在统一走 `formatLogTimestamp()`（本地时间 + 秒）。
+   * 详细：原来只有"写代码（code）"，看不出她在做什么、凭什么这么判、看没看到网址/窗口、
+   * 走没走模型；现在一行里全都有（`formatObservationLogLine()`，文件与面板共用）。
+   */
+  const logFormat = await run(`(() => {
+    const model = window.petDebug.perception;
+    const iso = '2025-03-01T00:30:45.000Z';
+    const local = new Date(iso);
+    const pad = (n) => String(n).padStart(2, '0');
+    const expectedLocal = local.getFullYear() + '-' + pad(local.getMonth() + 1) + '-' + pad(local.getDate())
+      + ' ' + pad(local.getHours()) + ':' + pad(local.getMinutes()) + ':' + pad(local.getSeconds());
+    const rich = model.formatObservationLogLine({
+      at: iso, scene: 'coding', app: 'code', activity: '在写一个探针',
+      url: 'github.com', windowTitle: 'probe.cjs - Visual Studio Code',
+      sensitive: false, focus: 'shallow', summary: '', suggestion: '',
+      mode: 'llm', tokens: 860, evidence: '编辑器窗口标题（code）',
+    });
+    const plain = model.formatObservationLogLine({
+      at: iso, scene: 'terminal', app: 'windowsterminal', activity: '正在使用控制台',
+      sensitive: false, focus: 'unknown', summary: '', suggestion: '', mode: 'local', tokens: 0,
+    });
+    return {
+      timestamp: model.formatLogTimestamp(iso),
+      expectedLocal,
+      utcSlice: iso.slice(11, 16),
+      rich,
+      plain,
+      richParts: rich.split('｜').length,
+    };
+  })()`);
+  record(
+    '感知：日志时间戳是本地时间且带秒（原来写的是 UTC 时分，差一个时区）',
+    logFormat.timestamp === logFormat.expectedLocal &&
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(logFormat.timestamp) &&
+      // 这条断言的意义就在这儿：UTC 切片与本地渲染**不同**，才说明修的是真问题
+      logFormat.utcSlice !== logFormat.timestamp.slice(11, 16),
+    JSON.stringify(logFormat),
+  );
+  record(
+    '感知：日志行够详细（场景/应用 + 在做什么 + 网址 + 窗口 + 切换 + 依据 + 走没走模型）',
+    logFormat.rich.includes('写代码（code）') &&
+      logFormat.rich.includes('在写一个探针') &&
+      logFormat.rich.includes('github.com') &&
+      logFormat.rich.includes('窗口 probe.cjs - Visual Studio Code') &&
+      logFormat.rich.includes('频繁切换') &&
+      logFormat.rich.includes('依据 编辑器窗口标题（code）') &&
+      logFormat.rich.includes('大模型 860 token') &&
+      // 场景｜在做什么｜网址｜窗口｜切换｜依据｜模型 = 7 段（多一段说明有人往里塞了没设计过的字段）
+      logFormat.richParts === 7 &&
+      logFormat.plain.includes('正在使用控制台') &&
+      logFormat.plain.includes('仅窗口信息（没走模型）'),
+    JSON.stringify(logFormat),
+  );
+
   record(
     '感知：前台是终端就直接给「正在使用控制台」（固定结论，不截图不调模型，也没有额外开关）',
     terminalRule.isTerminal === true &&

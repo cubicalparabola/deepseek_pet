@@ -1016,8 +1016,48 @@ export function terminalObservationFor(
   };
 }
 
-/** 当前是否能采集；不能时给出人类可读原因（UI 直接显示）。 */
-export function capturePermission(settings: PerceptionSettings): { allowed: boolean; reason: string } {
+/**
+ * 日志里的时间戳（**本地时间**，带秒）。
+ *
+ * 为什么单独一个函数：日志行原来写的是 `observation.at.slice(11, 16)` —— 那是
+ * **ISO(UTC)** 的时分，UTC+8 下整份日志会差 8 小时（用户实测报的"时间不对"）。
+ * 秒也不能省：采样间隔就是 30 秒，只有分钟的话几条观察会挤在同一个时间点。
+ *
+ * @param iso ISO 时间串或毫秒时间戳
+ * @returns `YYYY-MM-DD HH:MM:SS`（本地）；无法解析时返回空串（调用方跳过这一行）
+ */
+export function formatLogTimestamp(iso: string | number): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
+    + `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+/**
+ * 一条观察在日志里的**完整一行**（文件与面板共用，保证两处措辞一致）。
+ *
+ * 为什么要这么详细：用户报"感知日志不如对话框详细"。对话框里有她的原话、时间、
+ * 上下文；而日志原来只有"写代码（code）" —— 复盘时看不出**她认为你在做什么**（activity）、
+ * **凭什么这么认**（evidence：场景纠正理由）、**看没看到网址/窗口**、以及**是不是走了模型**。
+ * 这些正是"可审计"要回答的东西，所以全部摊在一行里，用 `｜` 分隔（便于扫读）。
+ */
+export function formatObservationLogLine(observation: ScreenObservation): string {
+  const parts: string[] = [];
+  parts.push(`${sceneLabel(observation.scene)}${observation.app.trim() === '' ? '' : `（${observation.app.trim()}）`}`);
+  if (observation.activity.trim() !== '') parts.push(observation.activity.trim());
+  if ((observation.url ?? '') !== '') parts.push(observation.url as string);
+  if ((observation.windowTitle ?? '') !== '') parts.push(`窗口 ${observation.windowTitle}`);
+  if (observation.focus === 'shallow') parts.push('频繁切换');
+  if (observation.sensitive) parts.push('判定为私人内容');
+  // 依据与 activity 重复时不再写一遍（本地降级路径就是拿纠正理由当 activity 的）
+  const evidence = (observation.evidence ?? '').trim();
+  if (evidence !== '' && evidence !== observation.activity.trim()) parts.push(`依据 ${evidence}`);
+  parts.push(observation.mode === 'llm' ? `大模型 ${observation.tokens} token` : '仅窗口信息（没走模型）');
+  return parts.join('｜');
+}
+
+/** 当前是否能采集；不能时给出人类可读原因（UI 直接显示）。 */export function capturePermission(settings: PerceptionSettings): { allowed: boolean; reason: string } {
   if (settings.privacyMode) return { allowed: false, reason: '隐私模式开启中（一键停止一切采集）' };
   if (!settings.screen) return { allowed: false, reason: '屏幕感知开关未打开' };
   return { allowed: true, reason: '' };

@@ -104,6 +104,26 @@ app.whenReady().then(async () => {
   const first = recent[0] ?? null;
 
   /*
+   * 顺手核一遍**感知日志文件**（用户报过"时间不对、不够详细"）：
+   * 真机上跑出来的那份 `perception-log.md`，最后一条 [observation] 行必须是
+   * `- YYYY-MM-DD HH:MM:SS · [observation] …`（**本地**时间 + 秒），且字段齐全（用 `｜` 分隔）。
+   */
+  const logPath = join(perceptionDir, 'perception-log.md');
+  const logText = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
+  const observationLines = logText.split('\n').filter((line) => line.includes('· [observation] '));
+  const lastObservationLine = observationLines[observationLines.length - 1] ?? '';
+  const parsedLine = /^- (\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2}):(\d{2}) · \[observation\] (.+)$/.exec(lastObservationLine);
+  const localNow = new Date();
+  const logCheck = {
+    line: lastObservationLine.slice(0, 200),
+    matched: parsedLine !== null,
+    dateIsLocalToday: parsedLine !== null && parsedLine[1] === `${localNow.getFullYear()}-${String(localNow.getMonth() + 1).padStart(2, '0')}-${String(localNow.getDate()).padStart(2, '0')}`,
+    // 允许跨小时边界：差不超过 1 小时就算"本地时间对上了"（UTC 写法会差 8 小时，照样会被抓住）
+    hourIsLocal: parsedLine !== null && Math.abs(Number(parsedLine[2]) - localNow.getHours()) <= 1,
+    detailed: parsedLine !== null && parsedLine[5].includes('｜'),
+  };
+
+  /*
    * 顺手截一张**有真实数据**的面板图（截图验收抓过好几次真 bug，比如复选框没回填）。
    * 滚到"今天在做什么（时间线）"那一段再截，肉眼看区间行、合计与叙述排版是否正常。
    */
@@ -149,12 +169,15 @@ app.whenReady().then(async () => {
     narrativeReturned: narrated.narrative,
     dailyMarkdownHasNarrative: dailyMarkdown.includes('她记得的今天') && dailyMarkdown.includes(narrated.narrative.slice(0, 12)),
     shot: shotPath,
+    log: logCheck,
     verdict: {
       threeSamplesMergedIntoOneSegment: recent.length === 1 && timelineJson !== null && timelineJson.segments[0].samples === 3,
       intervalHasDuration: first !== null && (new Date(first.end).getTime() - new Date(first.start).getTime()) >= 10000,
       filesWritten: timelineFile !== undefined && dailyFile !== undefined,
       narrativeWritten: narrated.narrative.length > 0 && dailyMarkdown.includes(narrated.narrative.slice(0, 12)),
       sceneFromModel: afterSamples.lastObservation !== null && afterSamples.lastObservation.scene === 'coding',
+      logLineLocalAndDetailed:
+        logCheck.matched && logCheck.dateIsLocalToday && logCheck.hourIsLocal && logCheck.detailed,
     },
   };
   writeFileSync(outFile, JSON.stringify(result, null, 1), 'utf8');

@@ -19,7 +19,7 @@ import type {
   PerceptionLogItem,
   ScreenObservation,
 } from '../../shared/perception-types';
-import { emptyHabitProfile } from '../../shared/perception';
+import { emptyHabitProfile, formatLogTimestamp, formatObservationLogLine } from '../../shared/perception';
 import type { Logger } from '../../shared/logger';
 import { describeError } from '../../shared/errors';
 
@@ -74,8 +74,17 @@ export class ObservationStore {
     return this.habits;
   }
 
-  /** 记录一次观察（追加 JSONL + 写一行可读日志）。 */
-  public recordObservation(observation: ScreenObservation, summary: string): void {
+  /**
+   * 记录一次观察（追加 JSONL + 写一行可读日志）。
+   *
+   * 日志行**自己按观察内容拼**（`formatObservationLogLine`），不再由调用方传一句摘要：
+   * 以前每个调用点各拼一句，于是面板那路和文件那路措辞不一致、字段也少
+   * （用户报"感知日志不如对话框详细"）。现在文件与面板共用同一个纯函数。
+   *
+   * 时间戳用 `formatLogTimestamp()`（**本地时间 + 秒**）：原来是 `iso.slice(11,16)`，
+   * 那是 UTC 时分，UTC+8 下整份日志差 8 小时（用户报的"时间不对"）。
+   */
+  public recordObservation(observation: ScreenObservation): void {
     /*
      * 文件名用**本地日期**：`observation.at` 是 ISO(UTC) 字符串，
      * 直接 `slice(0,10)` 会在 UTC+8 的凌晨把记录写到"昨天"的文件里，
@@ -85,7 +94,7 @@ export class ObservationStore {
     try {
       this.ensureDir();
       appendFileSync(join(this.dir, `observations-${day}.jsonl`), `${JSON.stringify(observation)}\n`, 'utf8');
-      this.appendLog(`- ${observation.at.slice(11, 16)} · ${summary}`);
+      this.appendLog(`- ${formatLogTimestamp(observation.at)} · [observation] ${formatObservationLogLine(observation)}`);
     } catch (error) {
       this.logger.warn('recording observation failed', { error: describeError(error) });
     }
@@ -104,11 +113,11 @@ export class ObservationStore {
     }
   }
 
-  /** 记一条感知日志（干预/隐私/摄像头等）。 */
+  /** 记一条感知日志（干预/隐私/摄像头等）。时间同样是**本地时间 + 秒**。 */
   public log(kind: PerceptionLogItem['kind'], text: string, at: string = new Date().toISOString()): void {
     try {
       this.ensureDir();
-      this.appendLog(`- ${at.slice(11, 16)} · [${kind}] ${text}`);
+      this.appendLog(`- ${formatLogTimestamp(at)} · [${kind}] ${text}`);
     } catch (error) {
       this.logger.warn('perception log append failed', { error: describeError(error) });
     }
@@ -181,7 +190,7 @@ export class ObservationStore {
     }
     this.habits = emptyHabitProfile();
     this.saveHabits(this.habits);
-    this.appendLog(`- ${new Date().toISOString().slice(11, 16)} · [privacy] 用户清空了感知记录`);
+    this.appendLog(`- ${formatLogTimestamp(new Date().toISOString())} · [privacy] 用户清空了感知记录`);
   }
 
   private ensureDir(): void {

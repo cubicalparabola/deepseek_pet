@@ -42,6 +42,7 @@ import {
   buildBehaviorSnapshot,
   capturePermission,
   emptyHabitProfile,
+  formatObservationLogLine,
   gateIntervention,
   habitPredictionText,
   isPlanEnabled,
@@ -50,7 +51,6 @@ import {
   learnHabit,
   planIntervention,
   refineSceneByWindow,
-  sceneLabel,
   TERMINAL_ACTIVITY_TEXT,
   terminalObservationFor,
   topSceneAtHour,
@@ -507,7 +507,7 @@ export class PerceptionService {
       this.lastObservation = terminalObservation;
       this.observations.push(terminalObservation);
       if (this.observations.length > OBSERVATION_MEMORY) this.observations.shift();
-      this.store.recordObservation(terminalObservation, `${sceneLabel(terminalObservation.scene)}（${TERMINAL_ACTIVITY_TEXT}）`);
+      this.store.recordObservation(terminalObservation);
       if (this.settings.habits) {
         this.habits = learnHabit(this.habits, terminalObservation);
         this.store.saveHabits(this.habits);
@@ -538,11 +538,8 @@ export class PerceptionService {
           this.lastObservation = observation;
           this.observations.push(observation);
           if (this.observations.length > OBSERVATION_MEMORY) this.observations.shift();
-          const label =
-            `${sceneLabel(observation.scene)}${observation.app ? `（${observation.app}）` : ''}` +
-            `${observation.url ? ` ${observation.url}` : ''}` +
-            `${observation.sensitive ? ' · 判定为私人内容' : ''}`;
-          this.store.recordObservation(observation, label);
+          // 日志行的拼装现在统一在 `formatObservationLogLine()`（文件与面板共用）
+          this.store.recordObservation(observation);
           if (this.settings.habits) {
             this.habits = learnHabit(this.habits, observation);
             this.store.saveHabits(this.habits);
@@ -568,7 +565,7 @@ export class PerceptionService {
         this.lastObservation = observation;
         this.observations.push(observation);
         if (this.observations.length > OBSERVATION_MEMORY) this.observations.shift();
-        this.store.recordObservation(observation, `${sceneLabel(observation.scene)}（仅窗口信息）`);
+        this.store.recordObservation(observation);
         if (this.settings.habits) {
           this.habits = learnHabit(this.habits, observation);
           this.store.saveHabits(this.habits);
@@ -780,7 +777,8 @@ export class PerceptionService {
       items.push({
         at: observation.at,
         kind: 'observation',
-        text: `${sceneLabel(observation.scene)}${observation.app ? `（${observation.app}）` : ''} ${observation.activity}`.trim(),
+        // 与文件里那一行**用同一个纯函数**：两处措辞不会再有差异（用户报过"日志不如对话框详细"）
+        text: formatObservationLogLine(observation),
       });
     }
     if (this.lastIntervention) {
@@ -808,20 +806,38 @@ export class PerceptionService {
     return merged;
   }
 
-  /** 读感知日志文件的尾部（`- HH:MM · [kind] text`）。 */
+  /**
+   * 读感知日志文件的尾部。
+   *
+   * 支持两种行格式（老文件里是前者，新写入的是后者）：
+   * - 新：`- 2026-09-25 21:13:05 · [kind] text`（**本地**日期 + 时间 + 秒）
+   * - 旧：`- 21:13 · text` 或 `- 21:13 · [kind] text`（只有时分，且当年写的是 UTC）
+   *
+   * 为什么要带日期：只有一个 `HH:MM` 时，**昨天的行会被算成今天**（排序与展示都会错位）。
+   * 旧格式没有日期，只能按"今天"解释 —— 这是它不可避免的缺陷，新格式已经修掉。
+   */
   private readLogFile(limit: number): PerceptionLogItem[] {
     try {
       const raw = readFileSync(this.store.logPath, 'utf8');
       const lines = raw.split('\n').filter((line) => line.startsWith('- '));
-      const day = localDay();
+      const fallbackDay = localDay();
       return lines.slice(-limit).map((line) => {
-        const matched = /^- (\d{2}:\d{2}) · \[([a-z]+)\] (.*)$/.exec(line);
-        const time = matched?.[1] ?? '00:00';
-        const kind = (matched?.[2] ?? 'system') as PerceptionLogItem['kind'];
+        const modern = /^- (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) · \[([a-z]+)\] (.*)$/.exec(line);
+        if (modern) {
+          const at = localIso(modern[1] ?? '', modern[2] ?? '');
+          return {
+            at: at ?? `${fallbackDay}T00:00:00.000Z`,
+            kind: (modern[3] ?? 'system') as PerceptionLogItem['kind'],
+            text: (modern[4] ?? '').slice(0, 400),
+          };
+        }
+        const legacy = /^- (\d{2}:\d{2}) · (?:\[([a-z]+)\] )?(.*)$/.exec(line);
+        const time = legacy?.[1] ?? '00:00';
+        const at = localIso(fallbackDay, `${time}:00`);
         return {
-          at: `${day}T${time}:00.000Z`,
-          kind,
-          text: (matched?.[3] ?? line.slice(2)).slice(0, 200),
+          at: at ?? `${fallbackDay}T00:00:00.000Z`,
+          kind: (legacy?.[2] ?? 'observation') as PerceptionLogItem['kind'],
+          text: (legacy?.[3] ?? line.slice(2)).slice(0, 400),
         };
       });
     } catch {
@@ -1002,4 +1018,26 @@ export function canCapture(settings: PerceptionSettings): boolean {
 /** 敏感内容命中时的处理提示（供 main 决定是否要窗口躲起来）。 */
 export function shouldHideForObservation(observation: ScreenObservation | null, settings: PerceptionSettings): boolean {
   return observation !== null && isSensitive(observation, settings.sensitivityKeywords);
+}
+
+/**
+ * 把"本地日期 + 本地时间"拼成 ISO（**按本地时区**解释）。
+ *
+ * 日志文件里存的是给人看的本地时间（`2026-09-25 21:13:05`），读回面板时要变成 ISO ——
+ * 这一步不能写成 `Date.parse('2026-09-25T21:13:05Z')`：那会当成 UTC，
+ * 面板上的时间就又差出一个时区（正好是用户报的"感知日志时间不对"的另一半）。
+ */
+function localIso(day: string, time: string): string | null {
+  const dayMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  const timeMatch = /^(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(time);
+  if (!dayMatch || !timeMatch) return null;
+  const date = new Date(
+    Number(dayMatch[1]),
+    Number(dayMatch[2]) - 1,
+    Number(dayMatch[3]),
+    Number(timeMatch[1]),
+    Number(timeMatch[2]),
+    Number(timeMatch[3] ?? '0'),
+  );
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }

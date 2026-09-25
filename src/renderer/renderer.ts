@@ -58,6 +58,8 @@ import {
   capturePermission,
   describeWindowContext,
   emptyHabitProfile,
+  formatLogTimestamp,
+  formatObservationLogLine,
   gateIntervention,
   habitPredictionText,
   inferUserState,
@@ -1159,6 +1161,9 @@ class PetApplication {
       readonly isTerminalProcess: typeof isTerminalProcess;
       readonly TERMINAL_ACTIVITY_TEXT: typeof TERMINAL_ACTIVITY_TEXT;
       readonly terminalObservationFor: typeof terminalObservationFor;
+      /** 感知日志的时间戳与一行观察的文案（本地时间 + 详细字段，文件与面板共用）。 */
+      readonly formatLogTimestamp: typeof formatLogTimestamp;
+      readonly formatObservationLogLine: typeof formatObservationLogLine;
       /**
        * 每天的时间线聚合（"今天 9:10–11:32 在写代码"）：合并/切分/汇总/文案/叙述提示词。
        * 全是纯函数，所以验收可以把"怎么合并、怎么跨天、idle 算不算"逐条钉死。
@@ -1266,6 +1271,8 @@ class PetApplication {
         isTerminalProcess,
         TERMINAL_ACTIVITY_TEXT,
         terminalObservationFor,
+        formatLogTimestamp,
+        formatObservationLogLine,
         timeline: {
           appendObservation,
           summarizeDay,

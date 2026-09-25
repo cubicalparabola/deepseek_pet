@@ -182,6 +182,8 @@ export class VisionAnalyzer {
         focus: parsed?.focus === 'deep' || parsed?.focus === 'shallow' ? parsed.focus : 'unknown',
         summary: '',
         suggestion: stringOr(parsed?.suggestion, '').slice(0, 120),
+        // 凭什么这么判（场景纠正理由）：进观察记录，面板与感知日志才看得出"她依据什么"
+        ...(refined.reason !== '' ? { evidence: refined.reason.slice(0, 120) } : {}),
         mode: 'llm',
         tokens: result.totalTokens,
       };
