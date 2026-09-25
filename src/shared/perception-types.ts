@@ -99,7 +99,7 @@ export interface PerceptionSettings {
    * 把它暴露在子元素的 `TextPattern` 上，一个窗口能取到 46 万字符）。
    *
    * 隐私约束（每一条都有代码落点，见 `src/main/perception/terminal-text.ts`）：
-   * 只读**最上层**那个终端、只取**尾部**约 30 行、先去 ANSI 再给密钥打码、
+   * 只读**最上层**那个终端、只取**尾部**约 20 行、先去 ANSI 再给密钥打码、
    * **绝不落盘**、命中敏感词就整段不发。
    */
   readonly terminalText: boolean;
@@ -152,7 +152,7 @@ export const DEFAULT_PERCEPTION_SETTINGS: PerceptionSettings = {
   windowListLimit: 12,
   windowProbeTtlMs: 25000,
   // 终端文本：默认开（用户明确要求"能拿到就用它辅助"）。它把"终端里到底在跑什么"
-  // 从猜测变成证据，而代价只有尾部 30 行、且绝不落盘。
+  // 从猜测变成证据，而代价只有尾部约 20 行、且绝不落盘。
   terminalText: true,
   cameraIntervalMs: 60000,
   // 唯一默认关闭的一项：摄像头必须用户显式授权（需求 3.5 原文）

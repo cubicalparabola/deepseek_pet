@@ -370,7 +370,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
    * 为什么读：终端整屏都是文字，整屏缩到 640 宽后字符只有几像素，模型读不出来就只能
    * 顺着"黑底白字像代码"猜（用户实测的误判）。而缓冲区文本拿得到（实测 Windows Terminal
    * 把它暴露在子元素的 TextPattern 上，一个窗口能取到 46 万字符）。
-   * 隐私：只读**最上层**那个终端、只取**尾部**约 30 行、先给密钥打码、命中敏感词整段不发、
+   * 隐私：只读**最上层**那个终端、只取**尾部**约 20 行、先给密钥打码、命中敏感词整段不发、
    * 绝不落盘 —— 这些都写进提示里，用户才不会担心。
    */
   const terminalTextInput = makeCheckbox('perception-terminal-text', '读终端文本辅助判断');
