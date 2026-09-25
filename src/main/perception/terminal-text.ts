@@ -14,8 +14,8 @@
  * 1. **只读**：`AutomationElement.FromHandle` + `TextPattern.DocumentRange.GetText`。
  *    不注入、不改窗口、不发按键、不碰剪贴板、不 attach 别人的控制台。
  * 2. **只读"终端类进程"**（`isTerminalProcess`）：别的窗口一律不碰。
- * 3. **只取尾部**（`tailTerminalText`，默认 30 行 / 1200 字）：缓冲区是整段历史，
- *    既没必要也不安全。
+ * 3. **只取尾部**（`tailTerminalText`，线上 **20 行 / 800 字**）：缓冲区是整段历史，
+ *    既没必要也不安全。收窄到 20/800 是因为"带终端文本时模型回了空内容"（见 `probe()` 里的说明）。
  * 4. **先打码再送出**（`redactTerminalSecrets`）：实测缓冲区里就有
  *    `?token=...` 这种地址 —— 我们只想知道"他在干什么"，不想要他的凭据。
  * 5. **绝不落盘**：文本与截图同一条纪律，只在当次请求的内存里活一次；

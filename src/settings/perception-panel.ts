@@ -375,7 +375,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
    */
   const terminalTextInput = makeCheckbox('perception-terminal-text', '读终端文本辅助判断');
   samplingSection.appendChild(checkRow(
-    '读终端文本辅助判断（只读最上层终端窗口的缓冲区尾部约 30 行；先给密钥打码、命中敏感词整段不发、绝不落盘）',
+    '读终端文本辅助判断（只读最上层终端窗口的缓冲区尾部约 20 行；先给密钥打码、命中敏感词整段不发、绝不落盘）',
     terminalTextInput,
   ));
 
