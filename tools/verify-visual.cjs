@@ -9,8 +9,15 @@ const { join } = require('node:path');
 
 const root = join(__dirname, '..');
 const outFile = join(root, 'build', 'visual.json');
+const { guardSingleInstance } = require('./lib/instance-guard.cjs');
 
 app.disableHardwareAcceleration();
+// 没有这一步：已有实例时 require(main.js) 会静默 app.quit()，结果文件保持上一次内容
+guardSingleInstance(app, {
+  onBlocked: (message) => {
+    try { writeFileSync(outFile, JSON.stringify({ fatal: message }, null, 1), 'utf8'); } catch (error) { /* 忽略 */ }
+  },
+});
 require(join(root, 'dist', 'main', 'main.js'));
 
 app.whenReady().then(async () => {

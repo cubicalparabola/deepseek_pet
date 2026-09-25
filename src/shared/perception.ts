@@ -961,9 +961,88 @@ export function isSensitive(
   return matchesSensitiveKeywords(text, keywords);
 }
 
+/**
+ * 窗口特写的裁剪矩形（纯函数，可被验收逐条钉死）。
+ *
+ * 为什么单独抽出来：这里唯一的风险是**坐标系**。`GetWindowRect` 来自 DPI 不感知的
+ * PowerShell，多数环境给的是 Windows 虚拟化后的**逻辑坐标**（＝Electron 的 DIP），
+ * 但也有环境给**物理像素**。算错的后果不是报错，而是"裁到了屏幕上完全不相干的一块"——
+ * 那比不裁更糟（模型会拿一块莫名其妙的图当窗口内容）。所以：
+ *
+ * 1. 先看矩形落在**哪套坐标**里（逻辑 or 物理），两套都不像就返回 null；
+ * 2. 再按"实际截到的像素 / 那套坐标的宽度"换算成像素；
+ * 3. 夹到画面内，太小的一块直接放弃（没有信息量，只浪费 token）。
+ *
+ * @param input.rect 最上层窗口矩形（原始坐标，不做假设）
+ * @param input.display 主屏尺寸（DIP，来自 Electron `screen`）
+ * @param input.scaleFactor 主屏缩放（DIP → 物理像素）
+ * @param input.image 实际截到的画面像素尺寸
+ */
+export function computeCloseUpCrop(input: {
+  readonly rect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | null;
+  readonly display: { readonly width: number; readonly height: number };
+  readonly scaleFactor: number;
+  readonly image: { readonly width: number; readonly height: number };
+  readonly minWidth?: number;
+  readonly minHeight?: number;
+}): { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | null {
+  const { rect, display, image } = input;
+  if (!rect) return null;
+  if (display.width <= 0 || display.height <= 0 || image.width <= 0 || image.height <= 0) return null;
+  const scaleFactor = input.scaleFactor > 0 ? input.scaleFactor : 1;
+  const physicalWidth = Math.round(display.width * scaleFactor);
+  const physicalHeight = Math.round(display.height * scaleFactor);
+  // 容差 8px：DPI 换算 / 窗口阴影常常会差那么一两像素，不值得为此放弃整张特写
+  const fits = (width: number, height: number): boolean =>
+    rect.x >= -8 && rect.y >= -8 && rect.x + rect.width <= width + 8 && rect.y + rect.height <= height + 8;
+  const inDip = fits(display.width, display.height);
+  const inPhysical = !inDip && fits(physicalWidth, physicalHeight);
+  if (!inDip && !inPhysical) return null;
+
+  const pixelsPerUnit = inDip ? image.width / display.width : image.width / physicalWidth;
+  const rawX = Math.round(rect.x * pixelsPerUnit);
+  const rawY = Math.round(rect.y * pixelsPerUnit);
+  const x = Math.max(0, Math.min(rawX, image.width - 1));
+  const y = Math.max(0, Math.min(rawY, image.height - 1));
+  const width = Math.min(Math.round(rect.width * pixelsPerUnit), image.width - x);
+  const height = Math.min(Math.round(rect.height * pixelsPerUnit), image.height - y);
+  if (width < (input.minWidth ?? 160) || height < (input.minHeight ?? 120)) return null;
+  return { x, y, width, height };
+}
+
 /** 当前是否能采集；不能时给出人类可读原因（UI 直接显示）。 */
 export function capturePermission(settings: PerceptionSettings): { allowed: boolean; reason: string } {
   if (settings.privacyMode) return { allowed: false, reason: '隐私模式开启中（一键停止一切采集）' };
   if (!settings.screen) return { allowed: false, reason: '屏幕感知开关未打开' };
   return { allowed: true, reason: '' };
+}
+
+/**
+ * 读不清时的兜底回答：**宁可说"看不清"，也不猜内容**。
+ *
+ * 这是用户明确要的行为：终端/编辑器整屏是文字，模型看不清时最省事的做法就是
+ * 顺着"看起来像代码"编一句 —— 那比不说话更糟。所以读不清时她只能给这句话。
+ */
+export const UNREADABLE_VIEW_TEXT = '屏幕上的字我实在看不清，就不乱猜你在做什么啦～';
+
+/**
+ * "看不清就不许回答内容"的**代码侧闸门**（纯函数，可被验收逐条钉死）。
+ *
+ * 为什么不能只靠提示词：`contentReadable` 是模型自己给的判断，只要它一边说
+ * "看不清"一边又写了具体内容（模型很爱这么干），那句话就会进观察记录、进日志、
+ * 甚至进她的主动开口。这里在**落盘之前**把内容清空，把"不确定就不说"变成硬约束。
+ *
+ * 注意：`app` / 场景词表 / 网址不在这里清 —— 它们是**分类结果**，不是"内容"；
+ * 而且网址另有 `storeFullUrl` 的隐私策略管着。
+ */
+export function gateUnreadableContent(input: {
+  readonly readable: boolean;
+  readonly activity: string;
+  readonly suggestion: string;
+}): { readonly activity: string; readonly suggestion: string } {
+  if (!input.readable) return { activity: '', suggestion: '' };
+  return {
+    activity: input.activity.trim().slice(0, 120),
+    suggestion: input.suggestion.trim().slice(0, 120),
+  };
 }

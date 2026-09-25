@@ -16,6 +16,7 @@ const { tmpdir } = require('node:os');
 
 const root = join(__dirname, '..');
 const outFile = join(root, 'build', 'ai-ui.json');
+const { guardSingleInstance } = require('./lib/instance-guard.cjs');
 
 /* 数据目录隔离：这个工具也会改 AI 配置，不能污染用户真实数据 */
 const dataDir = join(tmpdir(), 'desktop-pet-diag-ai-ui');
@@ -25,6 +26,12 @@ mkdirSync(dataDir, { recursive: true });
 
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+// 没有这一步：已有实例时 require(main.js) 会静默 app.quit()，本脚本"跑过了"是假象
+guardSingleInstance(app, {
+  onBlocked: (message) => {
+    try { writeFileSync(outFile, JSON.stringify({ fatal: message, steps: [] }, null, 1), 'utf8'); } catch (error) { /* 忽略 */ }
+  },
+});
 require(join(root, 'dist', 'main', 'main.js'));
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

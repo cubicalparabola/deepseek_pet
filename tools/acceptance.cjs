@@ -25,6 +25,7 @@ const { tmpdir } = require('node:os');
 
 const root = join(__dirname, '..');
 const outFile = join(root, 'build', 'acceptance.json');
+const { guardSingleInstance } = require('./lib/instance-guard.cjs');
 
 /*
  * AI 认知与人格（2.1~2.4）的数据目录必须**隔离**：
@@ -69,6 +70,21 @@ function readSavedAlwaysOnTop() {
 
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+
+/*
+ * 单实例锁护栏：没有它会**静默退出 0**，而 `build/acceptance.json` 还是上一轮那份 ——
+ * 等于把陈旧结果当成本次通过（见 tools/lib/instance-guard.cjs 的说明）。
+ */
+guardSingleInstance(app, {
+  onBlocked: (message) => {
+    try {
+      mkdirSync(join(root, 'build'), { recursive: true });
+      writeFileSync(outFile, JSON.stringify({ fatal: message, checks: [] }, null, 1), 'utf8');
+    } catch (error) {
+      console.error('WRITE_FAILED', error);
+    }
+  },
+});
 
 // 启动真实桌宠（dist 产物）
 require(join(root, 'dist', 'main', 'main.js'));
@@ -3070,6 +3086,85 @@ app.whenReady().then(async () => {
   );
 
   /*
+   * 「看不清就不回答内容」——用户明确要求的行为（终端整屏是文字，她看不清就爱顺着
+   * "看起来像代码"编）。这里钉两件事：
+   *   ① 闸门是**代码侧硬约束**：模型自报没看清时，activity / suggestion 一律清空；
+   *   ② 窗口特写的默认值正确（默认开、宽 1280、可关可调）。
+   */
+  const unreadable = await run(`(() => {
+    const model = window.petDebug.perception;
+    return {
+      gateUnreadable: model.gateUnreadableContent({ readable: false, activity: '在跑 npm run acceptance', suggestion: '试试 npm ci' }),
+      gateReadable: model.gateUnreadableContent({ readable: true, activity: '  在看终端  ', suggestion: ' 试试 npm ci ' }),
+      hedge: model.UNREADABLE_VIEW_TEXT,
+    };
+  })()`);
+  record(
+    '感知：读不清就不许回答内容（activity/suggestion 落盘前被清空，宁可少说不编）',
+    unreadable.gateUnreadable.activity === '' &&
+      unreadable.gateUnreadable.suggestion === '' &&
+      unreadable.gateReadable.activity === '在看终端' &&
+      unreadable.gateReadable.suggestion === '试试 npm ci' &&
+      typeof unreadable.hedge === 'string' &&
+      unreadable.hedge.length > 8,
+    JSON.stringify(unreadable),
+  );
+  const closeUpSettings = await run(`(async () => {
+    const status = await window.petAPI.perception.status();
+    await window.petAPI.perception.setSettings({ windowCloseUpWidth: 10 });
+    const tooSmall = (await window.petAPI.perception.status()).settings.windowCloseUpWidth;
+    await window.petAPI.perception.setSettings({ windowCloseUpWidth: 99999 });
+    const tooBig = (await window.petAPI.perception.status()).settings.windowCloseUpWidth;
+    await window.petAPI.perception.setSettings({ windowCloseUpWidth: 1280 });
+    const restored = (await window.petAPI.perception.status()).settings.windowCloseUpWidth;
+    return { enabled: status.settings.windowCloseUp, width: status.settings.windowCloseUpWidth, tooSmall, tooBig, restored };
+  })()`);
+  record(
+    '感知：窗口特写默认开启、宽度默认 1280 且被夹在 480~2560（终端文字靠它才读得清）',
+    closeUpSettings.enabled === true &&
+      closeUpSettings.width === 1280 &&
+      closeUpSettings.tooSmall === 480 &&
+      closeUpSettings.tooBig === 2560 &&
+      closeUpSettings.restored === 1280,
+    JSON.stringify(closeUpSettings),
+  );
+  /*
+   * 特写的裁剪矩形：这里是**坐标系容错**的关键（`GetWindowRect` 可能给逻辑坐标、
+   * 也可能给物理像素），算错的后果是"裁到屏幕上不相干的一块"，比不裁更糟。
+   * 三种情形都要钉死：逻辑坐标、物理坐标、两套都不像（→ 放弃这一路）。
+   */
+  const closeUpCrop = await run(`(() => {
+    const model = window.petDebug.perception;
+    const display = { width: 1536, height: 864 };
+    const frame = { width: 1920, height: 1080 };
+    const dipRect = { x: 100, y: 50, width: 800, height: 600 };
+    const physicalRect = { x: 240, y: 135, width: 1200, height: 900 };
+    const tooSmall = { x: 10, y: 10, width: 60, height: 40 };
+    return {
+      dip: model.computeCloseUpCrop({ rect: dipRect, display, scaleFactor: 1.25, image: frame }),
+      physical: model.computeCloseUpCrop({ rect: physicalRect, display, scaleFactor: 1.25, image: frame }),
+      outside: model.computeCloseUpCrop({ rect: { x: 9000, y: 9000, width: 400, height: 300 }, display, scaleFactor: 1.25, image: frame }),
+      tooSmall: model.computeCloseUpCrop({ rect: tooSmall, display, scaleFactor: 1.25, image: frame }),
+      none: model.computeCloseUpCrop({ rect: null, display, scaleFactor: 1.25, image: frame }),
+    };
+  })()`);
+  record(
+    '感知：窗口特写的裁剪矩形（逻辑坐标 / 物理坐标都能对，越界或太小就放弃这一路）',
+    closeUpCrop.dip.x === 125 &&
+      closeUpCrop.dip.y === 63 &&
+      closeUpCrop.dip.width === 1000 &&
+      closeUpCrop.dip.height === 750 &&
+      closeUpCrop.physical.x === 240 &&
+      closeUpCrop.physical.y === 135 &&
+      closeUpCrop.physical.width === 1200 &&
+      closeUpCrop.physical.height === 900 &&
+      closeUpCrop.outside === null &&
+      closeUpCrop.tooSmall === null &&
+      closeUpCrop.none === null,
+    JSON.stringify(closeUpCrop),
+  );
+
+  /*
    * 窗口上下文（用户要求："把现在启动的窗口和最上层的窗口传进去辅助判断"）。
    *
    * 实测（tools/probe-foreground-window.cjs）：PowerShell `EnumWindows` 一次能拿到
@@ -3387,6 +3482,7 @@ app.whenReady().then(async () => {
       capturing: status.capturing,
       lastError: status.lastError,
       hasObservation: status.lastObservation !== null,
+      lastCloseUp: status.lastCloseUp,
       dataDir: status.dataDir,
     };
   })()`);
@@ -3400,6 +3496,20 @@ app.whenReady().then(async () => {
     '感知：截屏 -> 视觉模型链路可运行，模型不可达时只记一条错误（不崩、不写脏观察）',
     capturePath.capturing === true && capturePath.hasObservation === false && capturePath.lastError.length > 0,
     JSON.stringify(capturePath),
+  );
+  /*
+   * 「窗口特写」必须**真的截到过**（而不只是纯函数算得对）：
+   * 这一段配了假密钥，所以 `isLLMUsable()` 为真 → tick 会走真正的截图链路
+   * （整屏 + 地址栏横条 + 窗口特写），只是最后的模型调用不可达而失败。
+   * 特写在调模型**之前**就截好了，因此 `lastCloseUp` 一定有值 ——
+   * 这条断言把"真实截图路径"与"纯函数数学"分开钉住，避免只测了后者。
+   */
+  record(
+    '感知：窗口特写在真实截图链路上真的截到了（不只是纯函数算得对）',
+    capturePath.lastCloseUp !== null &&
+      capturePath.lastCloseUp.width >= 480 &&
+      capturePath.lastCloseUp.height >= 120,
+    JSON.stringify(capturePath.lastCloseUp),
   );
   record(
     '感知：磁盘上不出现任何图像文件（截图只在内存里活一次）',

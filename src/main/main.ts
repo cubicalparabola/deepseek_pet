@@ -549,7 +549,8 @@ class DesktopPetApplication {
       lastIntervention: null,
       interventionsToday: 0,
       cameraReady: false,
-      windowContext: { count: 0, foregroundTitle: '', foregroundProcess: '', sample: [], backingOff: false },
+      windowContext: { count: 0, foregroundTitle: '', foregroundProcess: '', sample: [], foregroundRect: null, backingOff: false },
+      lastCloseUp: null,
       dataDir: aiDataDir(),
       lastError: '',
     };
