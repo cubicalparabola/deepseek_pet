@@ -18,6 +18,8 @@
     <link rel="stylesheet" href="./ai-panel.css" />
     <!-- 环境与用户感知面板的样式（内容由 perception-panel.ts 动态挂载） -->
     <link rel="stylesheet" href="./perception-panel.css" />
+    <!-- 成长与反思面板的样式（内容由 growth-panel.ts 动态挂载） -->
+    <link rel="stylesheet" href="./growth-panel.css" />
   </head>
   <body>
     <main class="panel">
@@ -78,6 +80,13 @@
         是另一套心智模型（"她能不能看我"），不该和人格设定混在一起。
       -->
       <section id="perception-panel-root" aria-label="环境与用户感知"></section>
+
+      <!--
+        成长、记忆与反思（4.1 / 4.2）：内容由 src/settings/growth-panel.ts 动态挂载。
+        这里的视觉主体是**记忆宫殿的时间轴**（4.1 的"可视化"），
+        以及她每天的反思与"她据此把自己调安静了多少"（4.2 的可解释性）。
+      -->
+      <section id="growth-panel-root" aria-label="成长、记忆与反思"></section>
     </main>
 
     <footer class="footer">

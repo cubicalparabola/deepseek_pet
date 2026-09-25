@@ -26,6 +26,7 @@ const targets = [
   ['src/settings/settings.css', 'dist/settings/settings.css'],
   ['src/settings/ai-panel.css', 'dist/settings/ai-panel.css'],
   ['src/settings/perception-panel.css', 'dist/settings/perception-panel.css'],
+  ['src/settings/growth-panel.css', 'dist/settings/growth-panel.css'],
   ['src/chat/index.html', 'dist/chat/index.html'],
   ['src/chat/chat.css', 'dist/chat/chat.css'],
 ];

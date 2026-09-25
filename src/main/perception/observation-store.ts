@@ -114,6 +114,32 @@ export class ObservationStore {
     }
   }
 
+  /** 读某天的观察记录（成长模块统计场景分布用）。 */
+  public readObservations(date: string): ScreenObservation[] {
+    return this.readJsonl<ScreenObservation>(join(this.dir, `observations-${date}.jsonl`));
+  }
+
+  /** JSONL 读取（坏行跳过，与记忆模块同一套宽容策略）。 */
+  private readJsonl<T>(file: string): T[] {
+    if (!existsSync(file)) return [];
+    try {
+      const out: T[] = [];
+      for (const line of readFileSync(file, 'utf8').split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed === '') continue;
+        try {
+          out.push(JSON.parse(trimmed) as T);
+        } catch {
+          /* 单行坏了跳过 */
+        }
+      }
+      return out;
+    } catch (error) {
+      this.logger.warn('observation file read failed', { error: describeError(error), data: { file } });
+      return [];
+    }
+  }
+
   /** 今天的观察条数（状态展示用）。 */
   public todayCount(day: string = localDay()): number {
     const file = join(this.dir, `observations-${day}.jsonl`);

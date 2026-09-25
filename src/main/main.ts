@@ -57,6 +57,9 @@ import type { PerceptionStatus, PerceptionViewMode } from '../shared/perception-
 import { DEFAULT_PERCEPTION_SETTINGS } from '../shared/perception-types';
 import { sceneLabel } from '../shared/perception';
 import { PerceptionService, viewModeLabel } from './perception/perception-service';
+import { GrowthService } from './growth/growth-service';
+import type { GrowthStatus } from '../shared/growth-types';
+import { DEFAULT_GROWTH_SETTINGS } from '../shared/growth-types';
 import { registerAssetProtocolHandler, registerAssetScheme } from './asset-protocol';
 import { AIService } from './ai/ai-service';
 import { ChatWindowManager } from './chat-window-manager';
@@ -81,6 +84,8 @@ class DesktopPetApplication {
   private aiService: AIService | null = null;
   /** 环境与用户感知（3.1~3.6）：屏幕/内容理解/行为/摄像头/习惯。 */
   private perception: PerceptionService | null = null;
+  /** 成长、记忆与反思（4.1/4.2）：记忆宫殿、每日反思、行为策略。 */
+  private growth: GrowthService | null = null;
   private chatWindow: ChatWindowManager | null = null;
   /** 桌宠"在不在场"（影响情绪衰减与是否接收点击）。 */
   private presence: PetPresence = 'visible';
@@ -182,6 +187,7 @@ class DesktopPetApplication {
     this.createAIService();
     this.createChatWindow();
     this.createPerceptionService();
+    this.createGrowthService();
 
     this.bootstrapData = this.createBootstrap();
 
@@ -252,7 +258,11 @@ class DesktopPetApplication {
        */
       getAIStatus: () => this.aiStatus(),
       setAISettings: (patch) => this.aiService?.setSettings(patch) ?? this.aiStatus(),
-      aiChat: async (text) => this.aiService?.chat(text, 'chat-window') ?? localChatFallback('AI 模块未就绪'),
+      aiChat: async (text) => {
+        // 说话同样算"回应"（比点一下更强的信号）
+        this.growth?.recordUserActivity();
+        return this.aiService?.chat(text, 'chat-window') ?? localChatFallback('AI 模块未就绪');
+      },
       aiSpeakUp: async () => this.aiService?.speakUp('tray') ?? localChatFallback('AI 模块未就绪'),
       aiHistory: () => this.aiService?.history() ?? [],
       aiMemory: () => this.aiService?.memorySnapshot() ?? emptyMemorySnapshot(),
@@ -264,7 +274,11 @@ class DesktopPetApplication {
       aiOpenDiaryDir: () => this.openPath(this.aiService?.diaryService.dataDir ?? ''),
       aiTest: async () =>
         this.aiService?.testConnection() ?? { ok: false, mode: 'local', latencyMs: 0, sample: '', error: 'AI 模块未就绪', tokens: 0 },
-      aiInteraction: (kind) => this.aiService?.notifyInteraction(kind),
+      aiInteraction: (kind) => {
+        this.aiService?.notifyInteraction(kind);
+        // 用户碰了她 = 对刚才那次主动开口的"回应"（4.2 的反馈信号）
+        this.growth?.recordUserActivity();
+      },
       aiResetEmotion: () => this.aiService?.resetEmotion() ?? this.aiStatus(),
       aiSetPresence: (presence) => {
         this.setPresence(presence);
@@ -290,6 +304,22 @@ class DesktopPetApplication {
         void this.perception?.ingestCameraFrame(dataUrl);
       },
       perceptionCameraReady: (ready, error) => this.perception?.setCameraReady(ready, error),
+
+      /* ------------------ 成长、记忆与反思（4.1 / 4.2） ------------------ */
+      getGrowthStatus: () => this.growthStatus(),
+      setGrowthSettings: (patch) => this.growth?.setSettings(patch) ?? this.growthStatus(),
+      growthAddNode: (input) => this.growth?.addNode(input) ?? this.growthStatus(),
+      growthRemoveNode: (id) => this.growth?.removeNode(id) ?? this.growthStatus(),
+      growthPinNode: (id, pinned) => this.growth?.pinNode(id, pinned) ?? this.growthStatus(),
+      growthRecallNode: async (id) => this.growth?.recallNode(id) ?? { ok: false, text: '成长模块未就绪' },
+      growthReflectNow: async () => {
+        await this.growth?.reflectNow();
+        return this.growthStatus();
+      },
+      growthResetPolicy: () => this.growth?.resetPolicy() ?? this.growthStatus(),
+      growthRefreshPalace: () => this.growth?.refreshPalace() ?? this.growthStatus(),
+      growthOpenPalace: () => this.openPath(this.growth?.palacePath ?? ''),
+      growthOpenPolicyLog: () => this.openPath(this.growth?.policyLogPath ?? ''),
       closeChatWindow: () => {
         this.chatWindow?.hide();
         return true;
@@ -352,6 +382,7 @@ class DesktopPetApplication {
       setAlwaysOnTop: (value) => this.applyAlwaysOnTop(value),
       getAIStatus: () => this.aiStatus(),
       getPerceptionStatus: () => this.perceptionStatus(),
+      getGrowthStatus: () => this.growthStatus(),
     });
   }
 
@@ -461,8 +492,18 @@ class DesktopPetApplication {
   }
 
   /** 采了一帧后要在窗口上"躲起来"（敏感内容 / 陌生人）。 */
-  private handleIntervention(plan: { text: string; animation: string | null; hide: boolean }, reason: string): void {
+  private handleIntervention(plan: { kind: string; text: string; animation: string | null; hide: boolean }, reason: string): void {
     this.logger.info('perception intervention', { data: { reason, text: plan.text.slice(0, 40) } });
+    /*
+     * 4.2 的反馈起点：记下"我说了这句话、当时是什么场景"。
+     * 之后 3 分钟里如果用户有任何互动/对话，就算"被回应"——
+     * 回应率是她反思"该不该少说话"的唯一依据。
+     */
+    this.growth?.recordIntervention({
+      kind: plan.kind,
+      text: plan.text,
+      scene: this.perception?.status().lastObservation?.scene ?? 'other',
+    });
     if (plan.text.trim() !== '') {
       this.applyBubble({ visible: true, text: plan.text, ready: false });
     }
@@ -544,6 +585,62 @@ class DesktopPetApplication {
     }
   }
 
+
+  /* ------------------------------------------------------------------ */
+  /* 成长、记忆与反思（4.1 / 4.2）                                        */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * 装配成长服务。
+   *
+   * 素材全部通过回调注入（对话来自 AI 模块、心情来自情绪模块、场景与习惯来自感知模块），
+   * 因此这里没有服务之间的 import 依赖；结论只往一个方向流：
+   * **反思 -> 策略 -> 感知模块的频率闸门**（且只能收紧）。
+   */
+  private createGrowthService(): void {
+    this.growth = new GrowthService({
+      dataDir: aiDataDir(),
+      logger: this.loggerFactory.create('Growth'),
+      getClient: () => this.aiService?.llmClient ?? null,
+      isLLMUsable: () => this.aiService?.status().usable === true,
+      getChatTurns: (date) => this.aiService?.memoryStore.turnsOn(date) ?? [],
+      getMoodCurve: (date) => this.aiService?.emotionService.moodCurve(date) ?? { start: 60, end: 60, low: 60 },
+      getSceneCounts: (date) => this.sceneCountsFor(date),
+      getHabitSamples: () => this.perception?.habitSamples() ?? 0,
+      getCurrentScene: () => this.perception?.status().lastObservation?.scene ?? 'other',
+      getPerceptionSettings: () => this.perception?.settings ?? DEFAULT_PERCEPTION_SETTINGS,
+      onPolicyChanged: (overlay) => this.perception?.setPolicyOverlay(overlay),
+      onStatus: (status) => this.ipcManager?.notifyGrowthStatus(status),
+      onSpeak: (text, animation) => this.handleSpeak({ text, animation, kind: 'proactive' }),
+    });
+    this.growth.load();
+    this.logger.info('growth module ready', { data: { nodes: this.growth.getNodes().length } });
+  }
+
+  /** 某天的场景分布（用感知服务当天的观察记录统计；没有就返回空）。 */
+  private sceneCountsFor(date: string): Record<string, number> {
+    const observations = this.perception?.observationsOn(date) ?? [];
+    const counts: Record<string, number> = {};
+    for (const observation of observations) {
+      counts[observation.scene] = (counts[observation.scene] ?? 0) + 1;
+    }
+    return counts;
+  }
+
+  private growthStatus(): GrowthStatus {
+    if (this.growth) return this.growth.status();
+    return {
+      settings: DEFAULT_GROWTH_SETTINGS,
+      palace: { nodes: [], byMonth: [], updatedAt: '', dataDir: aiDataDir(), markdownFile: '', stats: { total: 0, daysTogether: 0, since: '' } },
+      todayReflection: null,
+      recentReflections: [],
+      policy: { minIntervalFactor: 1, maxPerHourFactor: 1, sceneFactors: {}, updatedAt: '', reason: '', adjustments: 0 },
+      policyEffect: '成长模块未就绪',
+      responseStats: [],
+      dataDir: aiDataDir(),
+      lastError: '',
+    };
+  }
 
   /* ------------------------------------------------------------------ */
   /* AI 认知与人格（2.1~2.4）                                             */
@@ -840,6 +937,25 @@ class DesktopPetApplication {
           return !authorized;
         },
 
+        /* ------------------ 成长、记忆与反思（4.1 / 4.2） ------------------ */
+        onShowPalaceDigest: () => {
+          this.applyBubble({ visible: true, text: this.growth?.digest() ?? '成长模块未就绪', ready: false });
+        },
+        onOpenPalaceFile: () => {
+          this.openPath(this.growth?.palacePath ?? '');
+        },
+        onReflectNow: () => {
+          void this.growth?.reflectNow().then((entry) => {
+            this.applyBubble({ visible: true, text: entry.body, ready: false });
+            this.refreshTray();
+          });
+        },
+        onResetGrowthPolicy: () => {
+          this.growth?.resetPolicy();
+          this.refreshTray();
+        },
+        onOpenGrowthSettings: () => this.settingsWindow?.open(),
+
         onQuit: () => this.quit(),
       },
     });
@@ -1094,6 +1210,8 @@ class DesktopPetApplication {
       presence: this.presence,
       // 「感知（环境与用户）」子菜单需要当前场景/打扰次数/隐私模式
       perception: this.perceptionStatus(),
+      // 「成长与记忆」子菜单需要记忆节点数、今天的反思与当前策略
+      growth: this.growthStatus(),
     });
   }
 
@@ -1184,6 +1302,8 @@ class DesktopPetApplication {
     this.aiService?.dispose();
     // 感知侧要收尾：停采样与摄像头请求（摄像头句柄由渲染层随窗口销毁释放）
     this.perception?.dispose();
+    // 成长侧要收尾：停反思定时器（记忆与策略都已落盘）
+    this.growth?.dispose();
     this.windowManager?.markQuitting();
     this.ipcManager?.notifyShutdown();
     this.settingsWindow?.destroy();
@@ -1267,6 +1387,11 @@ class DesktopPetApplication {
       perception: this.perceptionStatus(),
       perceptionSettingsFile: join(app.getPath('userData'), 'perception-settings.json'),
       perceptionDir: join(app.getPath('userData'), 'perception'),
+      // 成长、记忆与反思（4.1/4.2）
+      growth: this.growthStatus(),
+      growthSettingsFile: join(app.getPath('userData'), 'growth-settings.json'),
+      memoryNodesFile: join(app.getPath('userData'), 'memory', 'nodes.json'),
+      reflectionDir: join(app.getPath('userData'), 'reflection'),
     };
   }
 

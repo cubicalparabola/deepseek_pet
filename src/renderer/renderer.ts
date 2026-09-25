@@ -31,6 +31,24 @@ import {
 import type { AIChatReply, AIStatusView, InteractionKind } from '../shared/ai-types';
 import type { PerceptionStatus } from '../shared/perception-types';
 import { DEFAULT_PERCEPTION_SETTINGS } from '../shared/perception-types';
+import type { GrowthStatus } from '../shared/growth-types';
+import { NODE_KINDS, POLICY_MIN_FACTOR } from '../shared/growth-types';
+import {
+  applyInsights,
+  clampOverlay,
+  defaultPolicyOverlay,
+  describePolicy,
+  effectivePerception,
+  groupByMonth,
+  heuristicInsights,
+  mergeNodes,
+  nodeId,
+  nodeLabel,
+  parseReflection,
+  responseStats,
+  sceneName,
+  suggestNodes,
+} from '../shared/growth';
 import {
   capturePermission,
   emptyHabitProfile,
@@ -1070,8 +1088,7 @@ class PetApplication {
      *
      * 与情绪同理：频率闸门、深夜判定、习惯预测这些规则**必须能被断言**，
      * 所以把纯函数暴露给验收脚本；采集与截图仍然只在主进程发生。
-     */
-    readonly perception: {
+     */    readonly perception: {
       readonly DEFAULT_PERCEPTION_SETTINGS: typeof DEFAULT_PERCEPTION_SETTINGS;
       readonly gateIntervention: typeof gateIntervention;
       readonly planIntervention: typeof planIntervention;
@@ -1089,6 +1106,32 @@ class PetApplication {
       readonly sceneLabel: typeof sceneLabel;
     };
     readonly perceptionStatus: () => Promise<PerceptionStatus | null>;
+    /**
+     * 成长与反思模型（4.1 / 4.2）。
+     *
+     * 重点在"策略只能收紧"这条不变量：`clampOverlay` / `applyInsights` /
+     * `effectivePerception` 必须是可断言的纯函数 —— 一个会自己变吵的桌宠
+     * 是不可接受的，所以这条规则值得被直接钉死。
+     */
+    readonly growth: {
+      readonly clampOverlay: typeof clampOverlay;
+      readonly applyInsights: typeof applyInsights;
+      readonly effectivePerception: typeof effectivePerception;
+      readonly defaultPolicyOverlay: typeof defaultPolicyOverlay;
+      readonly describePolicy: typeof describePolicy;
+      readonly mergeNodes: typeof mergeNodes;
+      readonly suggestNodes: typeof suggestNodes;
+      readonly groupByMonth: typeof groupByMonth;
+      readonly nodeId: typeof nodeId;
+      readonly heuristicInsights: typeof heuristicInsights;
+      readonly parseReflection: typeof parseReflection;
+      readonly responseStats: typeof responseStats;
+      readonly nodeLabel: typeof nodeLabel;
+      readonly sceneName: typeof sceneName;
+      readonly POLICY_MIN_FACTOR: typeof POLICY_MIN_FACTOR;
+      readonly NODE_KINDS: typeof NODE_KINDS;
+    };
+    readonly growthStatus: () => Promise<GrowthStatus | null>;
   } {
     return {
       bus: this.eventBus,
@@ -1144,6 +1187,34 @@ class PetApplication {
           return await bridge.status();
         } catch (error) {
           this.logger.warn('reading perception status failed', { error: describeError(error) });
+          return null;
+        }
+      },
+      growth: {
+        clampOverlay,
+        applyInsights,
+        effectivePerception,
+        defaultPolicyOverlay,
+        describePolicy,
+        mergeNodes,
+        suggestNodes,
+        groupByMonth,
+        nodeId,
+        heuristicInsights,
+        parseReflection,
+        responseStats,
+        nodeLabel,
+        sceneName,
+        POLICY_MIN_FACTOR,
+        NODE_KINDS,
+      },
+      growthStatus: async () => {
+        const bridge = this.runtime.growth();
+        if (!bridge) return null;
+        try {
+          return await bridge.status();
+        } catch (error) {
+          this.logger.warn('reading growth status failed', { error: describeError(error) });
           return null;
         }
       },

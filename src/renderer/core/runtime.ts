@@ -254,6 +254,11 @@ export class RuntimeCapabilities {
     return this.bridge?.perception;
   }
 
+  /** 成长桥（4.1 / 4.2）：桌宠窗口用它读记忆宫殿与策略状态（只读为主）。 */
+  public growth() {
+    return this.bridge?.growth;
+  }
+
   /** 读取 AI 状态（桌宠窗口自检/调试用）。 */
   public async aiStatus() {
     const bridge = this.bridge;

@@ -52,6 +52,9 @@ import {
   topSceneAtHour,
   type InterventionPlan,
 } from '../../shared/perception';
+import type { PolicyOverlay } from '../../shared/growth-types';
+import { defaultPolicyOverlay } from '../../shared/growth';
+import { clampOverlay, describePolicy, effectivePerception } from '../../shared/growth';
 import type { LLMClient } from '../ai/llm-client';
 import { LLMError } from '../ai/llm-client';
 import type { Logger } from '../../shared/logger';
@@ -146,12 +149,63 @@ export class PerceptionService {
     return this.settingsStore.get();
   }
 
+  /**
+   * 4.2 反思得出的**行为策略叠加层**（只能收紧，见 shared/growth.ts 的 clampOverlay）。
+   *
+   * 为什么不直接改用户设置：用户的配置是"上限/底线"，反思只在她允许的范围内
+   * 变得更克制。因此这里另存一份 overlay，所有决策走 `effectiveSettings()`。
+   */
+  private policyOverlay: PolicyOverlay = defaultPolicyOverlay();
+
+  /** 主进程在成长模块调整策略后调它（立即生效，不需要重启）。 */
+  public setPolicyOverlay(overlay: PolicyOverlay): void {
+    this.policyOverlay = clampOverlay(overlay);
+    const before = this.lastEffectiveKey;
+    const after = this.effectiveKey();
+    if (before !== after) {
+      this.lastEffectiveKey = after;
+      this.store.log('system', `行为策略已更新：${describePolicy(this.settings, this.policyOverlay)}`);
+      this.logger.info('perception policy overlay updated', {
+        data: {
+          minFactor: this.policyOverlay.minIntervalFactor,
+          maxFactor: this.policyOverlay.maxPerHourFactor,
+          scenes: Object.keys(this.policyOverlay.sceneFactors).length,
+        },
+      });
+    }
+    this.emitStatus();
+  }
+
+  /** 当前场景下**实际生效**的设置（用户设置 + 策略叠加层）。 */
+  public effectiveSettings(): PerceptionSettings {
+    return effectivePerception(this.settings, this.policyOverlay, this.lastObservation?.scene ?? 'other');
+  }
+
+  /** 叠加层是否需要重新计算（场景变化或策略变化时）。 */
+  private effectiveKey(): string {
+    return `${this.policyOverlay.updatedAt}|${this.lastObservation?.scene ?? 'other'}|${this.policyOverlay.adjustments}`;
+  }
+
+  private lastEffectiveKey = '';
+
   public get observationDir(): string {
     return this.store.dataDir;
   }
 
   public get logPath(): string {
     return this.store.logPath;
+  }
+
+  /** 某个日期的观察记录（成长模块统计场景分布用）。 */
+  public observationsOn(date: string): readonly ScreenObservation[] {
+    // 今天的记录在内存里（还没落盘的也算），历史日期读文件
+    if (date === localDay()) return this.observations;
+    return this.store.readObservations(date);
+  }
+
+  /** 习惯采样总数（成长模块判断"养成的习惯"用）。 */
+  public habitSamples(): number {
+    return this.habits.samples;
   }
 
   /**
@@ -597,10 +651,16 @@ export class PerceptionService {
       this.logger.debug('intervention skipped: owning switch is off', { data: { kind: plan.kind } });
       return;
     }
+    /*
+     * 频率闸门用**实际生效的设置**（用户设置 + 反思策略叠加层）：
+     * 这是 4.2 的"Behavior Update"真正起作用的地方 ——
+     * 她反思后变得更克制，体现在这里的间隔与上限上。
+     */
+    const effective = this.effectiveSettings();
     const decision = gateIntervention({
       now,
       kind: plan.kind,
-      settings: this.settings,
+      settings: effective,
       lastInterventionAt: this.lastIntervention ? Date.parse(this.lastIntervention.at) : 0,
       lastHourCount: this.interventionTimes.filter((at) => now - at < 3600000).length,
       behavior: this.behavior,

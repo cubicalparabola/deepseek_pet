@@ -44,7 +44,13 @@ import type {
   PetPresence,
 } from '../shared/ai-types';
 import { createDefaultAIStatus } from '../shared/ai-types';
-import type { PerceptionAPI } from '../shared/ipc';
+import type { GrowthAPI, PerceptionAPI } from '../shared/ipc';
+import type {
+  GrowthSettingsPatch,
+  GrowthStatus,
+  MemoryNodeKind,
+} from '../shared/growth-types';
+import { DEFAULT_GROWTH_SETTINGS } from '../shared/growth-types';
 import type {
   PerceptionLogItem,
   PerceptionSettingsPatch,
@@ -215,6 +221,33 @@ function buildPerceptionAPI(): PerceptionAPI {
 }
 
 /* -------------------------------------------------------------------------- */
+/* 成长、记忆与反思（4.1 / 4.2）：桌宠窗口与设置窗口共用一份实现                    */
+/* -------------------------------------------------------------------------- */
+
+function buildGrowthAPI(): GrowthAPI {
+  return {
+    status: (): Promise<GrowthStatus> => ipcRenderer.invoke(IpcChannels.GrowthStatusGet) as Promise<GrowthStatus>,
+    setSettings: (patch: GrowthSettingsPatch): Promise<GrowthStatus> =>
+      ipcRenderer.invoke(IpcChannels.GrowthSettingsSet, patch) as Promise<GrowthStatus>,
+    addNode: (input: { kind: MemoryNodeKind; title: string; detail: string }): Promise<GrowthStatus> =>
+      ipcRenderer.invoke(IpcChannels.GrowthNodeAdd, input) as Promise<GrowthStatus>,
+    removeNode: (id: string): Promise<GrowthStatus> =>
+      ipcRenderer.invoke(IpcChannels.GrowthNodeRemove, id) as Promise<GrowthStatus>,
+    pinNode: (id: string, pinned: boolean): Promise<GrowthStatus> =>
+      ipcRenderer.invoke(IpcChannels.GrowthNodePin, { id, pinned }) as Promise<GrowthStatus>,
+    recallNode: (id: string): Promise<{ readonly ok: boolean; readonly text: string }> =>
+      ipcRenderer.invoke(IpcChannels.GrowthNodeRecall, id) as Promise<{ readonly ok: boolean; readonly text: string }>,
+    reflectNow: (): Promise<GrowthStatus> => ipcRenderer.invoke(IpcChannels.GrowthReflectNow) as Promise<GrowthStatus>,
+    resetPolicy: (): Promise<GrowthStatus> => ipcRenderer.invoke(IpcChannels.GrowthResetPolicy) as Promise<GrowthStatus>,
+    refreshPalace: (): Promise<GrowthStatus> => ipcRenderer.invoke(IpcChannels.GrowthRefreshPalace) as Promise<GrowthStatus>,
+    openPalace: (): Promise<boolean> => ipcRenderer.invoke(IpcChannels.GrowthOpenPalace) as Promise<boolean>,
+    openPolicyLog: (): Promise<boolean> => ipcRenderer.invoke(IpcChannels.GrowthOpenPolicyLog) as Promise<boolean>,
+    onStatus: (handler: (status: GrowthStatus) => void): Unsubscribe =>
+      subscribe<GrowthStatus>(IpcChannels.CommandGrowthStatus, handler),
+  };
+}
+
+/* -------------------------------------------------------------------------- */
 /* window.settingsAPI（仅设置窗口）                                             */
 /* -------------------------------------------------------------------------- */
 
@@ -244,7 +277,30 @@ const settingsFallback: SettingsWindowBootstrap = {
   configPath: '',
   ai: createDefaultAIStatus(),
   perception: createDefaultPerceptionStatus(),
+  growth: createDefaultGrowthStatus(),
 };
+
+/** 成长状态的兜底值（preload 早于主进程数据就绪时使用）。 */
+function createDefaultGrowthStatus(): GrowthStatus {
+  return {
+    settings: DEFAULT_GROWTH_SETTINGS,
+    palace: {
+      nodes: [],
+      byMonth: [],
+      updatedAt: '',
+      dataDir: '',
+      markdownFile: '',
+      stats: { total: 0, daysTogether: 0, since: '' },
+    },
+    todayReflection: null,
+    recentReflections: [],
+    policy: { minIntervalFactor: 1, maxPerHourFactor: 1, sceneFactors: {}, updatedAt: '', reason: '', adjustments: 0 },
+    policyEffect: '还没调整过（保持你的设置）',
+    responseStats: [],
+    dataDir: '',
+    lastError: '',
+  };
+}
 
 /** 感知状态的兜底值（preload 早于主进程数据就绪时使用）。 */
 function createDefaultPerceptionStatus(): PerceptionStatus {
@@ -278,6 +334,7 @@ function buildSettingsBridge(): SettingsWindowBridge {
       subscribe<PetSettingsState>(IpcChannels.CommandSettingsChanged, handler),
     ai: buildAIAPI(),
     perception: buildPerceptionAPI(),
+    growth: buildGrowthAPI(),
   };
 }
 
@@ -405,6 +462,7 @@ function buildPetBridge(): PetBridge {
 
     ai: buildAIAPI(),
     perception: buildPerceptionAPI(),
+    growth: buildGrowthAPI(),
 
     notifyAnimationChanged: (payload: AnimationChangedPayload): void =>
       send(IpcChannels.AnimationChanged, payload),

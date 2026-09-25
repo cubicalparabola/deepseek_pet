@@ -11,9 +11,10 @@
  */
 
 import type { PetSettingsState } from './pet-size';
-import type { AIAPI, PerceptionAPI } from './ipc';
+import type { AIAPI, GrowthAPI, PerceptionAPI } from './ipc';
 import type { AIStatusView } from './ai-types';
 import type { PerceptionStatus } from './perception-types';
+import type { GrowthStatus } from './growth-types';
 
 /** 设置窗口 preload 通过 `additionalArguments` 注入的启动数据。 */
 export interface SettingsWindowBootstrap {
@@ -25,6 +26,8 @@ export interface SettingsWindowBootstrap {
   readonly ai: AIStatusView;
   /** 感知状态快照（同上）。 */
   readonly perception: PerceptionStatus;
+  /** 成长与反思状态快照（同上）。 */
+  readonly growth: GrowthStatus;
 }
 
 /** preload 命令行参数的 key 与值。 */
@@ -64,4 +67,11 @@ export interface SettingsWindowBridge {
    * 五个开关、隐私模式、采样间隔、主动打扰频率、敏感词黑名单都在这里。
    */
   readonly perception: PerceptionAPI;
+  /**
+   * 成长、记忆与反思（4.1 / 4.2）。
+   *
+   * 设置窗口是"记忆宫殿"的主界面：时间轴、手动记一笔、看她今天的反思、
+   * 以及那个最重要的安全阀 —— 「重置策略」。
+   */
+  readonly growth: GrowthAPI;
 }

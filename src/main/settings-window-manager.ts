@@ -24,6 +24,7 @@ import type { PetConfig } from '../shared/config';
 import type { PetSettingsState } from '../shared/pet-size';
 import type { AIStatusView } from '../shared/ai-types';
 import type { PerceptionStatus } from '../shared/perception-types';
+import type { GrowthStatus } from '../shared/growth-types';
 import {
   SETTINGS_BOOTSTRAP_FLAG,
   SETTINGS_WINDOW_FLAG,
@@ -44,6 +45,8 @@ export interface SettingsWindowOptions {
   readonly getAIStatus: () => AIStatusView;
   /** 感知状态快照（感知面板的初始数据 + 推送更新）。 */
   readonly getPerceptionStatus: () => PerceptionStatus;
+  /** 成长与反思状态快照（成长面板的初始数据 + 推送更新）。 */
+  readonly getGrowthStatus: () => GrowthStatus;
 }
 
 /**
@@ -77,6 +80,7 @@ export class SettingsWindowManager {
       this.pushState();
       this.pushAIStatus();
       this.pushPerceptionStatus();
+      this.pushGrowthStatus();
       return;
     }
     this.create();
@@ -120,6 +124,11 @@ export class SettingsWindowManager {
   /** 把最新感知状态推给设置窗口（当前场景/行为快照会随采样变化）。 */
   public pushPerceptionStatus(): void {
     this.sendToWindow(IpcChannels.CommandPerceptionStatus, this.options.getPerceptionStatus(), 'perception status');
+  }
+
+  /** 把最新成长状态推给设置窗口（记忆宫殿与策略会在反思后变）。 */
+  public pushGrowthStatus(): void {
+    this.sendToWindow(IpcChannels.CommandGrowthStatus, this.options.getGrowthStatus(), 'growth status');
   }
 
   private sendToWindow(channel: string, payload: unknown, what: string): void {
@@ -167,6 +176,7 @@ export class SettingsWindowManager {
       configPath: this.options.config.configPath,
       ai: this.options.getAIStatus(),
       perception: this.options.getPerceptionStatus(),
+      growth: this.options.getGrowthStatus(),
     };
 
     const webPreferences: BrowserWindowConstructorOptions['webPreferences'] = {

@@ -1,0 +1,218 @@
+/*
+ * 「成长与反思」面板样式（4.1 记忆宫殿 / 4.2 自我反思与行为策略）。
+ *
+ * 面板挂在设置页面里，因此**不重复声明 settings.css 已有的令牌**（--bg/--panel/--line/
+ * --text/--muted/--accent/--ok 全部沿用），只补三个专用变量。所有类名统一 `growth-` 前缀，
+ * 避免与设置页现有样式互相污染；卡片与控件尺寸与 AI / 感知两个面板保持一致（12px 字号、
+ * 6px 控件圆角、10px 卡片圆角），只有时间轴刻意做出辨识度：竖线 + 圆点 + 大号 emoji ——
+ * 它是"记忆宫殿"的主角。
+ */
+
+:root {
+  --growth-accent: var(--accent);
+  /* 时间轴竖线与圆点：比 --line 亮一点，才看得见"一条时间线"而不是一片背景 */
+  --growth-line-strong: color-mix(in srgb, var(--accent) 35%, var(--line));
+  --growth-danger: #ff8a8a;
+}
+
+@media (prefers-color-scheme: light) {
+  /* 浅色背景上需要更深的红色才有对比度；竖线也用更深一点的混合 */
+  :root { --growth-line-strong: color-mix(in srgb, var(--accent) 40%, var(--line)); --growth-danger: #c8392f; }
+}
+
+.growth-panel { display: flex; flex-direction: column; gap: 14px; padding-bottom: 12px; }
+
+/* ---------------------------- 卡片 / 只读读数 ---------------------------- */
+
+.growth-section {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px 14px 14px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+}
+.growth-section h2 { font-size: 13px; font-weight: 600; letter-spacing: 0.02em; }
+
+.growth-readout {
+  display: grid; grid-template-columns: 84px 1fr; gap: 4px 10px;
+  align-items: baseline; font-size: 12px;
+}
+.growth-readout-label { color: var(--muted); }
+.growth-readout-value { font-variant-numeric: tabular-nums; word-break: break-word; }
+/* 数据目录与状态行要能选中复制，抵消 body 上的全局 user-select:none */
+.growth-small { color: var(--muted); font-size: 11px; user-select: text; }
+.growth-value-ok { color: var(--ok); }
+.growth-value-muted { color: var(--muted); }
+.growth-error-text,
+.growth-status-line.growth-status-error { color: var(--growth-danger); }
+
+.growth-status-line {
+  min-height: 16px; margin: 0; color: var(--muted); font-size: 11.5px;
+  line-height: 1.5; word-break: break-word; user-select: text;
+}
+/* 与 settings.ts 的 flashSaved 同款：靠 .growth-show 淡入淡出，不占布局 */
+.growth-saved { color: var(--ok); font-size: 11.5px; opacity: 0; transition: opacity 0.18s ease; }
+.growth-saved.growth-show { opacity: 1; }
+
+/* ------------------------------- 表单行 ------------------------------- */
+
+/* 两列（标签 / 控件）；窄窗口折叠成一列，见文件末尾的 460px 断点 */
+.growth-field {
+  display: grid; grid-template-columns: 116px 1fr; gap: 6px 10px;
+  align-items: center; font-size: 12px;
+}
+.growth-field-label { color: var(--muted); }
+.growth-field .growth-hint { grid-column: 1 / -1; }
+.growth-hint { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.growth-sub-title { color: var(--text); font-weight: 600; }
+
+.growth-check { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; cursor: pointer; }
+.growth-check-input { flex-shrink: 0; margin-top: 2px; width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
+.growth-switch-item { display: flex; flex-direction: column; gap: 3px; }
+/* 说明缩进到与复选框文字对齐（15px 框 + 8px 间隙） */
+.growth-switch-hint { padding-left: 23px; }
+
+/* -------------------------------- 输入 -------------------------------- */
+
+.growth-input,
+.growth-textarea {
+  width: 100%; min-width: 0;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--text);
+}
+.growth-input { font: inherit; font-size: 12px; padding: 5px 8px; }
+.growth-textarea {
+  font: 12px/1.6 Consolas, "Cascadia Mono", monospace;
+  padding: 7px 9px; min-height: 56px; max-height: 180px;
+  resize: vertical; overflow-y: auto; user-select: text;
+}
+.growth-input:focus,
+.growth-textarea:focus { outline: none; border-color: var(--accent); }
+.growth-input:focus-visible,
+.growth-textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* -------------------------------- 按钮 -------------------------------- */
+
+.growth-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 2px; }
+.growth-btn-primary,
+.growth-btn-ghost {
+  font: inherit; font-size: 12px; padding: 5px 12px;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); color: var(--text); cursor: pointer;
+  transition: border-color 0.15s ease, filter 0.15s ease, opacity 0.15s ease;
+}
+.growth-btn-primary { border-color: var(--accent); background: var(--accent); color: #fff; font-weight: 600; }
+.growth-btn-ghost { color: var(--muted); }
+.growth-btn-primary:hover:not(:disabled),
+.growth-btn-ghost:hover:not(:disabled) { filter: brightness(1.08); }
+.growth-btn-ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--text); filter: none; }
+.growth-btn-primary:disabled,
+.growth-btn-ghost:disabled { opacity: 0.5; cursor: default; }
+.growth-btn-primary:focus-visible,
+.growth-btn-ghost:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ========================= 4.1 记忆宫殿时间轴 ========================= */
+
+.growth-palace-summary { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; user-select: text; }
+/* 竖向时间线：`::before` 画一条贯穿整列的线，虚线更有"日记本"的味道 */
+.growth-timeline {
+  position: relative; max-height: 420px; overflow-y: auto;
+  padding: 8px 4px 8px 20px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--bg);
+}
+.growth-timeline::before {
+  content: ''; position: absolute; top: 10px; bottom: 10px; left: 10px;
+  border-left: 2px dashed var(--growth-line-strong);
+}
+.growth-timeline-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+/* 月份是分组的"书签"：做成小胶囊贴在竖线上，一眼看出翻到了哪一段 */
+.growth-timeline-month {
+  position: relative; display: inline-block; font-size: 11.5px; font-weight: 600;
+  color: var(--muted); letter-spacing: 0.03em;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+  padding: 2px 9px;
+}
+.growth-timeline-nodes { display: flex; flex-direction: column; gap: 8px; }
+/* 卡片：左侧圆点由伪元素画在竖线上；内部是"emoji + 文字"两列，依据与按钮另起一行 */
+.growth-memory-card {
+  position: relative; display: grid; grid-template-columns: 26px 1fr; gap: 2px 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+}
+.growth-memory-card::before {
+  content: ''; position: absolute; top: 15px; left: -15px;
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--growth-accent); box-shadow: 0 0 0 2px var(--bg);
+}
+/* 钉住的记忆是"最重要的那几段"：整卡加一条主色边，和删除/序号都无关 */
+.growth-memory-pinned { border-left: 3px solid var(--growth-accent); }
+.growth-memory-emoji { grid-row: 1; font-size: 18px; line-height: 1.2; }
+.growth-memory-head { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.growth-memory-title { font-size: 12.5px; font-weight: 600; line-height: 1.4; word-break: break-word; }
+.growth-memory-pin { margin-left: 5px; font-size: 11px; }
+.growth-memory-meta,
+.growth-memory-detail,
+.growth-evidence,
+.growth-memory-card .growth-actions { grid-column: 2; }
+.growth-memory-meta { color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.growth-memory-hits { margin-left: 7px; color: var(--accent); }
+.growth-memory-detail { font-size: 11.5px; line-height: 1.55; word-break: break-word; user-select: text; }
+.growth-evidence { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 5px 8px; list-style: none;
+  border-left: 2px solid var(--line); background: var(--bg); border-radius: 4px; }
+.growth-evidence-item { color: var(--muted); font-size: 10.5px; line-height: 1.5; word-break: break-word; user-select: text; }
+.growth-timeline-empty { padding: 10px 2px; }
+.growth-manual-title { color: var(--text); font-weight: 600; margin-top: 2px; }
+
+/* ====================== 4.2 反思 / 策略 / 统计 ====================== */
+
+/* 反思正文是可滚动的 <pre>：正文是模型产出，只进 textContent */
+.growth-reflection-body {
+  max-height: 220px; overflow: auto; margin: 0; padding: 9px 10px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg); color: var(--text);
+  font: 12px/1.65 Consolas, "Cascadia Mono", monospace;
+  /* 中文长句没有空格可断，必须 pre-wrap + break-word 才不横向溢出 */
+  white-space: pre-wrap; word-break: break-word; user-select: text;
+}
+.growth-reflection-meta { margin: 0; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; word-break: break-word; user-select: text; }
+.growth-stats { color: var(--text); font-variant-numeric: tabular-nums; user-select: text; }
+.growth-insight-list { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.growth-insight { display: flex; align-items: baseline; gap: 8px; font-size: 11.5px; user-select: text; }
+.growth-insight-action { flex-shrink: 0; min-width: 62px; color: var(--accent); font-weight: 600; }
+.growth-insight-scene { flex-shrink: 0; min-width: 74px; color: var(--muted); }
+.growth-insight-reason { flex: 1; line-height: 1.5; word-break: break-word; }
+
+/* 只读表格：策略与反馈统计共用；数值列右对齐 + 等宽数字，方便纵向比较 */
+.growth-table { width: 100%; border-collapse: collapse; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.growth-table th,
+.growth-table td { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: right; }
+.growth-table th:first-child { text-align: left; font-weight: 400; color: var(--muted); }
+.growth-table td.growth-empty,
+.growth-table td[colspan] { text-align: left; color: var(--muted); }
+.growth-policy-meta { user-select: text; }
+.growth-policy-bound { color: var(--text); user-select: text; }
+
+/* ------------------------------ 最近反思 ------------------------------ */
+
+.growth-recent-list { display: flex; flex-direction: column; gap: 4px; max-height: 180px; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.growth-recent-item { display: flex; align-items: baseline; gap: 8px; font-size: 11.5px; user-select: text; }
+.growth-recent-date { flex-shrink: 0; color: var(--muted); font-variant-numeric: tabular-nums; }
+.growth-recent-text { flex: 1; line-height: 1.5; word-break: break-word; }
+.growth-empty { color: var(--muted); font-size: 11.5px; }
+
+/* ------------------------------- 滚动条 ------------------------------- */
+
+.growth-timeline,
+.growth-reflection-body,
+.growth-recent-list { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.growth-timeline::-webkit-scrollbar,
+.growth-reflection-body::-webkit-scrollbar,
+.growth-recent-list::-webkit-scrollbar { width: 8px; }
+.growth-timeline::-webkit-scrollbar-thumb,
+.growth-reflection-body::-webkit-scrollbar-thumb,
+.growth-recent-list::-webkit-scrollbar-thumb { border-radius: 4px; background: var(--line); }
+
+/* ---------------------------- 窄窗口折叠 ---------------------------- */
+
+@media (max-width: 460px) {
+  .growth-field,
+  .growth-readout { grid-template-columns: 1fr; }
+}

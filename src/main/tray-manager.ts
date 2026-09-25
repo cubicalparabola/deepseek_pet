@@ -76,6 +76,18 @@ export interface TrayManagerCallbacks {
   onSamplePerception(): void;
   /** 摄像头授权开关（返回切换后的授权状态）。 */
   onToggleCameraConsent(): boolean;
+
+  /* ---------------- 成长、记忆与反思（4.1 / 4.2） ---------------- */
+  /** 把"记忆宫殿"摘要显示在气泡里（她记住了哪些经历）。 */
+  onShowPalaceDigest(): void;
+  /** 打开记忆宫殿的可读镜像文件（`memory/palace.md`）。 */
+  onOpenPalaceFile(): void;
+  /** 立刻做一次自我反思（会按结论调整行为策略）。 */
+  onReflectNow(): void;
+  /** 重置行为策略（回到用户原始设置）。 */
+  onResetGrowthPolicy(): void;
+  /** 打开设置窗口的成长面板。 */
+  onOpenGrowthSettings(): void;
 }
 
 export interface TrayManagerOptions {
@@ -353,6 +365,41 @@ export class TrayManager {
     ];
   }
 
+  /**
+   * 成长与记忆子菜单（4.1 / 4.2）。
+   *
+   * 两个入口最常用：**看一眼记忆宫殿**（情绪价值）与**重置策略**（安全阀）。
+   * 后者放在这里而不是只藏在设置窗口：用户一旦觉得"她最近太安静/太吵"，
+   * 应该两次点击就能回到自己设的原始行为。
+   */
+  private buildGrowthSubmenu(): MenuItemConstructorOptions[] {
+    const callbacks = this.options.callbacks;
+    const growth = this.state.growth;
+    const nodes = growth?.palace.stats.total ?? 0;
+    const days = growth?.palace.stats.daysTogether ?? 0;
+    const adjustments = growth?.policy.adjustments ?? 0;
+    const today = growth?.todayReflection;
+    const statusLine = growth
+      ? `记忆 ${nodes} 段 · 一起 ${days} 天 · 今天反思${today ? '已写' : '未写'}`
+      : '状态未就绪';
+
+    return [
+      { label: statusLine, enabled: false },
+      ...(growth ? [{ label: `策略：${growth.policyEffect}`, enabled: false } as MenuItemConstructorOptions] : []),
+      { type: 'separator' },
+      { label: '看看我们的记忆宫殿', click: () => callbacks.onShowPalaceDigest() },
+      { label: '打开记忆宫殿文件', click: () => callbacks.onOpenPalaceFile() },
+      { type: 'separator' },
+      { label: '让她现在反思一次', click: () => callbacks.onReflectNow() },
+      {
+        label: adjustments > 0 ? `重置行为策略（已调整 ${adjustments} 次）` : '重置行为策略（还没调整过）',
+        enabled: adjustments > 0,
+        click: () => callbacks.onResetGrowthPolicy(),
+      },
+      { label: '成长与记忆设置…', click: () => callbacks.onOpenGrowthSettings() },
+    ];
+  }
+
   /** 托盘菜单（显示/隐藏、行为、尺寸、动画试放、插件、设置、退出）。 */
   private buildTrayMenu(): Menu {
     const visible = this.state.visible ?? true;
@@ -386,6 +433,7 @@ export class TrayManager {
       { label: '对话气泡（测试）', submenu: this.buildBubbleSubmenu() },
       { label: 'AI（认知与人格）', submenu: this.buildAISubmenu() },
       { label: '感知（环境与用户）', submenu: this.buildPerceptionSubmenu() },
+      { label: '成长与记忆', submenu: this.buildGrowthSubmenu() },
       { type: 'separator' },
       { label: '暂停行为', enabled: !paused, click: () => callbacks.onToggleBehavior() },
       { label: '恢复行为', enabled: paused, click: () => callbacks.onToggleBehavior() },
@@ -434,6 +482,7 @@ export class TrayManager {
       { label: '对话气泡（测试）', submenu: this.buildBubbleSubmenu() },
       { label: 'AI（认知与人格）', submenu: this.buildAISubmenu() },
       { label: '感知（环境与用户）', submenu: this.buildPerceptionSubmenu() },
+      { label: '成长与记忆', submenu: this.buildGrowthSubmenu() },
       { type: 'separator' },
       ...this.buildSizeItems(),
       { label: '显示桌宠', enabled: !visible, click: () => callbacks.onShow() },

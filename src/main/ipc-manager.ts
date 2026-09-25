@@ -39,6 +39,11 @@ import type {
   PerceptionViewMode,
   PerceptionViewResult,
 } from '../shared/perception-types';
+import type {
+  GrowthSettingsPatch,
+  GrowthStatus,
+  MemoryNodeKind,
+} from '../shared/growth-types';
 import type { PetAction } from '../shared/action-types';
 import type { DiscoveredPlugin, PluginRecord } from '../shared/plugin-types';
 import type { Logger } from '../shared/logger';
@@ -123,6 +128,19 @@ export interface IpcManagerDependencies {
   perceptionSampleNow(): Promise<PerceptionStatus>;
   perceptionCameraFrame(dataUrl: string): void;
   perceptionCameraReady(ready: boolean, error: string): void;
+
+  /* --------------------- 成长、记忆与反思（4.1 / 4.2） --------------------- */
+  getGrowthStatus(): GrowthStatus;
+  setGrowthSettings(patch: GrowthSettingsPatch): GrowthStatus;
+  growthAddNode(input: { kind: MemoryNodeKind; title: string; detail: string }): GrowthStatus;
+  growthRemoveNode(id: string): GrowthStatus;
+  growthPinNode(id: string, pinned: boolean): GrowthStatus;
+  growthRecallNode(id: string): Promise<{ readonly ok: boolean; readonly text: string }>;
+  growthReflectNow(): Promise<GrowthStatus>;
+  growthResetPolicy(): GrowthStatus;
+  growthRefreshPalace(): GrowthStatus;
+  growthOpenPalace(): boolean;
+  growthOpenPolicyLog(): boolean;
   aiOpenChat(): boolean;
   closeChatWindow(): boolean;
 }
@@ -436,6 +454,43 @@ export class IpcManager {
       return true;
     });
 
+    /* ------------------ 成长、记忆与反思（4.1 / 4.2） ------------------ */
+    /*
+     * 这一组的关键是"**可编辑 + 可回退**"：
+     * 记忆宫殿的节点能加能删能钉，反思得出的策略能一键重置 ——
+     * 会自己改变行为的系统必须给用户留一个明确的手刹。
+     */
+    this.handle(IpcChannels.GrowthStatusGet, () => this.deps.getGrowthStatus());
+    this.handle(IpcChannels.GrowthSettingsSet, (_event, patch) => {
+      const record = asRecord(patch);
+      if (record === null) {
+        throw new IpcError('growth settings patch must be an object', {
+          code: 'IPC_HANDLER_FAILED',
+          module: 'IpcManager',
+        });
+      }
+      return this.deps.setGrowthSettings(record as GrowthSettingsPatch);
+    });
+    this.handle(IpcChannels.GrowthNodeAdd, (_event, payload) => {
+      const record = asRecord(payload) ?? {};
+      return this.deps.growthAddNode({
+        kind: asString(record.kind, 'manual') as MemoryNodeKind,
+        title: asString(record.title, ''),
+        detail: asString(record.detail, ''),
+      });
+    });
+    this.handle(IpcChannels.GrowthNodeRemove, (_event, id) => this.deps.growthRemoveNode(asString(id)));
+    this.handle(IpcChannels.GrowthNodePin, (_event, payload) => {
+      const record = asRecord(payload) ?? {};
+      return this.deps.growthPinNode(asString(record.id), asBoolean(record.pinned, false));
+    });
+    this.handle(IpcChannels.GrowthNodeRecall, async (_event, id) => this.deps.growthRecallNode(asString(id)));
+    this.handle(IpcChannels.GrowthReflectNow, async () => this.deps.growthReflectNow());
+    this.handle(IpcChannels.GrowthResetPolicy, () => this.deps.growthResetPolicy());
+    this.handle(IpcChannels.GrowthRefreshPalace, () => this.deps.growthRefreshPalace());
+    this.handle(IpcChannels.GrowthOpenPalace, () => this.deps.growthOpenPalace());
+    this.handle(IpcChannels.GrowthOpenPolicyLog, () => this.deps.growthOpenPolicyLog());
+
     this.handle(IpcChannels.PluginDiscover, () => this.deps.discoverPlugins());    this.handle(IpcChannels.PluginFetchCode, async (_event, id) => this.deps.fetchPluginCode(asString(id)));
     this.handle(IpcChannels.PluginReload, async (_event, id) => this.deps.reloadPlugin(asString(id)));
     this.handle(IpcChannels.PluginList, () => this.deps.listPlugins());
@@ -526,6 +581,11 @@ export class IpcManager {
   /** 请求渲染层采集一帧摄像头画面（3.5）。 */
   public requestCameraFrame(): void {
     this.broadcast(IpcChannels.CommandPerceptionCameraRequest, {});
+  }
+
+  /** 通知界面：成长/反思状态变化（记忆宫殿与策略在反思后会变）。 */
+  public notifyGrowthStatus(status: GrowthStatus): void {
+    this.broadcast(IpcChannels.CommandGrowthStatus, status);
   }
 
   public notifyShutdown(): void {

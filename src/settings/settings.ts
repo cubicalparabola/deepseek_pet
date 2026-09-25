@@ -23,6 +23,7 @@ import {
 import type { SettingsWindowBridge } from '../shared/settings-window';
 import { mountAIPanel } from './ai-panel';
 import { mountPerceptionPanel } from './perception-panel';
+import { mountGrowthPanel } from './growth-panel';
 
 function requireElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -199,4 +200,18 @@ try {
   if (bridge) mountPerceptionPanel(requireElement('perception-panel-root'), bridge.perception, bridge.initial.perception);
 } catch (error) {
   console.error('[settings] mounting perception panel failed', error);
+}
+
+/*
+ * 成长、记忆与反思面板（4.1 / 4.2）。
+ *
+ * 这个面板承载 4.1 要求的"可视化"：记忆宫殿按月份排成时间轴，
+ * 每段经历是一张卡片（emoji + 标题 + 日期 + 细节 + 依据），
+ * 用户可以自己记一笔、删掉一段、或者让她"回忆一下"。
+ * 4.2 的反思与"她据此把自己调安静了多少"也在同一面板里 —— 可解释、可重置。
+ */
+try {
+  if (bridge) mountGrowthPanel(requireElement('growth-panel-root'), bridge.growth, bridge.initial.growth);
+} catch (error) {
+  console.error('[settings] mounting growth panel failed', error);
 }

@@ -33,6 +33,11 @@ import type {
   PerceptionViewMode,
   PerceptionViewResult,
 } from './perception-types';
+import type {
+  GrowthSettingsPatch,
+  GrowthStatus,
+  MemoryNodeKind,
+} from './growth-types';
 
 /* -------------------------------------------------------------------------- */
 /* 通道名                                                                      */
@@ -186,6 +191,34 @@ export const IpcChannels = {
   /** Renderer -> Main：摄像头就绪/失败。 */
   PerceptionCameraReady: 'pet:perception-camera-ready',
 
+  /* --------------- 成长、记忆与反思（4.1 / 4.2） ---------------
+   *
+   * 全部在主进程：记忆宫殿的节点、每天的反思、以及反思得出的行为策略。
+   * 渲染层只看到只读快照与几个明确动作（记一笔 / 删一段 / 回忆一下 / 立刻反思 / 重置策略）。
+   */
+  /** 成长状态（节点时间轴 + 今天的反思 + 当前策略 + 反馈统计）。 */
+  GrowthStatusGet: 'pet:growth-status',
+  /** 修改开关与反射时刻。 */
+  GrowthSettingsSet: 'pet:growth-settings-set',
+  /** 手动记一笔（记忆节点）。 */
+  GrowthNodeAdd: 'pet:growth-node-add',
+  /** 删除一个节点。 */
+  GrowthNodeRemove: 'pet:growth-node-remove',
+  /** 钉住/取消钉住（"这段很重要"）。 */
+  GrowthNodePin: 'pet:growth-node-pin',
+  /** 让她回忆某个节点（会说一句话）。 */
+  GrowthNodeRecall: 'pet:growth-node-recall',
+  /** 立刻写今天的反思（并按结论调整策略）。 */
+  GrowthReflectNow: 'pet:growth-reflect-now',
+  /** 重置策略（回到用户原始设置）。 */
+  GrowthResetPolicy: 'pet:growth-reset-policy',
+  /** 从今天的素材里再淘一遍节点（手动补记忆）. */
+  GrowthRefreshPalace: 'pet:growth-refresh-palace',
+  /** 打开记忆宫殿的可读镜像（`memory/palace.md`）。 */
+  GrowthOpenPalace: 'pet:growth-open-palace',
+  /** 打开策略调整历史（`reflection/policy-log.md`）。 */
+  GrowthOpenPolicyLog: 'pet:growth-open-policy-log',
+
   /* Main -> Renderer 指令 */
   CommandAction: 'pet:command-action',
   CommandSetBehaviorPaused: 'pet:command-set-behavior-paused',
@@ -201,6 +234,8 @@ export const IpcChannels = {
   CommandPerceptionStatus: 'pet:command-perception-status',
   /** Main -> 渲染层：请采集一帧摄像头画面并回传（3.5）。 */
   CommandPerceptionCameraRequest: 'pet:command-perception-camera-request',
+  /** Main -> 界面：成长/反思状态变化（记忆宫殿与策略会在反思后变）。 */
+  CommandGrowthStatus: 'pet:command-growth-status',
   CommandShutdown: 'pet:command-shutdown',
 } as const;
 
@@ -300,6 +335,8 @@ export interface TrayStatePayload {
   readonly presence?: PetPresence;
   /** 感知状态（仅供主进程构造「感知（环境与用户）」子菜单使用）。 */
   readonly perception?: PerceptionStatus;
+  /** 成长状态（仅供主进程构造「成长与记忆」子菜单使用）。 */
+  readonly growth?: GrowthStatus;
 }
 
 /** 菜单展示用的动画摘要（主进程从 Manifest 解析）。 */
@@ -491,6 +528,33 @@ export interface PerceptionAPI {
   onCameraRequest(handler: () => void): () => void;
 }
 
+/**
+ * 成长、记忆与反思 API（4.1 / 4.2）。
+ *
+ * 桌宠窗口与设置窗口共用同一个面；两件事是这里的重点：
+ * - **记忆宫殿是可编辑的**（记一笔 / 删一段 / 钉住 / 让她回忆）——
+ *   用户能改她记的东西，才谈得上"共同经历"；
+ * - **反思的结论是可回退的**（`resetPolicy`）—— 她会自己变安静，
+ *   但绝不能变成"用户控制不了的行为"。
+ */
+export interface GrowthAPI {
+  status(): Promise<GrowthStatus>;
+  setSettings(patch: GrowthSettingsPatch): Promise<GrowthStatus>;
+  addNode(input: { kind: MemoryNodeKind; title: string; detail: string }): Promise<GrowthStatus>;
+  removeNode(id: string): Promise<GrowthStatus>;
+  pinNode(id: string, pinned: boolean): Promise<GrowthStatus>;
+  /** 让她回忆这个节点（返回她说的话）。 */
+  recallNode(id: string): Promise<{ readonly ok: boolean; readonly text: string }>;
+  /** 立刻写今天的反思（会按结论调整策略）。 */
+  reflectNow(): Promise<GrowthStatus>;
+  resetPolicy(): Promise<GrowthStatus>;
+  /** 从今天的素材里再淘一遍节点。 */
+  refreshPalace(): Promise<GrowthStatus>;
+  openPalace(): Promise<boolean>;
+  openPolicyLog(): Promise<boolean>;
+  onStatus(handler: (status: GrowthStatus) => void): () => void;
+}
+
 /** `window.petAPI` 的完整形状。 */
 export interface PetBridge {  readonly runtime: RuntimeInfo;
   readonly assets: AssetAPI;
@@ -508,6 +572,8 @@ export interface PetBridge {  readonly runtime: RuntimeInfo;
   readonly ai: AIAPI;
   /** 环境与用户感知（3.1~3.6）。 */
   readonly perception: PerceptionAPI;
+  /** 成长、记忆与反思（4.1 / 4.2）。 */
+  readonly growth: GrowthAPI;
   notifyAnimationChanged(payload: AnimationChangedPayload): void;
   notifyStateChanged(payload: StateChangedPayload): void;
   notifyBehaviorPaused(paused: boolean): void;

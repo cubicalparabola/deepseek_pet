@@ -3002,7 +3002,335 @@ app.whenReady().then(async () => {
     `dir=${capturePath.dataDir} files=${JSON.stringify(perceptionFiles.slice(0, 8))}`,
   );
 
-  /* --------------------------- 收尾 --------------------------- */
+  /* ------------------ 成长、记忆与反思（4.1 / 4.2） ------------------ */
+
+  const growthInitial = await run(`(async () => {
+    const status = await window.petAPI.growth.status();
+    const methods = Object.keys(window.petAPI.growth).sort();
+    return {
+      palace: status.settings.palace,
+      reflection: status.settings.reflection,
+      policyAdapt: status.settings.policyAdapt,
+      reflectionHour: status.settings.reflectionHour,
+      nodes: status.palace.stats.total,
+      days: status.palace.stats.daysTogether,
+      hasFirstMeet: status.palace.nodes.some((node) => node.kind === 'first-meet'),
+      policyAdjustments: status.policy.adjustments,
+      policyEffect: status.policyEffect,
+      dataDir: status.dataDir,
+      methods,
+    };
+  })()`);
+  record(
+    '成长：按需求默认全开（记忆宫殿 / 自我反思 / 策略调整）',
+    growthInitial.palace === true &&
+      growthInitial.reflection === true &&
+      growthInitial.policyAdapt === true &&
+      growthInitial.policyAdjustments === 0 &&
+      typeof growthInitial.reflectionHour === 'number',
+    JSON.stringify(growthInitial),
+  );
+  record(
+    '成长：桥暴露了完整能力面（状态/开关/记一笔/删/钉/回忆/反思/重置策略）',
+    ['status', 'setSettings', 'addNode', 'removeNode', 'pinNode', 'recallNode', 'reflectNow', 'resetPolicy', 'refreshPalace', 'openPalace'].every(
+      (name) => growthInitial.methods.includes(name),
+    ),
+    JSON.stringify(growthInitial.methods),
+  );
+  record(
+    '成长：启动即写下一段"我们第一次见面"（记忆宫殿的起点）',
+    growthInitial.nodes >= 1 && growthInitial.hasFirstMeet === true,
+    JSON.stringify({ nodes: growthInitial.nodes, days: growthInitial.days, dataDir: growthInitial.dataDir }),
+  );
+
+  /* 4.1 纯函数：节点去重 / 分组 / 规则抽取 */
+  const palaceModel = await run(`(() => {
+    const model = window.petDebug.growth;
+    const at = '2025-03-05T10:00:00.000Z';
+    const base = model.mergeNodes([], [
+      { kind: 'project', title: '一起折腾桌宠', detail: '一直在忙它', at, source: 'auto', evidence: ['在写桌宠'] },
+      { kind: 'birthday', title: '一起过生日', detail: '', at, source: 'auto', evidence: [] },
+    ]);
+    const again = model.mergeNodes(base.nodes, [
+      { kind: 'project', title: '一起折腾桌宠', detail: '', at: '2025-03-20T10:00:00.000Z', source: 'auto', evidence: ['又提到了'] },
+    ]);
+    const nextMonth = model.mergeNodes(base.nodes, [
+      { kind: 'project', title: '一起折腾桌宠', detail: '', at: '2025-05-02T10:00:00.000Z', source: 'auto', evidence: [] },
+    ]);
+    const grouped = model.groupByMonth(nextMonth.nodes);
+    const suggestions = model.suggestNodes({
+      now: Date.parse(at),
+      firstMeetAt: '',
+      messages: ['今天终于把论文投出去了', '我在写毕业论文，好累', '生日快乐！'],
+      lateNight: true,
+      existing: [],
+      moodLow: 18,
+      sceneCounts: { coding: 30, reading: 12 },
+      habitSamples: 40,
+    });
+    const kinds = suggestions.map((item) => item.kind);
+    const repeatNode = again.nodes.find((node) => node.kind === 'project');
+    return {
+      merged: base.nodes.length,
+      hitsAfterRepeat: repeatNode ? repeatNode.hits : 0,
+      afterNextMonth: nextMonth.nodes.filter((node) => node.kind === 'project').length,
+      months: grouped.map((item) => item.month + ':' + item.count),
+      kindList: kinds,
+      hasFirstMeet: kinds.indexOf('first-meet') >= 0,
+      hasBirthday: kinds.indexOf('birthday') >= 0,
+      hasLateNight: kinds.indexOf('late-night') >= 0,
+      hasHabit: kinds.indexOf('habit') >= 0,
+      hasEmotion: kinds.indexOf('emotion') >= 0,
+      idStable: model.nodeId({ kind: 'project', title: 'X', at: '2025-03-01T00:00:00.000Z' }) === model.nodeId({ kind: 'project', title: 'X', at: '2025-03-28T00:00:00.000Z' }),
+      labels: [model.nodeLabel('first-meet'), model.nodeLabel('late-night')],
+    };
+  })()`);
+  record(
+    '记忆宫殿：同类同月只累加次数（去重），跨月算两段经历',
+    palaceModel.merged === 2 && palaceModel.hitsAfterRepeat === 2 && palaceModel.afterNextMonth === 2 && palaceModel.idStable === true,
+    JSON.stringify({
+      merged: palaceModel.merged,
+      hits: palaceModel.hitsAfterRepeat,
+      afterNextMonth: palaceModel.afterNextMonth,
+      idStable: palaceModel.idStable,
+    }),
+  );
+  record(
+    '记忆宫殿：按年月分组 + 节点标签带 emoji',
+    palaceModel.months.length === 2 && palaceModel.months.every((item) => /^\d{4}-\d{2}:\d+$/.test(item)) && palaceModel.labels[0].indexOf('📅') >= 0,
+    JSON.stringify({ months: palaceModel.months, labels: palaceModel.labels }),
+  );
+  record(
+    '记忆宫殿：从当天素材里能抽出第一次见面/生日/熬夜/习惯/情绪节点',
+    palaceModel.hasFirstMeet && palaceModel.hasBirthday && palaceModel.hasLateNight && palaceModel.hasHabit && palaceModel.hasEmotion,
+    JSON.stringify(palaceModel.kindList),
+  );
+
+  /* 4.2 纯函数：策略**只能收紧**（最重要的一条不变量） */
+  const policyModel = await run(`(() => {
+    const model = window.petDebug.growth;
+    const baseSettings = Object.assign({}, window.petDebug.perception.DEFAULT_PERCEPTION_SETTINGS, {
+      proactiveMinIntervalMs: 600000,
+      proactiveMaxPerHour: 4,
+    });
+    const neutral = model.defaultPolicyOverlay();
+    const quiet = model.applyInsights(neutral, [{ scene: 'coding', action: 'quiet-down', reason: '写了 3 次都没回应' }]);
+    const many = model.applyInsights(neutral, [
+      { scene: '', action: 'quiet-down', reason: 'a' },
+      { scene: '', action: 'quiet-down', reason: 'b' },
+      { scene: '', action: 'quiet-down', reason: 'c' },
+      { scene: '', action: 'quiet-down', reason: 'd' },
+      { scene: '', action: 'quiet-down', reason: 'e' },
+      { scene: '', action: 'quiet-down', reason: 'f' },
+      { scene: '', action: 'quiet-down', reason: 'g' },
+    ]);
+    const speakUp = model.applyInsights(
+      model.clampOverlay({ minIntervalFactor: 0.5, maxPerHourFactor: 0.5, sceneFactors: {}, updatedAt: '', reason: '', adjustments: 1 }),
+      [{ scene: '', action: 'speak-up', reason: '主人一直在回应' }],
+    );
+    const quietEffective = model.effectivePerception(baseSettings, quiet.overlay, 'coding');
+    const otherEffective = model.effectivePerception(baseSettings, quiet.overlay, 'reading');
+    return {
+      minFactorFloor: model.POLICY_MIN_FACTOR,
+      quietScene: quiet.overlay.sceneFactors.coding,
+      quietedInterval: quietEffective.proactiveMinIntervalMs,
+      untouchedSceneInterval: otherEffective.proactiveMinIntervalMs,
+      userInterval: baseSettings.proactiveMinIntervalMs,
+      manyFactor: many.overlay.minIntervalFactor,
+      clampedFloor: model.clampOverlay({ minIntervalFactor: 0.001, maxPerHourFactor: 0.001, sceneFactors: { coding: 9 }, updatedAt: '', reason: '', adjustments: 0 }),
+      speakUpFactor: speakUp.overlay.minIntervalFactor,
+      speakUpMax: speakUp.overlay.maxPerHourFactor,
+      effectiveMaxPerHour: quietEffective.proactiveMaxPerHour,
+      userMaxPerHour: baseSettings.proactiveMaxPerHour,
+      describe: model.describePolicy(baseSettings, quiet.overlay),
+    };
+  })()`);
+  record(
+    '反思策略：quiet-down 让该场景的打扰间隔变长（写代码时 10 到 20 分钟）',
+    Math.abs(policyModel.quietScene - 0.5) < 1e-6 &&
+      policyModel.quietedInterval === 1200000 &&
+      policyModel.untouchedSceneInterval === policyModel.userInterval,
+    JSON.stringify({
+      sceneFactor: policyModel.quietScene,
+      quieted: policyModel.quietedInterval,
+      untouched: policyModel.untouchedSceneInterval,
+      user: policyModel.userInterval,
+    }),
+  );
+  record(
+    '反思策略：反复收紧也只到下限，且永远不能被放宽到超过用户设定',
+    policyModel.manyFactor >= policyModel.minFactorFloor &&
+      policyModel.clampedFloor.minIntervalFactor === policyModel.minFactorFloor &&
+      // 场景倍率给 9（想变宽松）也必须被夹回 1 —— 只允许更克制，不允许更吵
+      policyModel.clampedFloor.sceneFactors.coding === 1,
+    JSON.stringify({ many: policyModel.manyFactor, floor: policyModel.minFactorFloor, clamped: policyModel.clampedFloor }),
+  );
+  record(
+    '反思策略：speak-up 最多回到用户设定（永远不会比她设的更频繁）',
+    policyModel.speakUpFactor === 1 && policyModel.speakUpMax === 1,
+    JSON.stringify({ factor: policyModel.speakUpFactor, max: policyModel.speakUpMax }),
+  );
+  record(
+    '反思策略：生效值只会收紧（间隔不小于用户设置、每小时上限不大于用户设置）',
+    policyModel.quietedInterval >= policyModel.userInterval &&
+      policyModel.effectiveMaxPerHour <= policyModel.userMaxPerHour &&
+      policyModel.describe.indexOf('写代码时打扰间隔') >= 0,
+    JSON.stringify({ describe: policyModel.describe, effectiveMax: policyModel.effectiveMaxPerHour, userMax: policyModel.userMaxPerHour }),
+  );
+
+  /* 4.2 纯函数：从"回应率"得出保守结论 + 宽容解析模型输出 */
+  const reflectionModel = await run(`(() => {
+    const model = window.petDebug.growth;
+    const ignored = [
+      { at: '2025-03-01T10:00:00.000Z', kind: 'long-session', text: '起来活动一下', scene: 'coding', responded: false, responseSeconds: null },
+      { at: '2025-03-01T11:00:00.000Z', kind: 'scene-change', text: '开始写代码了', scene: 'coding', responded: false, responseSeconds: null },
+      { at: '2025-03-01T12:00:00.000Z', kind: 'late-night', text: '该睡了', scene: 'coding', responded: false, responseSeconds: null },
+      { at: '2025-03-01T13:00:00.000Z', kind: 'scene-change', text: '在看视频呀', scene: 'video', responded: true, responseSeconds: 40 },
+    ];
+    const stats = model.responseStats(ignored);
+    const insights = model.heuristicInsights(ignored, stats);
+    const parsed = model.parseReflection('今天主人很忙，我说多了。\\n{"insights":[{"scene":"coding","action":"quiet-down","reason":"都没回应"}]}');
+    const broken = model.parseReflection('只有正文，没有结论段');
+    const first = parsed.insights.length > 0 ? parsed.insights[0] : null;
+    return {
+      stats: stats.map((item) => item.scene + ':' + item.responded + '/' + item.total),
+      quietScenes: insights.filter((item) => item.action === 'quiet-down').map((item) => item.scene),
+      bodyHasText: parsed.body.indexOf('主人很忙') >= 0 && parsed.body.indexOf('insights') < 0,
+      parsedAction: first ? first.action : '',
+      parsedScene: first ? first.scene : '',
+      brokenBody: broken.body,
+      brokenInsights: broken.insights.length,
+    };
+  })()`);
+  record(
+    '反思：按场景统计回应率，并据此得出"少打扰"结论（规则版，不依赖模型）',
+    reflectionModel.stats.indexOf('coding:0/3') >= 0 &&
+      reflectionModel.quietScenes.indexOf('coding') >= 0,
+    JSON.stringify(reflectionModel),
+  );
+  record(
+    '反思：宽容解析模型输出（正文与结论分离；没有结论段也能用）',
+    reflectionModel.bodyHasText === true &&
+      reflectionModel.parsedAction === 'quiet-down' &&
+      reflectionModel.parsedScene === 'coding' &&
+      reflectionModel.brokenInsights === 0 &&
+      reflectionModel.brokenBody.length > 0,
+    JSON.stringify(reflectionModel),
+  );
+
+  /* 主进程侧：记一笔 / 钉住 / 删除 / 回忆 / 反思 / 重置策略 */
+  const palaceOps = await run(`(async () => {
+    const before = await window.petAPI.growth.status();
+    const added = await window.petAPI.growth.addNode({ kind: 'milestone', title: '验收写的一笔', detail: '来自自动化验收' });
+    let node = null;
+    for (const item of added.palace.nodes) if (item.title === '验收写的一笔') node = item;
+    const pinned = node ? await window.petAPI.growth.pinNode(node.id, true) : null;
+    const recalled = node ? await window.petAPI.growth.recallNode(node.id) : { ok: false, text: '' };
+    const removed = node ? await window.petAPI.growth.removeNode(node.id) : null;
+    const refreshed = await window.petAPI.growth.refreshPalace();
+    let stillThere = false;
+    if (removed) for (const item of removed.palace.nodes) if (item.title === '验收写的一笔') stillThere = true;
+    const firstPinned = pinned && pinned.palace.nodes[0] ? pinned.palace.nodes[0].title : '';
+    return {
+      beforeCount: before.palace.stats.total,
+      addedFound: node !== null,
+      addedKind: node ? node.kind : '',
+      pinnedFirst: firstPinned === '验收写的一笔',
+      recallOk: recalled.ok === true && recalled.text.length > 0,
+      recallSample: recalled.text.slice(0, 40),
+      removed: removed ? !stillThere : false,
+      afterRefresh: refreshed.palace.stats.total,
+      markdownFile: refreshed.palace.markdownFile,
+      byMonth: refreshed.palace.byMonth.length,
+    };
+  })()`);
+  record(
+    '记忆宫殿：可以手动记一笔（并把"钉住"排到最前、可删除）',
+    palaceOps.addedFound === true && palaceOps.addedKind === 'milestone' && palaceOps.pinnedFirst === true && palaceOps.removed === true,
+    JSON.stringify(palaceOps),
+  );
+  record(
+    '记忆宫殿：可以让她"回忆"某一段（没配密钥时用模板，内容仍来自节点本身）',
+    palaceOps.recallOk === true,
+    JSON.stringify({ sample: palaceOps.recallSample, byMonth: palaceOps.byMonth }),
+  );
+  let palaceFile = { exists: false, bytes: 0 };
+  try {
+    const text = readFileSync(palaceOps.markdownFile, 'utf8');
+    palaceFile = { exists: true, bytes: text.length };
+  } catch (error) {
+    palaceFile = { exists: false, bytes: 0 };
+  }
+  record(
+    '记忆宫殿：写成可读的 palace.md（时间轴 + 依据，用户可直接改）',
+    palaceFile.exists === true && palaceFile.bytes > 40,
+    `${palaceOps.markdownFile} bytes=${palaceFile.bytes}`,
+  );
+
+  const reflectOps = await run(`(async () => {
+    const status = await window.petAPI.growth.reflectNow();
+    const today = status.todayReflection;
+    const reset = await window.petAPI.growth.resetPolicy();
+    return {
+      hasToday: today !== null,
+      source: today ? today.source : '',
+      bodyLength: today ? today.body.length : 0,
+      insights: today ? today.insights.length : 0,
+      stats: today ? today.stats : null,
+      recent: status.recentReflections.length,
+      policyAfterReset: reset.policy.adjustments,
+      policyEffect: reset.policyEffect,
+    };
+  })()`);
+  record(
+    '反思：立刻反思一次会写成第一视角正文（没密钥时来源为本地模板）并带当天数据',
+    reflectOps.hasToday === true && reflectOps.source === 'template' && reflectOps.bodyLength > 10 && reflectOps.recent >= 1 && reflectOps.stats !== null,
+    JSON.stringify({ source: reflectOps.source, body: reflectOps.bodyLength, insights: reflectOps.insights, stats: reflectOps.stats }),
+  );
+  record(
+    '反思：策略可一键重置回用户原始设置（安全阀）',
+    reflectOps.policyAfterReset === 0 && reflectOps.policyEffect.indexOf('还没调整过') >= 0,
+    JSON.stringify({ after: reflectOps.policyAfterReset, effect: reflectOps.policyEffect }),
+  );
+  let reflectionFiles = [];
+  try {
+    reflectionFiles = readdirSync(join(aiDataDir, 'reflection'));
+  } catch (error) {
+    reflectionFiles = [];
+  }
+  record(
+    '反思：反思与策略历史都落盘（json + 可读 md + 策略日志）',
+    reflectionFiles.some((name) => /^\d{4}-\d{2}-\d{2}\.json$/.test(name)) &&
+      reflectionFiles.some((name) => /^\d{4}-\d{2}-\d{2}\.md$/.test(name)) &&
+      reflectionFiles.indexOf('policy.json') >= 0,
+    JSON.stringify(reflectionFiles.slice(0, 8)),
+  );
+
+  /* 关掉成长与反思后同样不落盘（"可配置开关"的一致性） */
+  await run(`(async () => { await window.petAPI.growth.setSettings({ palace: false, reflection: false, policyAdapt: false }); return true; })()`);
+  await wait(300);
+  try {
+    rmSync(join(aiDataDir, 'memory', 'nodes.json'), { force: true });
+    rmSync(join(aiDataDir, 'reflection'), { recursive: true, force: true });
+  } catch (error) {
+    /* 目录不存在也无所谓 */
+  }
+  await run(`(async () => {
+    window.petAPI.growth.addNode({ kind: 'manual', title: '不该被写进去', detail: '' });
+    await window.petAPI.growth.reflectNow();
+    return true;
+  })()`);
+  await wait(1200);
+  const growthOffWrites = {
+    nodes: existsSync(join(aiDataDir, 'memory', 'nodes.json')),
+    reflection: existsSync(join(aiDataDir, 'reflection')),
+  };
+  record(
+    '成长：关掉开关后不落盘（记一笔与反思都不写文件）',
+    growthOffWrites.nodes === false && growthOffWrites.reflection === false,
+    JSON.stringify(growthOffWrites),
+  );
+  await run(`(async () => { await window.petAPI.growth.setSettings({ palace: true, reflection: true, policyAdapt: true }); return true; })()`);
 
   /*
    * 尺寸用例会把 settings.json 改成 100%（并触发一次真实写盘）——
@@ -3039,3 +3367,4 @@ app.whenReady().then(async () => {
 setTimeout(() => {
   finish({ fatal: 'ACCEPTANCE_TIMEOUT' });
 }, 240000);
+
