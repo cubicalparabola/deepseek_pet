@@ -842,10 +842,29 @@ app.whenReady().then(async () => {
       };
     };
     await window.petAPI.settings.setScale(0.6);
-    await wait(900);
+    /*
+     * ⚠️ 测量前必须**等窗口尺寸稳定**，不能只 sleep 固定毫秒。
+     *
+     * 气泡的隐藏是"两拍"（先不可见、再收缩窗口，中间还有 60ms 延时 + IPC 往返），
+     * 而显隐往返又会重新加宽窗口。固定 sleep 一旦恰好落在收缩/展开的过程中，
+     * 量到的 offset 就是"过渡中的那一帧"，于是这条"无累积漂移"断言会随机变红
+     * （实测同一份代码一红一绿，值还是小数说明正处在物理像素网格之外）。
+     */
+    const settleWindow = async () => {
+      let last = Number.NaN;
+      let stable = 0;
+      for (let i = 0; i < 40 && stable < 3; i++) {
+        await wait(80);
+        const key = window.innerWidth * 10000 + window.innerHeight;
+        if (key === last) stable += 1;
+        else stable = 0;
+        last = key;
+      }
+    };
+    await settleWindow();
 
     await window.petAPI.bubble.set(null);
-    await wait(700);
+    await settleWindow();
     const probeHidden = await layoutProbe();
     const descHidden = window.petApp.describeBubble();
     const padHidden = descHidden.padding;
@@ -854,14 +873,14 @@ app.whenReady().then(async () => {
     const expectedHiddenLeft = padHidden + (descHidden.windowInner.width - descHidden.petSize.width) / 2;
 
     await window.petAPI.bubble.set({ visible: true, text: '锚点测试' });
-    await wait(900);
+    await settleWindow();
     const probeShown = await layoutProbe();
     const descShown = window.petApp.describeBubble();
     const expectedShownTop = descShown.padding + descShown.bubble.height + descShown.gap;
     const expectedShownLeft = descShown.padding + (descShown.windowInner.width - descShown.petSize.width) / 2;
 
     await window.petAPI.bubble.set(null);
-    await wait(900);
+    await settleWindow();
     const probeHiddenAgain = await layoutProbe();
 
     const layout = {
@@ -935,7 +954,8 @@ app.whenReady().then(async () => {
     bubbleRun.afterHide?.visible === false &&
       bubbleRun.afterHide?.windowInner?.width === bubbleRun.afterHide?.petSize?.width &&
       bubbleRun.afterHide?.windowInner?.height === bubbleRun.afterHide?.petSize?.height,
-    JSON.stringify({ windowInner: bubbleRun.afterHide?.windowInner, petSize: bubbleRun.afterHide?.petSize }),
+    // 详情里带上 visible：失败时能立刻分清"气泡没收起来"还是"窗口没收回去"
+    JSON.stringify({ visible: bubbleRun.afterHide?.visible, windowInner: bubbleRun.afterHide?.windowInner, petSize: bubbleRun.afterHide?.petSize }),
   );
 
   /*
@@ -987,7 +1007,23 @@ app.whenReady().then(async () => {
       near(l.hiddenAgain.offsetTop, l.hidden.actual.offsetTop, 4) &&
       near(l.hiddenAgain.offsetLeft, l.hidden.actual.offsetLeft, 4);
 
-    return { sizeMatchesLayout, withinWindow, noDrift, hiddenSize: l.hidden.actual, shownSize: l.shown.actual };
+    return {
+      sizeMatchesLayout,
+      withinWindow,
+      noDrift,
+      hiddenSize: l.hidden.actual,
+      shownSize: l.shown.actual,
+      // 把三处测量的**视口尺寸**都带上：失败时一眼能看出是"窗口没收缩"还是"宠物漂了"
+      viewports: {
+        hidden: l.hidden.actual.raw.viewport,
+        shown: l.shown.actual.raw.viewport,
+        hiddenAgain: l.hiddenAgain.raw.viewport,
+      },
+      offsets: {
+        hidden: { left: l.hidden.actual.offsetLeft, top: l.hidden.actual.offsetTop },
+        hiddenAgain: { left: l.hiddenAgain.offsetLeft, top: l.hiddenAgain.offsetTop },
+      },
+    };
   })();
   record(
     '对话气泡：宠物尺寸不被窗口拉伸、不溢出窗口、显隐无累积漂移',
@@ -2796,6 +2832,30 @@ app.whenReady().then(async () => {
     '感知：敏感关键词是第二道闸（模型没看出来也不能漏）',
     perceptionModel.sensitiveKeyword === true && perceptionModel.harmless === false,
     `hit=${perceptionModel.sensitiveKeyword} miss=${perceptionModel.harmless}`,
+  );
+
+  /*
+   * 敏感词第二道闸必须**也扫窗口标题与网址**。
+   *
+   * 文档评审抓到的真 bug：早期只扫 `app + activity + summary`，而窗口标题恰恰是
+   * 文档名出现的地方（"工资表.xlsx - Excel"、"招商银行 - 转账"）——
+   * 等于把最该拦的那一路排除在保护之外。
+   */
+  const sensitiveScope = await run(`(() => {
+    const model = window.petDebug.perception;
+    const settings = model.DEFAULT_PERCEPTION_SETTINGS;
+    const base = { app: 'Excel', activity: '在处理表格', summary: '', sensitive: false };
+    return {
+      windowTitle: model.isSensitive(Object.assign({}, base, { windowTitle: '工资表 - 招商银行 - Excel' }), settings.sensitivityKeywords),
+      url: model.isSensitive(Object.assign({}, base, { url: 'bank.example.com/transfer' }), settings.sensitivityKeywords),
+      clean: model.isSensitive(Object.assign({}, base, { windowTitle: '周报.docx - Word', url: 'github.com/a/b' }), settings.sensitivityKeywords),
+      modelFlag: model.isSensitive(Object.assign({}, base, { sensitive: true }), settings.sensitivityKeywords),
+    };
+  })()`);
+  record(
+    '感知：敏感词也扫窗口标题与网址（文档名/银行页面不会被漏掉）',
+    sensitiveScope.windowTitle === true && sensitiveScope.url === true && sensitiveScope.clean === false && sensitiveScope.modelFlag === true,
+    JSON.stringify(sensitiveScope),
   );
   record(
     '感知：场景词表归一（大小写/近义词/脏数据都收敛到受控值）',

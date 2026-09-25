@@ -938,10 +938,27 @@ export function matchesSensitiveKeywords(text: string, keywords: readonly string
   });
 }
 
-/** 综合判定（模型 flag + 关键词）。 */
-export function isSensitive(observation: Pick<ScreenObservation, 'app' | 'activity' | 'summary' | 'sensitive'>, keywords: readonly string[]): boolean {
+/**
+ * 综合判定（模型 flag + 关键词）。
+ *
+ * ⚠️ 扫描范围必须包含 **`url` 与 `windowTitle`**：窗口标题恰恰是"文档名/网页标题"
+ * 出现的地方（`工资表.xlsx - Excel`、`招商银行 - 转账`），漏掉它等于把最可能泄露
+ * 私人内容的那一路排除在保护之外（文档评审抓到这个真 bug）。
+ */
+export function isSensitive(
+  observation: Pick<ScreenObservation, 'app' | 'activity' | 'summary' | 'sensitive'> &
+    Partial<Pick<ScreenObservation, 'url' | 'windowTitle'>>,
+  keywords: readonly string[],
+): boolean {
   if (observation.sensitive) return true;
-  return matchesSensitiveKeywords(`${observation.app} ${observation.activity} ${observation.summary}`, keywords);
+  const text = [
+    observation.app,
+    observation.activity,
+    observation.summary,
+    observation.url ?? '',
+    observation.windowTitle ?? '',
+  ].join(' ');
+  return matchesSensitiveKeywords(text, keywords);
 }
 
 /** 当前是否能采集；不能时给出人类可读原因（UI 直接显示）。 */

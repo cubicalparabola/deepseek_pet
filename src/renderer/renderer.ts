@@ -62,6 +62,7 @@ import {
   isLateNight,
   isPlanEnabled,
   isQuietHour,
+  isSensitive,
   isUrlLike,
   learnHabit,
   matchesAppName,
@@ -1115,6 +1116,7 @@ class PetApplication {
       readonly matchesSensitiveKeywords: typeof matchesSensitiveKeywords;
       readonly capturePermission: typeof capturePermission;
       readonly isPlanEnabled: typeof isPlanEnabled;
+      readonly isSensitive: typeof isSensitive;
       readonly normalizeScene: typeof normalizeScene;
       readonly sceneLabel: typeof sceneLabel;
       /** 场景纠正（"浏览器被认成笔记软件"这类误判的确定性补救）。 */
@@ -1206,6 +1208,7 @@ class PetApplication {
         matchesSensitiveKeywords,
         capturePermission,
         isPlanEnabled,
+        isSensitive,
         normalizeScene,
         sceneLabel,
         refineScene,

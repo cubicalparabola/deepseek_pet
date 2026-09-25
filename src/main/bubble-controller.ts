@@ -268,8 +268,19 @@ export class BubbleController {
     this.state = { visible: false, text: this.state.text, ready: false };
 
     if (!wasVisible) {
-      /* 本来就是隐藏的：什么都不用做 */
+      /*
+       * 本来就是隐藏的：但**不能直接什么都不做**。
+       *
+       * 不变量是"气泡隐藏 ⇒ 窗口 = 纯宠物尺寸"。而窗口有可能在状态隐藏的情况下
+       * 仍是气泡尺寸：迟到的 `reportTextLines`/测量兜底会 `applyLayout`，
+       * 或者上一次收缩的定时器被后来的 `show()` 取消掉了。此时如果直接返回，
+       * 那块空白就永远留在那里（实测：验收里"隐藏后窗口收回宠物尺寸"这条因此变红，
+       * 日志里最后一条 layout 还是 `visible:true / 594x486`）。
+       *
+       * 所以这里**再排一次收缩** —— 幂等、60ms 后自动收敛，不影响正常路径。
+       */
       this.notifyOnly();
+      this.scheduleShrink();
       return this.payload();
     }
 

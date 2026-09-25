@@ -181,8 +181,12 @@ export class VisionAnalyzer {
         // 只把"最上层窗口"存进观察记录（整份窗口列表只进提示词，不落盘）
         ...(foreground && foreground.title !== '' ? { windowTitle: normalizeWindowTitle(foreground.title).slice(0, 120) } : {}),
         activity: activity.slice(0, 120),
-        // 两道闸：模型判定 + 关键词命中（见 shared/perception 的 isSensitive 说明）
-        sensitive: modelSensitive || matchesSensitiveKeywords(`${app} ${activity}`, keywords),
+        // 两道闸：模型判定 + 关键词命中。
+        // 关键词要扫 **app / activity / 网址 / 最上层窗口标题** —— 窗口标题恰恰是
+        // 文档名出现的地方（"工资表.xlsx"），漏掉它就等于漏掉最该拦的一路。
+        sensitive:
+          modelSensitive ||
+          matchesSensitiveKeywords(`${app} ${activity} ${storedUrl} ${foreground?.title ?? ''}`, keywords),
         focus: parsed?.focus === 'deep' || parsed?.focus === 'shallow' ? parsed.focus : 'unknown',
         summary: '',
         suggestion: stringOr(parsed?.suggestion, '').slice(0, 120),
