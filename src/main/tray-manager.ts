@@ -64,7 +64,7 @@ export interface TrayManagerCallbacks {
   onOpenAISettings(): void;
 
   /* ---------------- 环境与用户感知（3.1~3.6） ---------------- */
-  /** 3.2 按需"看屏幕"：场景 / 读文字 / 总结内容 / 看报错 / 看代码。 */
+  /** 3.2 按需"看屏幕"：只剩「看我在做什么（场景）」一个动作。 */
   onLookScreen(mode: PerceptionViewMode): void;
   /** 隐私模式开关：一键停止一切采集（返回切换后的状态）。 */
   onTogglePrivacyMode(): boolean;

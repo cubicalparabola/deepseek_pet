@@ -78,6 +78,10 @@ app.whenReady().then(async () => {
    * 这条是"截图验收"抓出来的真实 bug：默认全开时面板上的复选框却是空的，
    * 状态行写着"正在采集" —— 自相矛盾的画面比功能坏了更伤信任。
    * 断言方式：把主进程状态与 DOM 上的勾选态逐个比对。
+   *
+   * ⚠️ 还额外数了一遍**开关项的个数与文案**：只按 id 查的话，"同一个开关被 append 了
+   * 两次"这种错误查不出来（第二次会把它绑定的那个 checkbox 从第一行挪走，
+   * 于是第一行剩一个没有复选框的标题 —— 实测真的漏过一次，是截图看出来的）。
    */
   const echo = await run(`(async () => {
     const status = await window.settingsAPI.perception.status();
@@ -90,9 +94,22 @@ app.whenReady().then(async () => {
       if (!control) { mismatches.push(ids[i] + ':missing'); continue; }
       if (control.checked !== expected) mismatches.push(ids[i] + '=' + control.checked + ' expected=' + expected);
     }
-    return { mismatches, status: status.settings.screen };
+    const items = Array.from(document.querySelectorAll('#perception-panel-root .perception-switch-item'));
+    const labels = items.map((item) => (item.querySelector('label')?.textContent ?? '').trim());
+    const duplicates = labels.filter((label, index) => labels.indexOf(label) !== index);
+    const withoutCheckbox = items.length - items.filter((item) => item.querySelector('input[type="checkbox"]')).length;
+    return { mismatches, status: status.settings.screen, itemCount: items.length, labels, duplicates, withoutCheckbox };
   })()`);
-  step('面板：四个开关的勾选态与主进程状态一致（默认全开时必须都是勾上的）', echo, echo.mismatches.length === 0);
+  step(
+    '面板：四个开关的勾选态与主进程状态一致（默认全开时必须都是勾上的）',
+    echo,
+    echo.mismatches.length === 0,
+  );
+  step(
+    '面板：开关项不多不少（4 项、无重复文案、每项都有自己的复选框）',
+    echo,
+    echo.itemCount === 4 && echo.duplicates.length === 0 && echo.withoutCheckbox === 0,
+  );
 
   /* 2) 隐私模式：点一下必须真的停采（读主进程状态确认） */
   const privacy = await run(`(async () => {

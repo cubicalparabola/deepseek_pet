@@ -714,7 +714,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     }
 
     /*
-     * ⚠️ 五个"感知开关"的勾选态**必须也由 status 回填**。
+     * ⚠️ 四个"感知开关"的勾选态**必须也由 status 回填**。
      *
      * 曾经的实现只回填数字输入框，勾选态只信本地点击 —— 于是：
      * 默认全开（主进程 screen=true）时，面板上的复选框是**空的**，
