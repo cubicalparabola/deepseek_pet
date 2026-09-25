@@ -48,7 +48,6 @@ export class PerceptionSettingsStore {
       this.logger.info('perception settings loaded', {
         data: {
           screen: this.settings.screen,
-          vision: this.settings.vision,
           behavior: this.settings.behavior,
           camera: this.settings.camera,
           habits: this.settings.habits,

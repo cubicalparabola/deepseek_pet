@@ -429,7 +429,7 @@ export class IpcManager {
     });
     this.handle(IpcChannels.PerceptionLog, (_event, limit) => this.deps.perceptionLog(Math.max(1, Math.min(500, Math.round(asNumber(limit, 60))))));
     this.handle(IpcChannels.PerceptionViewNow, async (_event, mode) => {
-      const allowed: readonly PerceptionViewMode[] = ['scene', 'ocr', 'summarize', 'error', 'code'];
+      const allowed: readonly PerceptionViewMode[] = ['scene'];
       const value = asString(mode, 'scene') as PerceptionViewMode;
       if (!allowed.includes(value)) {
         throw new IpcError('unknown perception view mode', { code: 'IPC_HANDLER_FAILED', module: 'IpcManager' });

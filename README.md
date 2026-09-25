@@ -27,7 +27,7 @@ npm run verify:alpha    # 逐条核验素材是否真的带 alpha（在 Chromium
 npm run verify:visual   # 验证运行时画面边缘是否真正透明
 npm run verify:console  # 核验日志字节层（UTF-8 合法且可逐字还原）
 npm run logs           # 实时查看日志（推荐；中文必定正常，见 §17）
-npm run acceptance      # 端到端验收（113 项检查）
+npm run acceptance      # 端到端验收（241 项检查）
 npm run pack            # electron-builder 打包成未安装目录（快速验证）
 npm run dist            # electron-builder 生成 Windows NSIS 安装包
 ```
@@ -829,7 +829,7 @@ npm run build
 npm run acceptance          # 等价于 electron tools/acceptance.cjs
 ```
 
-结果写入 `build/acceptance.json`，当前覆盖 **113 项检查，全部通过**：
+结果写入 `build/acceptance.json`，当前覆盖 **241 项检查，全部通过**：
 
 | 分组 | 覆盖内容 |
 | --- | --- |

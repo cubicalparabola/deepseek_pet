@@ -2280,7 +2280,7 @@ app.whenReady().then(async () => {
    */
   await run(`(async () => {
     await window.petAPI.ai.setSettings({ enabled: false, chat: false, memory: false, emotion: false, diary: false });
-    await window.petAPI.perception.setSettings({ screen: false, vision: false, behavior: false, camera: false, habits: false });
+    await window.petAPI.perception.setSettings({ screen: false, behavior: false, camera: false, habits: false });
     await window.petAPI.growth.setSettings({ palace: false, reflection: false, policyAdapt: false });
     return true;
   })()`);
@@ -2320,7 +2320,7 @@ app.whenReady().then(async () => {
   /* 后面的用例需要记忆与情绪是开的：改回来（感知与成长也要一起恢复） */
   await run(`(async () => {
     await window.petAPI.ai.setSettings({ enabled: true, chat: true, memory: true, emotion: true, diary: true });
-    await window.petAPI.perception.setSettings({ screen: true, vision: true, behavior: true, camera: true, habits: true });
+    await window.petAPI.perception.setSettings({ screen: true, behavior: true, camera: true, habits: true });
     await window.petAPI.growth.setSettings({ palace: true, reflection: true, policyAdapt: true });
     return true;
   })()`);
@@ -2673,7 +2673,6 @@ app.whenReady().then(async () => {
     const methods = Object.keys(window.petAPI.perception).sort();
     return {
       screen: status.settings.screen,
-      vision: status.settings.vision,
       behavior: status.settings.behavior,
       camera: status.settings.camera,
       habits: status.settings.habits,
@@ -2687,7 +2686,6 @@ app.whenReady().then(async () => {
   record(
     '感知：按需求默认全开（摄像头除外，必须显式授权）',
     perceptionInitial.screen === true &&
-      perceptionInitial.vision === true &&
       perceptionInitial.behavior === true &&
       perceptionInitial.camera === true &&
       perceptionInitial.habits === true &&
@@ -2702,6 +2700,30 @@ app.whenReady().then(async () => {
       perceptionInitial.methods.includes(name),
     ),
     JSON.stringify(perceptionInitial.methods),
+  );
+  /*
+   * 「读屏幕文字 / 总结屏幕内容 / 看报错 / 看代码」这四个内容理解动作**已按用户要求删除**，
+   * 只保留「看我在做什么（场景）」。
+   *
+   * 这条断言钉的是"删除是彻底的"：IPC 白名单只认 `scene`，老模式一律被拒绝 ——
+   * 而不是"界面上藏起来了、后台还能调"。以后谁想加回来，必须先改这条测试。
+   */
+  const removedViewModes = await run(`(async () => {
+    const out = [];
+    for (const mode of ['ocr', 'summarize', 'error', 'code']) {
+      try {
+        await window.petAPI.perception.viewNow(mode);
+        out.push(mode + ':accepted');
+      } catch (error) {
+        out.push(mode + ':rejected');
+      }
+    }
+    return out;
+  })()`);
+  record(
+    '感知：内容理解四动作已删除（IPC 只认场景，ocr/summarize/error/code 一律被拒）',
+    Array.isArray(removedViewModes) && removedViewModes.every((item) => String(item).endsWith(':rejected')),
+    JSON.stringify(removedViewModes),
   );
   record(
     '感知：数据目录可解析（观察记录与习惯画像落盘位置）',
@@ -3250,7 +3272,7 @@ app.whenReady().then(async () => {
     await window.petAPI.perception.setSettings({ privacyMode: true });
     const before = await window.petAPI.perception.status();
     const sampled = await window.petAPI.perception.sampleNow();
-    const view = await window.petAPI.perception.viewNow('ocr');
+    const view = await window.petAPI.perception.viewNow('scene');
     const list = await window.petAPI.perception.log(10);
     await window.petAPI.perception.setSettings({ privacyMode: false });
     return {

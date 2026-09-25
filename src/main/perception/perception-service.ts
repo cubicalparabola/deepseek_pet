@@ -142,7 +142,6 @@ export class PerceptionService {
       getSceneFixes: () => this.settings.sceneFixes,
       storeFullUrl: () => this.settings.storeFullUrl,
       getForegroundWindow: () => this.windows.current()?.foreground ?? null,
-      isVisionEnabled: () => this.settings.vision && this.settings.screen,
     });
     this.windows = new WindowContextProbe({
       logger: options.logger,
@@ -492,14 +491,17 @@ export class PerceptionService {
     return this.status();
   }
 
-  /** 手动"看屏幕"（3.2 的四个动作 + 隐私闸门）。 */
+  /**
+   * 手动"看屏幕"。
+   *
+   * 3.2 只保留「看我在做什么（场景）」这一个动作：读屏幕文字 / 总结内容 / 看报错 /
+   * 看代码这四个内容理解动作已按用户要求删除。因此这里的门槛就是**屏幕感知**本身
+   * （`capturePermission` 已经涵盖隐私模式与 screen 开关），不再有单独的内容理解开关。
+   */
   public async viewNow(mode: PerceptionViewMode): Promise<PerceptionViewResult> {
     const permission = capturePermission(this.settings);
     if (!permission.allowed) {
       return { ok: false, mode, text: `现在不能看屏幕：${permission.reason}`, scene: 'other', sensitive: false, tokens: 0, error: 'paused' };
-    }
-    if (!this.settings.vision) {
-      return { ok: false, mode, text: '内容理解开关没打开（设置 → 环境与用户感知 → 内容理解 / OCR）。', scene: 'other', sensitive: false, tokens: 0, error: 'vision-disabled' };
     }
     /*
      * 没接上大模型时给一句**温柔**的话，而不是把 HTTP 层的报错甩给用户。
@@ -514,7 +516,7 @@ export class PerceptionService {
     }
     this.store.log('observation', `用户请求「${viewModeLabel(mode)}」`);
     /*
-     * 按需看屏幕也带上地址栏横条：网页上的问题（报错、总结）有了网址会答得更准。
+     * 按需看屏幕也带上地址栏横条：知道"在哪个网站"能让她说准"你在做什么"。
      * 放在"确认能用大模型"之后取，避免白截一张图。
      */
     const addressBar = await this.capture.grabAddressBar();
@@ -865,19 +867,8 @@ export class PerceptionService {
 }
 
 /** 3.2 动作的中文名（日志与日志文件里用）。 */
-export function viewModeLabel(mode: PerceptionViewMode): string {
-  switch (mode) {
-    case 'ocr':
-      return '读屏幕文字';
-    case 'summarize':
-      return '总结屏幕内容';
-    case 'error':
-      return '看屏幕报错';
-    case 'code':
-      return '看屏幕上的代码';
-    default:
-      return '看屏幕';
-  }
+export function viewModeLabel(_mode: PerceptionViewMode): string {
+  return '看我在做什么（场景）';
 }
 
 /** 供日志/调试：把 LLM 错误翻译成一句话。 */

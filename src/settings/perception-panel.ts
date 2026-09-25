@@ -1,5 +1,5 @@
 /**
- * 「环境与用户感知」设置面板（3.1 屏幕 / 3.2 内容理解 / 3.4 行为 / 3.5 摄像头 / 3.6 习惯）。
+ * 「环境与用户感知」设置面板（3.1 屏幕 / 3.2 按需看场景 / 3.4 行为 / 3.5 摄像头 / 3.6 习惯）。
  *
  * 与 `ai-panel.ts` 同构：面板是**自包含的挂载函数**，拿到容器 + 桥 + 初始快照就自带
  * 事件与刷新逻辑，设置页面只需要一行接线。这样感知的几十个控件不会淹没"调尺寸"。
@@ -165,13 +165,14 @@ const PRESENCE_SOURCE_LABELS: Readonly<Record<PerceptionStatus['presence']['sour
   camera: '摄像头', idle: '空闲推断', unknown: '未知',
 };
 
-/** 3.2 五个按需动作：按钮文案 + api 模式 + 悬停提示。 */
+/**
+ * 3.2 按需看屏幕：**只剩「看我在做什么（场景）」一个动作**。
+ *
+ * 读屏幕文字（OCR）/ 总结内容 / 看报错 / 看代码这四个内容理解动作已按用户要求删除，
+ * 这里仍然保留数组结构：按钮由这张表生成，`perception-view-<mode>` 的 id 也由它决定。
+ */
 const VIEW_MODES: ReadonlyArray<{ mode: PerceptionViewMode; label: string; hint: string }> = [
-  { mode: 'scene', label: '现在在做什么', hint: '只做场景分类，最省 token。' },
-  { mode: 'ocr', label: '读屏幕文字', hint: '把屏幕上的文字读出来。' },
-  { mode: 'summarize', label: '总结屏幕内容', hint: '一句话概括当前屏幕。' },
-  { mode: 'error', label: '看报错', hint: '只盯着报错信息看。' },
-  { mode: 'code', label: '看代码', hint: '读当前编辑器里的代码。' },
+  { mode: 'scene', label: '现在在做什么', hint: '让她看一眼屏幕，用一句话说你在做什么。' },
 ];
 
 /** 列表刷新节流窗口：状态推送很密（每次采样后都推），日志不能每次推送都重拉。 */
@@ -229,19 +230,17 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   savedLabel.textContent = '已保存';
   statusSection.append(statusLine, savedLabel);
 
-  /* 二、五个开关（3.1 / 3.2 / 3.4 / 3.5 / 3.6） */
+  /* 二、四个开关（3.1 / 3.4 / 3.5 / 3.6） */
 
   const switchesSection = makeSection('感知开关');
   const screenInput = makeCheckbox('perception-screen', '屏幕感知');
-  const visionInput = makeCheckbox('perception-vision', '内容理解');
   const behaviorInput = makeCheckbox('perception-behavior', '行为观察');
   const cameraInput = makeCheckbox('perception-camera', '摄像头感知');
   const habitsInput = makeCheckbox('perception-habits', '习惯学习');
   switchesSection.append(
     // 每个开关下面都写清"关掉会失去什么"：感知是隐私敏感功能，
     // 用户应当能在不看文档的情况下判断代价。
-    switchItem('屏幕感知（3.1）', screenInput, '关掉后她完全不知道你在做什么：没有场景分类，也不会再主动开口。'),
-    switchItem('内容理解 / OCR（3.2）', visionInput, '关掉后只能看场景分类，不能读屏幕文字，也不再总结或分析报错。'),
+    switchItem('屏幕感知（3.1）', screenInput, '关掉后她完全不知道你在做什么：没有场景分类，也不会再主动开口，连手动「看我在做什么」也会被拒。'),
     switchItem('行为观察（3.4）', behaviorInput, '关掉后不再统计空闲、连续使用时长与切换频率，久坐和深夜提醒都会失效。'),
     switchItem('摄像头感知（3.5）', cameraInput, '关掉后不再判断你在不在电脑前，也不看表情；需另外授权才会真的打开摄像头。'),
     switchItem('习惯学习（3.6）', habitsInput, '关掉后不再按小时积累习惯画像，也没有"按你的习惯…"这类时间对比提醒。'),
@@ -451,7 +450,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   viewSection.appendChild(actionRow(...viewButtons));
   const viewResult = el('pre', 'perception-view-result');
   viewResult.id = 'perception-view-result';
-  viewResult.textContent = '点上面的按钮，她才会看一眼屏幕（不需要周期采样）。';
+  viewResult.textContent = '点上面的按钮，她才会看一眼屏幕，用一句话说你在做什么。';
   viewSection.appendChild(viewResult);
 
   /* 八、感知日志 */
@@ -892,7 +891,6 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
    */
   const immediate: ReadonlyArray<{ control: HTMLInputElement; apply: (checked: boolean) => PerceptionSettingsPatch }> = [
     { control: screenInput, apply: (checked) => ({ screen: checked }) },
-    { control: visionInput, apply: (checked) => ({ vision: checked }) },
     { control: behaviorInput, apply: (checked) => ({ behavior: checked }) },
     { control: cameraInput, apply: (checked) => ({ camera: checked }) },
     { control: habitsInput, apply: (checked) => ({ habits: checked }) },
@@ -901,17 +899,16 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   ];
 
   /**
-   * 五个"感知开关"的字段名表 —— 只为**回填勾选态**服务（见 syncInputs 的注释）。
+   * 四个"感知开关"的字段名表 —— 只为**回填勾选态**服务（见 syncInputs 的注释）。
    *
    * 隐私模式与"不出现在截屏里"不在这里：它们由 `renderPrivacy` 统一负责，
    * 因为那两个控件属于"隐私闸门"，勾选态要跟提示文案一起刷新。
    */
   const switchTable: ReadonlyArray<{
     control: HTMLInputElement;
-    field: 'screen' | 'vision' | 'behavior' | 'camera' | 'habits';
+    field: 'screen' | 'behavior' | 'camera' | 'habits';
   }> = [
     { control: screenInput, field: 'screen' },
-    { control: visionInput, field: 'vision' },
     { control: behaviorInput, field: 'behavior' },
     { control: cameraInput, field: 'camera' },
     { control: habitsInput, field: 'habits' },

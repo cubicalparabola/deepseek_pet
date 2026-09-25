@@ -3,7 +3,8 @@
  *
  * 需求四条落点：
  * - 3.1 屏幕感知：周期性截图 + 视觉模型 -> 判断"在写代码/读论文/看视频/打游戏/长时间没动"
- * - 3.2 OCR 与内容理解：按需"看屏幕"做 OCR / 读网页 / 总结 PDF / 分析报错
+ * - 3.2 按需看屏幕：手动问一次"我在做什么"（只做场景分类；读文字/总结/看报错/看代码
+ *   这四个内容理解动作在 v1 里**已删除**，用户明确只要场景）
  * - 3.4 用户行为观察：活跃窗口、切换频率、连续使用时长、深夜在线、敏感内容回避
  * - 3.5 摄像头感知：是否在电脑前 / 表情 / 久坐 / 离开 / 陌生人
  * - 3.6 用户习惯学习：按小时聚合行为，预测下一阶段并做时间对比提醒
@@ -45,8 +46,6 @@ export type UserState = 'deep' | 'shallow' | 'idle' | 'away' | 'unknown';
 export interface PerceptionSettings {
   /** 3.1 屏幕感知总开关。 */
   readonly screen: boolean;
-  /** 3.2 多模态内容理解（OCR/总结/报错分析）；关掉后只能拿到"场景分类"。 */
-  readonly vision: boolean;
   /** 3.4 用户行为观察（空闲、连续使用、切换频率、深夜）。 */
   readonly behavior: boolean;
   /** 3.5 摄像头感知（还需 `cameraAuthorized` 才会真的取帧）。 */
@@ -121,7 +120,6 @@ export interface PerceptionSettings {
 export const DEFAULT_PERCEPTION_SETTINGS: PerceptionSettings = {
   // 需求：「默认模式全开」
   screen: true,
-  vision: true,
   behavior: true,
   camera: true,
   habits: true,
@@ -159,7 +157,6 @@ export const DEFAULT_PERCEPTION_SETTINGS: PerceptionSettings = {
 /** 设置补丁（部分字段）。 */
 export interface PerceptionSettingsPatch {
   readonly screen?: boolean;
-  readonly vision?: boolean;
   readonly behavior?: boolean;
   readonly camera?: boolean;
   readonly habits?: boolean;
@@ -335,8 +332,13 @@ export interface PerceptionLogItem {
   readonly text: string;
 }
 
-/** 3.2 按需"看屏幕"的动作。 */
-export type PerceptionViewMode = 'scene' | 'ocr' | 'summarize' | 'error' | 'code';
+/**
+ * 3.2 按需"看屏幕"的动作。
+ *
+ * 只剩一个值，但仍然保留这个类型：`viewNow` 的入参、日志与结果里都要写明"这是哪次动作"，
+ * 而 IPC 白名单也靠它做校验（见 ipc-manager）。
+ */
+export type PerceptionViewMode = 'scene';
 
 export interface PerceptionViewResult {
   readonly ok: boolean;
@@ -399,7 +401,6 @@ export function sanitizePerceptionSettings(
 
   return {
     screen: bool(record.screen, fallback.screen),
-    vision: bool(record.vision, fallback.vision),
     behavior: bool(record.behavior, fallback.behavior),
     camera: bool(record.camera, fallback.camera),
     habits: bool(record.habits, fallback.habits),

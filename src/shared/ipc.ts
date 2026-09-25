@@ -176,7 +176,7 @@ export const IpcChannels = {
   PerceptionSettingsSet: 'pet:perception-settings-set',
   /** 感知日志（她看见了什么 / 为什么开口）。 */
   PerceptionLog: 'pet:perception-log',
-  /** 3.2 按需"看屏幕"：场景 / OCR / 总结 / 报错 / 看代码。 */
+  /** 3.2 按需"看屏幕"：只剩「看我在做什么（场景）」。 */
   PerceptionViewNow: 'pet:perception-view',
   /** 摄像头授权（只能由界面上显式按钮置为 true）。 */
   PerceptionCameraAuthorize: 'pet:perception-camera-authorize',
@@ -508,7 +508,7 @@ export interface PerceptionAPI {
   setSettings(patch: PerceptionSettingsPatch): Promise<PerceptionStatus>;
   /** 感知日志（倒序，最多 limit 条）。 */
   log(limit?: number): Promise<readonly PerceptionLogItem[]>;
-  /** 3.2 按需看屏幕（场景 / OCR / 总结 / 报错 / 看代码）。 */
+  /** 3.2 按需看屏幕（只剩「看我在做什么（场景）」）。 */
   viewNow(mode: PerceptionViewMode): Promise<PerceptionViewResult>;
   /** 摄像头授权开关（界面上必须是**显式**按钮，不允许偷偷打开）。 */
   authorizeCamera(authorized: boolean): Promise<PerceptionStatus>;

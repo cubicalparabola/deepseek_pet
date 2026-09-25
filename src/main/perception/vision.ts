@@ -1,10 +1,10 @@
 /**
- * 视觉理解（3.1 屏幕感知 / 3.2 OCR 与内容理解 / 3.5 摄像头）。
+ * 视觉理解（3.1 屏幕感知 / 3.2 按需看屏幕 / 3.5 摄像头）。
  *
  * 三件事共用同一条"图像 -> 模型 -> 结构化结果"的链路：
  *
  *   1. `analyzeScene`    周期采样：判断在写代码/读论文/看视频… + 是否私人内容
- *   2. `view`            按需"看屏幕"：OCR / 总结 / 分析报错（3.2 的四个动作）
+ *   2. `view`            按需"看屏幕"：一句话说明用户在做什么（3.2 只保留场景这一件事）
  *   3. `analyzeCamera`   摄像头一帧：在不在、什么表情、有没有陌生人（3.5）
  *
  * 两条设计原则：
@@ -35,8 +35,6 @@ export interface VisionAnalyzerOptions {
   readonly storeFullUrl: () => boolean;
   /** 当前最上层窗口（进程名 + 标题）——用于确定性纠正与写进观察记录。 */
   readonly getForegroundWindow: () => { readonly process: string; readonly title: string } | null;
-  /** 是否允许做"内容理解"（3.2 的开关）。 */
-  readonly isVisionEnabled: () => boolean;
 }
 
 export interface SceneAnalysis {
@@ -74,14 +72,8 @@ const SCENE_SYSTEM = [
   '注意：只描述你**确实看到**的内容，不要猜测用户身份，不要复述敏感信息的具体内容。',
 ].join('\n');
 
-/** 3.2 的四个按需动作，各自一句话指令。 */
-const VIEW_INSTRUCTIONS: Readonly<Record<PerceptionViewMode, string>> = {
-  scene: '用一句话说明我现在在做什么（中文，不超过 25 字）。',
-  ocr: '把屏幕上的**主要文字**读出来（尽量完整、按原顺序，最多 400 字；不要翻译、不要总结）。',
-  summarize: '用 3~5 句中文总结屏幕上的内容要点（如果是论文/文档，就说清主题与结论）。',
-  error: '找出屏幕上的报错/异常信息，先用一句话说明是什么错，再给出一句最可能的修复方向（中文，不超过 120 字）。',
-  code: '用 3~5 句中文说明这段代码在做什么，并指出任何明显的问题（如果没有问题就说"看起来没问题"）。',
-};
+/** 3.2 唯一保留的按需动作：场景。 */
+const VIEW_SCENE_INSTRUCTION = '用一句话说明我现在在做什么（中文，不超过 25 字）。';
 
 export class VisionAnalyzer {
   private readonly options: VisionAnalyzerOptions;
@@ -215,10 +207,10 @@ export class VisionAnalyzer {
   /* ------------------------------------------------------------------ */
 
   /**
-   * 按需"看屏幕"（3.2 的四个动作）。
+   * 按需"看屏幕"：一句话说明用户现在在做什么（3.2 唯一保留的动作）。
    *
-   * @param addressBar 可选的地址栏横条：网页上的问题（报错、总结）有了网址会答得更准，
-   *   例如"这是 GitHub issue 里的报错"。与整屏一样，用完即弃。
+   * @param addressBar 可选的地址栏横条：有了网址，"在哪个网站做什么"会答得更准。
+   *   与整屏一样，用完即弃。
    * @param windowContext 可选的窗口上下文文本（最上层窗口 + 打开的窗口列表）。
    */
   public async view(
@@ -229,9 +221,6 @@ export class VisionAnalyzer {
     windowContext?: string | null,
   ): Promise<PerceptionViewResult> {
     const client = this.options.getClient();
-    if (!this.options.isVisionEnabled()) {
-      return { ok: false, mode, text: '内容理解开关没打开（设置 → 环境与用户感知 → 内容理解）。', scene: 'other', sensitive: false, tokens: 0, error: 'vision-disabled' };
-    }
     if (!client) {
       return { ok: false, mode, text: '我还没接上大模型，看不懂屏幕内容（可以去设置里填密钥）。', scene: 'other', sensitive: false, tokens: 0, error: 'no-llm' };
     }
@@ -241,7 +230,7 @@ export class VisionAnalyzer {
        * 早期版本把横条 push 到了整屏之前，而提示词写着"第二张图是地址栏区域"——
        * 模型会把整屏当成地址栏看（文档评审抓到这个不自洽）。
        */
-      const parts: LLMContentPart[] = [{ type: 'text', text: VIEW_INSTRUCTIONS[mode] }];
+      const parts: LLMContentPart[] = [{ type: 'text', text: VIEW_SCENE_INSTRUCTION }];
       parts.push({ type: 'image', mimeType, dataBase64: imageBase64 });
       if (addressBar && addressBar.dataBase64 !== '') {
         parts.push({
@@ -266,11 +255,11 @@ export class VisionAnalyzer {
           { role: 'user', content: parts },
         ],
         temperature: 0.3,
-        maxTokens: mode === 'ocr' || mode === 'summarize' ? 700 : 400,
+        maxTokens: 400,
       });
       const text = result.text.trim();
       const privateHit = /私人的，我不看/.test(text);
-      const scene = await this.quickScene(result.text);
+      const scene = this.quickScene(result.text);
       return {
         ok: true,
         mode,
@@ -287,11 +276,19 @@ export class VisionAnalyzer {
     }
   }
 
-  /** 从回答里粗判场景（按需动作没有单独的场景字段，用关键词兜一下）。 */
-  private async quickScene(text: string): Promise<SceneKind> {
+  /**
+   * 从那句回答里粗判场景。
+   *
+   * 「看我在做什么」只要求模型回一句人话（进气泡），不返回结构化字段，
+   * 所以这里用关键词兜一个 `SceneKind` 出来 —— 它只用来挑动画，
+   * 影响很小（真正的场景分类走 `analyzeScene` 的受控词表）。
+   */
+  private quickScene(text: string): SceneKind {
     const lower = text.toLowerCase();
     if (/报错|error|exception|failed|traceback/.test(lower)) return 'coding';
     if (/论文|参考文献|abstract|pdf/.test(lower)) return 'reading';
+    if (/视频|直播|bilibili|youtube|番剧/.test(lower)) return 'video';
+    if (/游戏|game|steam/.test(lower)) return 'gaming';
     if (/代码|函数|class|import|编译/.test(lower)) return 'coding';
     return 'other';
   }

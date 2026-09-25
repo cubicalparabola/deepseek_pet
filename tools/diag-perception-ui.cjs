@@ -81,8 +81,8 @@ app.whenReady().then(async () => {
    */
   const echo = await run(`(async () => {
     const status = await window.settingsAPI.perception.status();
-    const ids = ['perception-screen', 'perception-vision', 'perception-behavior', 'perception-camera', 'perception-habits'];
-    const fields = ['screen', 'vision', 'behavior', 'camera', 'habits'];
+    const ids = ['perception-screen', 'perception-behavior', 'perception-camera', 'perception-habits'];
+    const fields = ['screen', 'behavior', 'camera', 'habits'];
     const mismatches = [];
     for (let i = 0; i < ids.length; i++) {
       const control = document.getElementById(ids[i]);
@@ -92,7 +92,7 @@ app.whenReady().then(async () => {
     }
     return { mismatches, status: status.settings.screen };
   })()`);
-  step('面板：五个开关的勾选态与主进程状态一致（默认全开时必须都是勾上的）', echo, echo.mismatches.length === 0);
+  step('面板：四个开关的勾选态与主进程状态一致（默认全开时必须都是勾上的）', echo, echo.mismatches.length === 0);
 
   /* 2) 隐私模式：点一下必须真的停采（读主进程状态确认） */
   const privacy = await run(`(async () => {
@@ -101,7 +101,7 @@ app.whenReady().then(async () => {
     box.click();
     await new Promise((r) => setTimeout(r, 800));
     const after = await window.settingsAPI.perception.status();
-    const view = await window.settingsAPI.perception.viewNow('ocr');
+    const view = await window.settingsAPI.perception.viewNow('scene');
     box.click();
     await new Promise((r) => setTimeout(r, 800));
     const restored = await window.settingsAPI.perception.status();

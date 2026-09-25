@@ -82,7 +82,7 @@ class DesktopPetApplication {
   private bubbleController: BubbleController | null = null;
   /** AI 认知与人格（2.1~2.4）：大模型、记忆、情绪、日记都在这里。 */
   private aiService: AIService | null = null;
-  /** 环境与用户感知（3.1~3.6）：屏幕/内容理解/行为/摄像头/习惯。 */
+  /** 环境与用户感知（3.1~3.6）：屏幕/场景、行为、摄像头、习惯。 */
   private perception: PerceptionService | null = null;
   /** 成长、记忆与反思（4.1/4.2）：记忆宫殿、每日反思、行为策略。 */
   private growth: GrowthService | null = null;
@@ -555,12 +555,11 @@ class DesktopPetApplication {
     };
   }
 
-  /** 3.2 按需看屏幕：结果同时进气泡与聊天窗口（和 AI 回复走同一套展示）。 */
+  /** 3.2 按需看屏幕（只剩场景）：结果同时进气泡与聊天窗口（和 AI 回复走同一套展示）。 */
   private async viewScreen(mode: PerceptionViewMode): Promise<void> {
     if (!this.perception) return;
     const result = await this.perception.viewNow(mode);
-    const prefix = mode === 'scene' ? '' : `【${viewModeLabel(mode)}】\n`;
-    this.handleSpeak({ text: `${prefix}${result.text}`, animation: this.animationForScene(result.scene), kind: 'reply' });
+    this.handleSpeak({ text: result.text, animation: this.animationForScene(result.scene), kind: 'reply' });
     if (this.aiService) {
       this.aiService.recordEvent('interaction', `看屏幕（${viewModeLabel(mode)}）：${result.text.slice(0, 60)}`);
     }
