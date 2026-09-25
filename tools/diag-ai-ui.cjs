@@ -80,16 +80,29 @@ app.whenReady().then(async () => {
   })()`);
   step('设置窗口的 AI 面板已挂载（8 个分区）', panel, panel.sections >= 6 && panel.hasEnabled && panel.hasKey);
 
-  /* 真实点击「启用 AI」复选框，看主进程状态是否跟着变 */
+  /*
+   * 真实点击「启用 AI」复选框，看主进程状态是否跟着变。
+   *
+   * ⚠️ 不要假设初始值是关的：AI 与其它模块一样**默认全开**（`DEFAULT_AI_SETTINGS`），
+   * 所以这里断言"点一下就翻转"，而不是"点一下就变成开"；最后再点回来复原。
+   */
   const toggle = await settingsRun(`(async () => {
     const box = document.getElementById('ai-enabled');
     const before = await window.settingsAPI.ai.status();
     box.click();
     await new Promise((r) => setTimeout(r, 700));
     const after = await window.settingsAPI.ai.status();
-    return { before: before.settings.enabled, after: after.settings.enabled, checked: box.checked };
+    const flipped = { before: before.settings.enabled, after: after.settings.enabled, checked: box.checked };
+    box.click();
+    await new Promise((r) => setTimeout(r, 700));
+    const restored = await window.settingsAPI.ai.status();
+    return { ...flipped, restored: restored.settings.enabled };
   })()`);
-  step('设置面板：勾选「启用 AI」真的写进主进程', toggle, toggle.after === true && toggle.after !== toggle.before);
+  step(
+    '设置面板：勾选「启用 AI」真的写进主进程（默认全开，点一下翻转）',
+    toggle,
+    toggle.after === !toggle.before && toggle.checked === toggle.after && toggle.restored === toggle.before,
+  );
 
   /* 填一个假的不可达地址 + 密钥，点「测试连接」，必须显示失败而不是卡住 */
   const testConn = await settingsRun(`(async () => {

@@ -40,7 +40,8 @@ export class AIConfigStore {
 
   public load(): AISettings {
     if (!existsSync(this.file)) {
-      this.logger.info('ai-settings.json not found; AI features stay off by default', {
+      // 措辞要与 DEFAULT_AI_SETTINGS 一致：默认是**全开**（没配密钥时聊天走本地兜底）
+      this.logger.info('ai-settings.json not found; using defaults (all on, chat needs an API key)', {
         data: { file: this.file },
       });
       this.settings = { ...DEFAULT_AI_SETTINGS };

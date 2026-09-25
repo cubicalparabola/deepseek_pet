@@ -293,9 +293,20 @@ export function mountGrowthPanel(root: HTMLElement, api: GrowthAPI, initial: Gro
   keepInput.min = '0';
   keepInput.max = '3650';
   keepInput.step = '10';
+  /*
+   * 记忆宫殿压缩：比这个月数更早、且"同种类同标题"的多个节点会被折成一条
+   * （detail 写上"共 N 次 + 日期列表"，原始节点进 memory/archive/palace-<年>.json）。
+   * 0 = 不压缩。
+   */
+  const compressInput = makeInput('number', 'growth-palace-compress-months', '记忆宫殿压缩阈值');
+  compressInput.min = '0';
+  compressInput.max = '120';
+  compressInput.step = '1';
   reflectionSection.append(
     fieldRow('growth-reflection-hour', '反思时刻（0~23）', hourInput, '每天到这个整点自动反思一次；当天已经写过就跳过。'),
     fieldRow('growth-keep-days', '保留天数', keepInput, '超过这个天数的反思会被归档进记忆宫殿，不再进 prompt。'),
+    fieldRow('growth-palace-compress-months', '记忆宫殿压缩（月，0 = 不压缩）', compressInput,
+      '比这个月数更早、且同种类的反复经历会折成一条（写明共几次与日期），原始节点留档在 memory/archive/。'),
   );
 
   const settingsSave = makeButton('growth-settings-save', '保存反思设置', 'primary');
@@ -465,6 +476,7 @@ export function mountGrowthPanel(root: HTMLElement, api: GrowthAPI, initial: Gro
     setChecked(policySwitch, settings.policyAdapt);
     setValue(hourInput, String(settings.reflectionHour));
     setValue(keepInput, String(settings.keepReflectionDays));
+    setValue(compressInput, String(settings.palaceCompressMonths));
   }
   /* 渲染：状态行 / 策略 / 统计 / 反思正文 */
   function renderStatusSection(status: GrowthStatus): void {
@@ -789,11 +801,16 @@ export function mountGrowthPanel(root: HTMLElement, api: GrowthAPI, initial: Gro
   function buildReflectionPatch(): GrowthSettingsPatch | null {
     const hour = numberValue(hourInput);
     const keep = numberValue(keepInput);
-    if (hour === null || keep === null) {
-      setPanelError('「反思时刻」和「保留天数」都必须填数字（时刻取值 0~23）。');
+    const compress = numberValue(compressInput);
+    if (hour === null || keep === null || compress === null) {
+      setPanelError('「反思时刻」「保留天数」和「记忆宫殿压缩」都必须填数字（时刻取值 0~23）。');
       return null;
     }
-    return { reflectionHour: clampInt(hour, 0, 23), keepReflectionDays: clampInt(keep, 0, 3650) };
+    return {
+      reflectionHour: clampInt(hour, 0, 23),
+      keepReflectionDays: clampInt(keep, 0, 3650),
+      palaceCompressMonths: clampInt(compress, 0, 120),
+    };
   }
   /* 事件 */
   /**

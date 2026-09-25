@@ -365,6 +365,17 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   samplingSection.appendChild(fieldRow('perception-window-probe-ttl-ms', '窗口信息缓存（毫秒）', windowTtlInput,
     '默认 25000：窗口变化慢，没必要每次采样都重新枚举（枚举约 0.5 秒）。'));
 
+  /*
+   * 明细保留期：一天一个文件（逐条观察 / 当天区间 / 当天 md）会一直涨，
+   * 所以过期先**压成一行**写进 `perception/archive/<月>.md`，再删明细。
+   */
+  const retentionInput = makeInput('number', 'perception-retention-days', '明细保留天数');
+  retentionInput.min = '0';
+  retentionInput.max = '3650';
+  retentionInput.step = '30';
+  samplingSection.appendChild(fieldRow('perception-retention-days', '明细保留天数（0 = 永久保留）', retentionInput,
+    '默认 90 天。过期的那一天会先归档成一行（在电脑前多久、主要在做什么）写进 archive/，再删掉逐条明细。'));
+
   const cameraIntervalInput = makeInput('number', 'perception-camera-interval-ms', '摄像头采样间隔（毫秒）');
   cameraIntervalInput.min = '10000';
   cameraIntervalInput.step = '1000';
@@ -807,6 +818,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     if (!editing(storeFullUrlInput)) storeFullUrlInput.checked = settings.storeFullUrl;
     setValue(windowLimitInput, String(settings.windowListLimit));
     setValue(windowTtlInput, String(settings.windowProbeTtlMs));
+    setValue(retentionInput, String(settings.retentionDays));
     if (!editing(windowContextInput)) windowContextInput.checked = settings.windowContext;
     setValue(cameraIntervalInput, String(settings.cameraIntervalMs));
     setValue(proactiveMinInput, String(settings.proactiveMinIntervalMs));
@@ -917,6 +929,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     // 先读一遍只用来判断"有没有空/非数字"，错误提示要具体到这一步
     const fields = [
       numberValue(intervalInput), numberValue(widthInput), numberValue(urlWidthInput), numberValue(cameraIntervalInput),
+      numberValue(retentionInput),
       numberValue(proactiveMinInput), numberValue(proactiveMaxInput), numberValue(longSessionInput),
       numberValue(lateNightInput), numberValue(quietStartInput), numberValue(quietEndInput),
     ];
@@ -931,6 +944,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     const urlPx = numberValue(urlWidthInput) ?? 0;
     const winLimit = numberValue(windowLimitInput) ?? 0;
     const winTtl = numberValue(windowTtlInput) ?? 0;
+    const retention = numberValue(retentionInput) ?? 0;
     const camMs = numberValue(cameraIntervalInput) ?? 0;
     const proactiveMin = numberValue(proactiveMinInput) ?? 0;
     const proactiveMax = numberValue(proactiveMaxInput) ?? 0;
@@ -947,6 +961,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
       windowContext: windowContextInput.checked,
       windowListLimit: clampInt(winLimit, 1, 24),
       windowProbeTtlMs: clampInt(winTtl, 5000, 600000),
+      retentionDays: clampInt(retention, 0, 3650),
       cameraIntervalMs: clampInt(camMs, 10000, 3600000),
       proactiveMinIntervalMs: clampInt(proactiveMin, 60000, 86400000),
       proactiveMaxPerHour: clampInt(proactiveMax, 0, 60),

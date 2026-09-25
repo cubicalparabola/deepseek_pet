@@ -129,6 +129,10 @@ export class PerceptionService {
   private lastIntervention: PerceptionStatus['lastIntervention'] = null;
   private interventionTimes: number[] = [];
   private lastError = '';
+  /** 上次按保留期清理明细的日子（每天只做一次；手动采样会强制做一次）。 */
+  private lastPruneDay = '';
+  /** 最近一次清理的结果（状态展示用：面板要能回答"明细清到哪去了"）。 */
+  private retention: PerceptionStatus['retention'] = { days: 0, lastPrunedAt: '', lastPrunedDays: 0 };
   private cameraReady = false;
   /** 摄像头上次失败的时间（0 = 没失败过）；失败后按 CAMERA_RETRY_MS 退避重试。 */
   private cameraFailedAt = 0;
@@ -473,6 +477,19 @@ export class PerceptionService {
     // 长时间空闲后重新开始计时（"离开过"就不算连续使用）
     const idleSeconds = this.idleSeconds();
     if (idleSeconds >= 600) this.sessionStartedAt = now;
+    /*
+     * 明细保留期：**每天第一次采样**时清理一次；手动"立刻感知一次"（force）也顺手清一次 ——
+     * 后者既符合"用户点了就想立刻看到结果"，也让这条逻辑可被验收确定性地触发。
+     * 只在屏幕感知开着时做（关掉开关就不该再动磁盘，包括删文件）。
+     */
+    if (this.settings.screen && (force || this.lastPruneDay !== localDay(new Date(now)))) {
+      this.lastPruneDay = localDay(new Date(now));
+      const removed = this.store.pruneOldData(this.settings.retentionDays, now);
+      if (removed > 0) {
+        this.retention = { days: this.settings.retentionDays, lastPrunedAt: new Date(now).toISOString(), lastPrunedDays: removed };
+        this.store.log('system', `按保留期（${this.settings.retentionDays} 天）归档并清理了 ${removed} 天的明细`);
+      }
+    }
 
     const llmUsable = this.options.isLLMUsable();
     let observation: ScreenObservation | null = null;
@@ -758,6 +775,7 @@ export class PerceptionService {
         };
       })(),
       timeline: this.timeline.statusView(),
+      retention: { ...this.retention, days: this.settings.retentionDays },
       dataDir: this.store.dataDir,
       lastError: this.lastError,
     };

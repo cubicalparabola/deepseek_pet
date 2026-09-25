@@ -104,8 +104,73 @@ export function mergeNodes(
   return { nodes, added, updated };
 }
 
-/** 按年月分组统计（UI 时间轴的分组头）。 */
-export function groupByMonth(nodes: readonly MemoryNode[]): { month: string; count: number }[] {
+/**
+ * 记忆宫殿的**年度压缩**（纯函数）：把"很久以前、同种类同标题、反复发生"的多个节点
+ * 折成一条 —— 标题不变、`hits` 累加、`detail` 写成"这段时间里我们一起经历了 N 次：<日期列表>。"。
+ *
+ * 为什么这样设计：
+ * - **只动同一种反复发生的事**（同 kind + 同标题）。"第一次见面""某个项目"这类独一无二的
+ *   节点永远不会被折起来；跨月的两次熬夜（标题都是"一起熬夜"）才会被合成一条。
+ * - **钉住的一律不动**：用户说"这段很重要"，那就不该被折叠（整组跳过）。
+ * - **不删除**：被折掉的原始节点由调用方写进 `memory/archive/palace-<年>.json`，
+ *   所以"折起来"不等于"丢掉"。
+ * - **幂等**：折完只剩一条，再跑一次找不到"多条同组" → 不会重复折叠。
+ *
+ * @param nowMs 现在
+ * @param months 早于"现在 - months 个月"的节点才参与压缩；<= 0 = 不压缩
+ */
+export function compressPalaceNodes(
+  nodes: readonly MemoryNode[],
+  input: { readonly nowMs: number; readonly months: number },
+): { readonly nodes: MemoryNode[]; readonly removed: readonly MemoryNode[]; readonly merged: number } {
+  const months = Math.round(input.months);
+  if (!Number.isFinite(months) || months <= 0) return { nodes: [...nodes], removed: [], merged: 0 };
+  const cutoff = new Date(input.nowMs);
+  cutoff.setMonth(cutoff.getMonth() - months);
+  const cutoffMs = cutoff.getTime();
+
+  const groups = new Map<string, MemoryNode[]>();
+  for (const node of nodes) {
+    if (node.pinned) continue;                               // 钉住的不参与
+    const at = new Date(node.at).getTime();
+    if (!Number.isFinite(at) || at >= cutoffMs) continue;     // 还"新"的不参与
+    const key = `${node.kind}|${node.title}`;
+    const bucket = groups.get(key) ?? [];
+    bucket.push(node);
+    groups.set(key, bucket);
+  }
+
+  const removed: MemoryNode[] = [];
+  const summaryById = new Map<string, MemoryNode>();
+  for (const bucket of groups.values()) {
+    if (bucket.length < 2) continue;                          // 只有一条没什么可折
+    const sorted = [...bucket].sort((a, b) => a.at.localeCompare(b.at));
+    const base = sorted[0];
+    if (!base) continue;
+    const dates = sorted.map((node) => formatLocalDate(node.at));
+    const hits = sorted.reduce((sum, node) => sum + Math.max(1, node.hits), 0);
+    const evidence = dedupeStrings(sorted.flatMap((node) => [...node.evidence])).slice(0, 8);
+    summaryById.set(base.id, {
+      ...base,
+      detail: `这段时间里我们一起经历了 ${hits} 次：${dates.join('、')}。`,
+      hits,
+      evidence,
+    });
+    removed.push(...sorted);
+  }
+  if (summaryById.size === 0) return { nodes: [...nodes], removed: [], merged: 0 };
+
+  const kept = nodes
+    .filter((node) => !removed.some((item) => item.id === node.id))
+    .concat([...summaryById.values()]);
+  kept.sort((a, b) => {
+    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+    return b.at.localeCompare(a.at);
+  });
+  return { nodes: kept, removed, merged: summaryById.size };
+}
+
+/** 按年月分组统计（UI 时间轴的分组头）。 */export function groupByMonth(nodes: readonly MemoryNode[]): { month: string; count: number }[] {
   const buckets = new Map<string, number>();
   for (const node of nodes) {
     const month = node.at.slice(0, 7);

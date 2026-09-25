@@ -2498,6 +2498,72 @@ app.whenReady().then(async () => {
   } catch (error) {
     memoryLog = { exists: false, hasUserTurn: false, hasPetTurn: false, bytes: 0 };
   }
+  /*
+   * 对话的**滚动前情摘要**（压缩机制 B）：更早的轮次要被压成一段 ≤600 字的前情，
+   * 进聊天提示词，而不是只带"最近 6 轮"。
+   *
+   * 这里分两半测：
+   *   1. 纯函数（抽取式兜底 / 提示词组装 / 输出清洗）—— 确定性、逐条断言；
+   *   2. 端到端：先灌几轮对话，手动触发一次整理（`petAPI.ai.consolidate?` 没有 IPC，
+   *      所以走 `rollSummary` 的真实调用点：连续对话会触发 `maybeConsolidate`——
+   *      太重；改为断言 `memory().profile.summary` 字段存在且类型正确 + 摘要长度上限）。
+   */
+  const summaryModel = await run(`(() => {
+    const model = window.petDebug.memorySummary;
+    const turns = [
+      { role: 'user', text: '我最近在写一个桌宠项目，用的是 Electron', at: '2026-09-25T01:00:00.000Z' },
+      { role: 'pet', text: '听起来好厉害！', at: '2026-09-25T01:00:05.000Z' },
+      { role: 'user', text: '明天要交论文初稿，有点紧张', at: '2026-09-25T01:01:00.000Z' },
+    ];
+    const fresh = model.fallbackRollingSummary('', turns);
+    const rolled = model.fallbackRollingSummary('主人喜欢喝美式', turns);
+    const long = model.fallbackRollingSummary('旧'.repeat(400), turns, 100);
+    const messages = model.buildRollingSummaryMessages({ previous: '主人喜欢喝美式', turns, petName: '鲸鱼娘' });
+    return {
+      fresh,
+      rolled,
+      longChars: long.length,
+      longHead: long.slice(0, 1),
+      keepsPrevious: rolled.includes('主人喜欢喝美式'),
+      keepsUserFacts: rolled.includes('桌宠项目') && rolled.includes('论文初稿'),
+      dropsPetWords: rolled.includes('听起来好厉害') === false,
+      systemMentionsFactsOnly: messages.system.includes('不要编造') && messages.system.includes('600'),
+      userHasPreviousAndNew: messages.user.includes('主人喜欢喝美式') && messages.user.includes('桌宠项目'),
+      // 注意：这段是外层模板字符串里的内容，所以反引号要写成 \u0060（lint 会抓真反引号）
+      sanitized: model.sanitizeSummary('前情摘要：\\n\u0060\u0060\u0060\\n主人这几天在赶论文\\n\u0060\u0060\u0060\\n'),
+      maxChars: model.SUMMARY_MAX_CHARS,
+    };
+  })()`);
+  record(
+    '记忆：滚动前情摘要（没模型也能压、保留旧摘要、只留主人说的、按上限截断）',
+    summaryModel.fresh.includes('桌宠项目') &&
+      summaryModel.fresh.includes('论文初稿') &&
+      summaryModel.fresh.includes('听起来好厉害') === false &&
+      summaryModel.keepsPrevious === true &&
+      summaryModel.keepsUserFacts === true &&
+      summaryModel.dropsPetWords === true &&
+      summaryModel.longChars === 100 &&
+      summaryModel.longHead === '…' &&
+      summaryModel.systemMentionsFactsOnly === true &&
+      summaryModel.userHasPreviousAndNew === true &&
+      summaryModel.sanitized === '主人这几天在赶论文' &&
+      summaryModel.maxChars === 600,
+    JSON.stringify(summaryModel),
+  );
+  const summaryState = await run(`(async () => {
+    const snapshot = await window.petAPI.ai.memory();
+    return {
+      hasField: Object.prototype.hasOwnProperty.call(snapshot.profile, 'summary'),
+      summaryType: typeof snapshot.profile.summary,
+      length: snapshot.profile.summary.length,
+    };
+  })()`);
+  record(
+    '记忆：滚动摘要落在 profile.summary（聊天提示词读的就是它）',
+    summaryState.hasField === true && summaryState.summaryType === 'string' && summaryState.length <= 2000,
+    JSON.stringify(summaryState),
+  );
+
   record(
     '记忆：对话落盘为可读的记忆日志（memory-log.md）',
     memoryLog.exists === true && memoryLog.bytes > 0 && memoryLog.hasUserTurn === true && memoryLog.hasPetTurn === true,
@@ -3220,6 +3286,76 @@ app.whenReady().then(async () => {
   );
 
   /*
+   * 明细保留期（A）：一天一个文件（逐条观察 / 当天区间 / 当天 md）会只增不减，
+   * 所以过期的那天要**先归档成一行**（`perception/archive/<月>.md`）再删明细。
+   *
+   * 测法（真文件、真删除）：在隔离的数据目录里造两个"过期日"的明细文件 + 一个"新近日"的，
+   * 然后 `sampleNow()`（手动采样会强制执行一次保留期清理），最后看文件系统。
+   */
+  const retentionProbe = await run(`(() => {
+    const model = window.petDebug.perception.timeline;
+    const day = (offset) => {
+      const date = new Date(Date.now() - offset * 86400000);
+      const pad = (value) => String(value).padStart(2, '0');
+      return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate());
+    };
+    return {
+      expired: [day(200), day(120)],
+      recent: day(3),
+      selected: model.selectExpiredDays([day(200), day(120), day(3), 'not-a-date'], Date.now(), 90),
+      keepAll: model.selectExpiredDays([day(200), day(120)], Date.now(), 0),
+      line: model.formatArchiveLine({
+        day: day(200), activeMinutes: 252, idleMinutes: 55,
+        byScene: [{ scene: 'coding', minutes: 150 }, { scene: 'browsing', minutes: 60 }],
+        apps: ['code', 'msedge'],
+      }),
+    };
+  })()`);
+  let retentionFiles = { before: [], after: [], archived: '' };
+  try {
+    const perceptionDir = join(aiDataDir, 'perception');
+    mkdirSync(perceptionDir, { recursive: true });
+    for (const day of retentionProbe.expired) {
+      writeFileSync(join(perceptionDir, `observations-${day}.jsonl`), '{"scene":"coding"}\n', 'utf8');
+      writeFileSync(join(perceptionDir, `timeline-${day}.json`), JSON.stringify({
+        date: day, narrative: '', updatedAt: new Date().toISOString(),
+        segments: [{ start: `${day}T01:00:00.000Z`, end: `${day}T02:00:00.000Z`, scene: 'coding', app: 'code', samples: 120, minutes: 60 }],
+      }), 'utf8');
+      writeFileSync(join(perceptionDir, `daily-${day}.md`), '# old\n', 'utf8');
+    }
+    writeFileSync(join(perceptionDir, `observations-${retentionProbe.recent}.jsonl`), '{"scene":"coding"}\n', 'utf8');
+    retentionFiles.before = readdirSync(perceptionDir).sort();
+  } catch (error) {
+    retentionFiles.before = [`(准备失败: ${String(error)})`];
+  }
+  await run(`window.petAPI.perception.sampleNow()`);
+  await wait(500);
+  try {
+    const perceptionDir = join(aiDataDir, 'perception');
+    retentionFiles.after = readdirSync(perceptionDir).sort();
+    const archiveDir = join(perceptionDir, 'archive');
+    const archives = existsSync(archiveDir) ? readdirSync(archiveDir).sort() : [];
+    retentionFiles.archived = archives.length > 0 ? readFileSync(join(archiveDir, archives[0]), 'utf8') : '';
+  } catch (error) {
+    retentionFiles.after = [`(读取失败: ${String(error)})`];
+  }
+  record(
+    '感知：明细过保留期先归档成一行再删（新近的与 archive/ 都留着）',
+    retentionProbe.selected.length === 2 &&
+      retentionProbe.keepAll.length === 0 &&
+      retentionProbe.line.includes('在电脑前 4 小时 12 分') &&
+      retentionProbe.line.includes('写代码 2 小时 30 分') &&
+      retentionFiles.after.some((name) => name.startsWith('archive')) &&
+      retentionFiles.archived.includes('# ') &&
+      retentionFiles.archived.includes('在电脑前') &&
+      !retentionFiles.after.includes(`observations-${retentionProbe.expired[0]}.jsonl`) &&
+      !retentionFiles.after.includes(`timeline-${retentionProbe.expired[1]}.json`) &&
+      !retentionFiles.after.includes(`daily-${retentionProbe.expired[0]}.md`) &&
+      retentionFiles.after.includes(`observations-${retentionProbe.recent}.jsonl`),
+    JSON.stringify({ probe: retentionProbe, files: retentionFiles.after, archive: retentionFiles.archived.slice(0, 200) }),
+  );
+
+  /*
    * 终端：**需求明确要求「直接说正在使用控制台，不用分析终端里在做什么」**。
    *
    * 所以这一路是"固定结论"而不是"内容理解"：前台是终端类进程时，场景钉成 `terminal`、
@@ -3731,6 +3867,61 @@ app.whenReady().then(async () => {
       localDates.markdown.includes(`## ${expectedLocalDay.slice(0, 7)}`) &&
       localDates.markdown.includes(expectedLocalDay),
     JSON.stringify({ ...localDates, expectedLocalDay, utcDiffers: localDates.utcDay !== expectedLocalDay }),
+  );
+
+  /*
+   * 记忆宫殿的**压缩**（C）：很久以前、同种类同标题的多个节点折成一条
+   * （标题不变、detail 写"共 N 次 + 日期列表"、hits 累加），钉住的不动、新近的不动、幂等。
+   */
+  const palaceCompress = await run(`(() => {
+    const model = window.petDebug.growth;
+    const now = new Date(2026, 8, 25, 12, 0, 0).getTime();   // 本地 2026-09-25
+    const node = (id, kind, title, at, extra) => Object.assign({
+      id, kind, title, detail: '', at, source: 'auto', evidence: [], hits: 1, pinned: false,
+    }, extra || {});
+    const nodes = [
+      node('a1', 'late-night', '一起熬夜', '2025-01-10T15:00:00.000Z', { evidence: ['他说要赶完'] }),
+      node('a2', 'late-night', '一起熬夜', '2025-03-02T15:00:00.000Z', { hits: 2 }),
+      node('a3', 'late-night', '一起熬夜', '2026-09-01T15:00:00.000Z'),          // 新近 → 不参与
+      node('b1', 'milestone', '论文有了进展', '2025-02-01T15:00:00.000Z', { pinned: true }),
+      node('b2', 'milestone', '论文有了进展', '2025-04-01T15:00:00.000Z'),        // 同组里有钉住 → 整组跳过
+      node('c1', 'project', '一起折腾桌宠', '2025-05-01T15:00:00.000Z'),          // 只有一条 → 不动
+    ];
+    const first = model.compressPalaceNodes(nodes, { nowMs: now, months: 6 });
+    const second = model.compressPalaceNodes(first.nodes, { nowMs: now, months: 6 });
+    const off = model.compressPalaceNodes(nodes, { nowMs: now, months: 0 });
+    const mergedNode = first.nodes.find((item) => item.id === 'a1');
+    return {
+      merged: first.merged,
+      removedIds: first.removed.map((item) => item.id),
+      keptIds: first.nodes.map((item) => item.id),
+      mergedDetail: mergedNode ? mergedNode.detail : '',
+      mergedHits: mergedNode ? mergedNode.hits : 0,
+      mergedEvidence: mergedNode ? mergedNode.evidence : [],
+      secondMerged: second.merged,
+      offMerged: off.merged,
+      pinnedKept: first.nodes.some((item) => item.id === 'b1' && item.pinned === true),
+    };
+  })()`);
+  record(
+    '成长：记忆宫殿压缩（同种类同标题的老节点折成一条 / 钉住与新近的不动 / 幂等）',
+    palaceCompress.merged === 1 &&
+      JSON.stringify(palaceCompress.removedIds) === JSON.stringify(['a1', 'a2']) &&
+      palaceCompress.keptIds.includes('a1') &&
+      !palaceCompress.keptIds.includes('a2') &&
+      palaceCompress.keptIds.includes('a3') &&
+      palaceCompress.keptIds.includes('b1') &&
+      palaceCompress.keptIds.includes('b2') &&
+      palaceCompress.keptIds.includes('c1') &&
+      palaceCompress.mergedDetail.includes('3 次') &&
+      palaceCompress.mergedDetail.includes('2025-01-10') &&
+      palaceCompress.mergedDetail.includes('2025-03-02') &&
+      palaceCompress.mergedHits === 3 &&
+      palaceCompress.mergedEvidence.includes('他说要赶完') &&
+      palaceCompress.secondMerged === 0 &&
+      palaceCompress.offMerged === 0 &&
+      palaceCompress.pinnedKept === true,
+    JSON.stringify(palaceCompress),
   );
 
   /* 4.1 纯函数：节点去重 / 分组 / 规则抽取 */

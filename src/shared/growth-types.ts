@@ -38,6 +38,15 @@ export interface GrowthSettings {
   readonly firstMeetAt: string;
   /** 反思保留天数（默认 180 天，之后归档进 palace 不再进 prompt）。 */
   readonly keepReflectionDays: number;
+  /**
+   * 记忆宫殿的**压缩阈值（月）**：比它更早、且**同种类同标题**的多个节点会被折成一条
+   * （标题不变、detail 写上"共 N 次 + 日期列表"、hits 累加），原始节点进
+   * `memory/archive/palace-<年>.json` 留档。**0 = 不压缩**（默认 6 个月）。
+   *
+   * 为什么需要：时间轴只会越拉越长（每次熬夜/每个项目都是一条）。
+   * 压缩只动"同一种反复发生的事"，且钉住的一律不动 —— 记忆被折起来，但没有被丢掉。
+   */
+  readonly palaceCompressMonths: number;
 }
 
 export const DEFAULT_GROWTH_SETTINGS: GrowthSettings = {
@@ -47,6 +56,7 @@ export const DEFAULT_GROWTH_SETTINGS: GrowthSettings = {
   reflectionHour: 23,
   firstMeetAt: '',
   keepReflectionDays: 180,
+  palaceCompressMonths: 6,
 };
 
 export interface GrowthSettingsPatch {
@@ -56,6 +66,7 @@ export interface GrowthSettingsPatch {
   readonly reflectionHour?: number;
   readonly firstMeetAt?: string;
   readonly keepReflectionDays?: number;
+  readonly palaceCompressMonths?: number;
 }
 
 /* -------------------------------------------------------------------------- */

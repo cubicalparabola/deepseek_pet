@@ -50,6 +50,8 @@ export interface MemoryContext {
   readonly recentTurns: readonly ChatTurn[];
   /** 记忆总数（prompt 里可以提一句"我记得你 N 件事"）。 */
   readonly factCount: number;
+  /** **滚动前情**：更早的对话压成的那一段（空串 = 还没生成过）。 */
+  readonly summary: string;
 }
 
 const MAX_FACTS = 200;
@@ -247,11 +249,22 @@ export class MemoryStore {
     return this.profile;
   }
 
-  /** 保存模型整理出的记忆摘要（供 prompt 用）。记忆关闭时不写盘。 */
-  public setSummary(summary: string): MemoryProfile {
+  /**
+   * 保存**滚动前情摘要**（供 prompt 用）。记忆关闭时不写盘。
+   *
+   * `turns` = 这段摘要已经覆盖了多少轮对话：下次压缩时只并入比它更新的轮次，
+   * 避免同一批对话被反复摘要（越滚越糊）。
+   */
+  public setSummary(summary: string, turns = 0): MemoryProfile {
     if (!this.enabled) return this.profile;
     const now = new Date().toISOString();
-    this.profile = { ...this.profile, summary: summary.slice(0, 2000), updatedAt: now };
+    this.profile = {
+      ...this.profile,
+      summary: summary.slice(0, 2000),
+      summaryUpdatedAt: now,
+      summaryTurns: Math.max(0, Math.round(turns)),
+      updatedAt: now,
+    };
     this.saveProfile();
     return this.profile;
   }
@@ -300,7 +313,25 @@ export class MemoryStore {
       todayEvents: this.todayEvents.slice(-6),
       recentTurns: this.recentTurns(6),
       factCount: this.profile.facts.length,
+      summary: this.profile.summary,
     };
+  }
+
+  /**
+   * **跨天**取最近若干轮对话（新的在后）——滚动摘要要用它。
+   *
+   * 为什么不能只用 `recentTurns()`：那个只返回**今天**的轮次，
+   * 而滚动摘要的价值恰恰是"跨天也不忘"。
+   */
+  public recentTurnsAcrossDays(limit = 60): ChatTurn[] {
+    this.rollDayIfNeeded();
+    const days = this.availableDays().slice(0, 5);   // 最多回看 5 天，60 轮足够
+    const out: ChatTurn[] = [];
+    for (const day of days) {
+      const turns = day === this.today ? this.todayTurns : this.readDayFile<ChatTurn>(this.chatFile(day));
+      out.push(...turns);
+    }
+    return out.slice(-Math.max(1, limit));
   }
 
   /** 在最近 N 天的流水里找与关键词相关的片段。 */

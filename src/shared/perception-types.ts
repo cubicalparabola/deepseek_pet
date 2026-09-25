@@ -92,6 +92,15 @@ export interface PerceptionSettings {
   readonly windowListLimit: number;
   /** 窗口上下文的缓存时长（毫秒，默认 25000）。 */
   readonly windowProbeTtlMs: number;
+  /**
+   * 感知**明细数据**的保留天数（默认 90；**0 = 永久保留**）。
+   *
+   * 为什么要有：`observations-<日期>.jsonl`、`timeline-<日期>.json`、`daily-<日期>.md`
+   * 是**一天一个文件、只增不减**的 —— 不设保留期就会一直涨下去。
+   * 过期的明细在删除前会**先压成一行**写进 `perception/archive/<月>.md`
+   * （"那天在电脑前多久、主要在做什么"），所以丢掉的是逐条细节，不是那段日子。
+   */
+  readonly retentionDays: number;
   /** 摄像头采样间隔（毫秒）—— 比屏幕采样更稀，省电也省 token。 */
   readonly cameraIntervalMs: number;
   /** 用户是否已显式授权摄像头（默认 false，只能由界面上的按钮置为 true）。 */
@@ -140,6 +149,8 @@ export const DEFAULT_PERCEPTION_SETTINGS: PerceptionSettings = {
   windowContext: true,
   windowListLimit: 12,
   windowProbeTtlMs: 25000,
+  // 明细保留 90 天：过期先归档成一行再删（0 = 永久保留）
+  retentionDays: 90,
   cameraIntervalMs: 60000,
   // 唯一默认关闭的一项：摄像头必须用户显式授权（需求 3.5 原文）
   cameraAuthorized: false,
@@ -172,6 +183,7 @@ export interface PerceptionSettingsPatch {
   readonly windowContext?: boolean;
   readonly windowListLimit?: number;
   readonly windowProbeTtlMs?: number;
+  readonly retentionDays?: number;
   readonly cameraIntervalMs?: number;
   readonly cameraAuthorized?: boolean;
   readonly proactiveMinIntervalMs?: number;
@@ -337,6 +349,15 @@ export interface PerceptionStatus {
    * `perception/timeline-<日期>.json` 与 `daily-<日期>.md`。
    */
   readonly timeline: TimelineStatusView;
+  /**
+   * 明细保留期与最近一次清理（"她到底按什么保留期、清掉了几天"）。
+   * `days <= 0` = 永久保留（不会清理）。
+   */
+  readonly retention: {
+    readonly days: number;
+    readonly lastPrunedAt: string;
+    readonly lastPrunedDays: number;
+  };
   /** 数据目录（观察记录与习惯画像都在里面）。 */
   readonly dataDir: string;
   readonly lastError: string;
@@ -431,6 +452,7 @@ export function sanitizePerceptionSettings(
     windowContext: bool(record.windowContext, fallback.windowContext),
     windowListLimit: num(record.windowListLimit, fallback.windowListLimit, 1, 24),
     windowProbeTtlMs: num(record.windowProbeTtlMs, fallback.windowProbeTtlMs, 5000, 600000),
+    retentionDays: num(record.retentionDays, fallback.retentionDays, 0, 3650),
     cameraIntervalMs: num(record.cameraIntervalMs, fallback.cameraIntervalMs, 10000, 3600000),
     cameraAuthorized: bool(record.cameraAuthorized, fallback.cameraAuthorized),
     proactiveMinIntervalMs: num(record.proactiveMinIntervalMs, fallback.proactiveMinIntervalMs, 60000, 86400000),

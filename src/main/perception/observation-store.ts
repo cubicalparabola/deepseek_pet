@@ -12,14 +12,16 @@
  * 用户打开 perception/ 就能完整看到她掌握的信息（不多不少）。
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type {
   HabitProfile,
   PerceptionLogItem,
   ScreenObservation,
 } from '../../shared/perception-types';
+import type { DayTimeline } from '../../shared/timeline-types';
 import { emptyHabitProfile, formatLogTimestamp, formatObservationLogLine } from '../../shared/perception';
+import { formatArchiveLine, selectExpiredDays, summarizeDay } from '../../shared/timeline';
 import type { Logger } from '../../shared/logger';
 import { describeError } from '../../shared/errors';
 
@@ -174,9 +176,148 @@ export class ObservationStore {
     }
   }
 
-  /** 清空（隐私要求：用户可以一键抹掉她观察到的一切）。 */
-  public clear(): void {
+  /**
+   * 按保留期清理**明细**：过期的那一天先压成一行写进 `archive/<月>.md`，再删掉三个明细文件。
+   *
+   * 删的三样（一天一份、只增不减）：
+   *   observations-<日期>.jsonl / timeline-<日期>.json / daily-<日期>.md
+   * 保留的：`habits.json`（聚合画像）与 `archive/`（一行一天）。
+   * `perception-log.md` 是一个追加文件，按行里的日期**裁剪**（新格式带完整日期；
+   * 早期那种只有 `HH:MM` 的行没有日期，保守起见留着 —— 它们数量有限）。
+   *
+   * @param retentionDays <= 0 = 永久保留（什么都不做）
+   * @returns 这次实际清理的天数（0 = 没有可清理的）
+   */
+  public pruneOldData(retentionDays: number, nowMs: number = Date.now()): number {
+    if (!Number.isFinite(retentionDays) || retentionDays <= 0) return 0;
+    let removed = 0;
     try {
+      if (!existsSync(this.dir)) return 0;
+      const files = readdirSync(this.dir);
+      const observationDays = files
+        .map((name) => /^observations-(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(name)?.[1] ?? '')
+        .filter((day) => day !== '');
+      const timelineDays = files
+        .map((name) => /^timeline-(\d{4}-\d{2}-\d{2})\.json$/.exec(name)?.[1] ?? '')
+        .filter((day) => day !== '');
+      const dailyDays = files
+        .map((name) => /^daily-(\d{4}-\d{2}-\d{2})\.md$/.exec(name)?.[1] ?? '')
+        .filter((day) => day !== '');
+      const expired = selectExpiredDays([...new Set([...observationDays, ...timelineDays, ...dailyDays])], nowMs, retentionDays);
+      for (const day of expired) {
+        const line = this.buildArchiveLine(day);
+        this.appendArchive(day, line);
+        for (const name of [`observations-${day}.jsonl`, `timeline-${day}.json`, `daily-${day}.md`]) {
+          try {
+            rmSync(join(this.dir, name), { force: true });
+          } catch (error) {
+            this.logger.warn('pruning a daily file failed', { error: describeError(error), data: { name } });
+          }
+        }
+        removed += 1;
+      }
+      if (removed > 0) {
+        this.trimLogFile(retentionDays, nowMs);
+        this.logger.info('perception detail pruned', { data: { days: removed, retentionDays, archive: this.archiveDir } });
+      }
+    } catch (error) {
+      this.logger.warn('pruning perception data failed', { error: describeError(error) });
+    }
+    return removed;
+  }
+
+  /** 一天明细 -> 一行归档文本（时间线 json 有汇总就用它；没有就从观察里数场景）。 */
+  private buildArchiveLine(day: string): string {
+    const timeline = this.readDayTimeline(day);
+    if (timeline) {
+      return formatArchiveLine({
+        day,
+        activeMinutes: timeline.totals.activeMinutes,
+        idleMinutes: timeline.totals.idleMinutes,
+        byScene: timeline.totals.byScene.map((item) => ({ scene: item.scene, minutes: item.minutes })),
+        apps: timeline.totals.byApp.map((item) => item.app),
+      });
+    }
+    const counts = new Map<string, number>();
+    for (const observation of this.readObservations(day)) {
+      if (observation.scene === 'idle') continue;
+      counts.set(observation.scene, (counts.get(observation.scene) ?? 0) + 1);
+    }
+    const byScene = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([scene, count]) => ({ scene, minutes: count * 0.5 }));   // 一条观察 ≈ 30 秒
+    return formatArchiveLine({
+      day,
+      activeMinutes: byScene.reduce((sum, item) => sum + item.minutes, 0),
+      idleMinutes: 0,
+      byScene,
+      apps: [],
+    });
+  }
+
+  /** 归档文件按**月**一份（`archive/2026-06.md`），行内是"一天一行"。 */
+  private appendArchive(day: string, line: string): void {
+    const month = day.slice(0, 7);
+    mkdirSync(this.archiveDir, { recursive: true });
+    const file = join(this.archiveDir, `${month}.md`);
+    if (!existsSync(file)) {
+      writeFileSync(
+        file,
+        `# ${month} 的活动归档\n\n> 明细（逐条观察、当天区间）已按保留期清理，这里每天留一行摘要。\n\n`,
+        'utf8',
+      );
+    }
+    appendFileSync(file, `${line}\n`, 'utf8');
+  }
+
+  /** 裁剪感知日志文件：只保留保留期内的行（没有日期的老行保守留着）。 */
+  private trimLogFile(retentionDays: number, nowMs: number): void {
+    try {
+      if (!existsSync(this.logFile)) return;
+      const raw = readFileSync(this.logFile, 'utf8');
+      const kept: string[] = [];
+      for (const line of raw.split('\n')) {
+        const matched = /^- (\d{4}-\d{2}-\d{2}) /.exec(line);
+        if (!matched) {
+          kept.push(line);
+          continue;
+        }
+        if (selectExpiredDays([matched[1] ?? ''], nowMs, retentionDays).length === 0) kept.push(line);
+      }
+      writeFileSync(this.logFile, kept.join('\n'), 'utf8');
+    } catch (error) {
+      this.logger.warn('trimming perception log failed', { error: describeError(error) });
+    }
+  }
+
+  /** 读某天的区间 json（只取汇总，供归档用；坏文件当没有）。 */
+  private readDayTimeline(day: string): DayTimeline | null {
+    const file = join(this.dir, `timeline-${day}.json`);
+    if (!existsSync(file)) return null;
+    try {
+      const raw = readFileSync(file, 'utf8').trim();
+      if (raw === '') return null;
+      const parsed = JSON.parse(raw) as Partial<DayTimeline>;
+      const segments = Array.isArray(parsed.segments) ? (parsed.segments as DayTimeline['segments']) : [];
+      return {
+        date: typeof parsed.date === 'string' ? parsed.date : day,
+        segments,
+        totals: summarizeDay(segments),
+        narrative: typeof parsed.narrative === 'string' ? parsed.narrative : '',
+        updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : '',
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /** 归档目录（面板/日志要显示"明细被归档到哪了"）。 */
+  public get archiveDir(): string {
+    return join(this.dir, 'archive');
+  }
+
+  /** 清空（隐私要求：用户可以一键抹掉她观察到的一切）。 */
+  public clear(): void {    try {
       for (const file of readdirSync(this.dir)) {
         if (file === 'perception-log.md') continue;
         try {

@@ -190,7 +190,44 @@ app.whenReady().then(async () => {
     reflect.bodyLength > 10 && reflect.adjustmentsAfterReset === 0,
   );
 
-  /* 6) 滚到成长面板并截图 */
+  /*
+   * 7) 记忆宫殿压缩阈值：面板上改完必须落到主进程。
+   *
+   * 这条与感知面板的"明细保留天数"是同一类风险 —— 数字只写在类型与面板里、
+   * 主进程根本没读（`pruneOldReflections` 以前就犯过这个错），所以走真实路径回读。
+   */
+  const compress = await run(`(async () => {
+    const before = await window.settingsAPI.growth.status();
+    const input = document.getElementById('growth-palace-compress-months');
+    if (!input) return { ok: false, reason: 'missing-input' };
+    input.value = '3';
+    document.getElementById('growth-settings-save').click();
+    await new Promise((r) => setTimeout(r, 1200));
+    const after = await window.settingsAPI.growth.status();
+    return {
+      ok: true,
+      before: before.settings.palaceCompressMonths,
+      after: after.settings.palaceCompressMonths,
+      keepDays: after.settings.keepReflectionDays,
+      inputValue: input.value,
+    };
+  })()`);
+  step(
+    '记忆宫殿：压缩阈值（月）可保存到主进程，0 = 不压缩（不会把邻居设置改坏）',
+    compress,
+    compress.ok === true && compress.after === 3 && compress.keepDays > 0,
+  );
+  // 复原成默认的 6
+  await run(`(async () => {
+    const input = document.getElementById('growth-palace-compress-months');
+    if (!input) return false;
+    input.value = '6';
+    document.getElementById('growth-settings-save').click();
+    await new Promise((r) => setTimeout(r, 800));
+    return true;
+  })()`);
+
+  /* 8) 滚到成长面板并截图 */
   await run(`(() => {
     const target = document.getElementById('growth-panel-root');
     if (target) target.scrollIntoView({ block: 'start' });

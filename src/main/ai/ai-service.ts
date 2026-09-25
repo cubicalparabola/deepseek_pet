@@ -45,6 +45,7 @@ import type { Logger } from '../../shared/logger';
 import { describeError } from '../../shared/errors';
 import { AIConfigStore } from './ai-config-store';
 import { DiaryService, todayKey, type DiaryContext } from './diary-service';
+import { buildRollingSummaryMessages, fallbackRollingSummary, sanitizeSummary } from '../../shared/memory-summary';
 import { EmotionService } from './emotion-service';
 import { extractFactsFromModelOutput, extractFactsHeuristic } from './fact-extract';
 import { LLMClient, LLMError, type LLMMessage } from './llm-client';
@@ -385,7 +386,7 @@ export class AIService {
     const settings = this.settings;
     const context = settings.memory
       ? this.memory.buildContext(userText)
-      : { facts: [], pastSnippets: [], todayEvents: [], recentTurns: [], factCount: 0 };
+      : { facts: [], pastSnippets: [], todayEvents: [], recentTurns: [], factCount: 0, summary: '' };
 
     const systemLines: string[] = [settings.persona.trim()];
     if (settings.emotion) {
@@ -399,6 +400,11 @@ export class AIService {
         nameLine,
         context.factCount > 0 ? `你一共记得 ${context.factCount} 件关于主人的事，以下是最相关的几条：` : '',
         ...factLines,
+        /*
+         * 滚动前情（更早的对话被压成的一段）：它补上"只带最近 6 轮"造成的遗忘。
+         * 放在事实之后、片段之前 —— 先说"长期记得的"，再说"最近相关的"。
+         */
+        context.summary.trim() === '' ? '' : `更早的对话，你记在心里（前情摘要）：${context.summary.trim()}`,
         snippetLines.length > 0 ? '过去几天相关的片段（可用于"你之前说过…"这类自然的提起）：' : '',
         ...snippetLines,
       ].filter((line) => line !== '');
@@ -524,8 +530,60 @@ export class AIService {
     }
 
     this.turnsSinceConsolidate = 0;
+    /*
+     * 顺手滚动一次**前情摘要**（对话的压缩机制）：
+     * 把"更早的那些轮"（除了最近 6 轮之外）压成一段 ≤600 字的前情。
+     * 与事实抽取同一次整理里做，避免再排一次调度；失败只记日志。
+     */
+    await this.rollSummary().catch((error: unknown) => {
+      this.logger.warn('rolling summary failed', { error: describeError(error) });
+    });
     this.emitStatus();
     return { added, updated };
+  }
+
+  /**
+   * 滚动前情摘要：`旧摘要 + 更早的轮次 -> 新摘要`（写进 `profile.summary`，进聊天提示词）。
+   *
+   * 两个刻意的选择：
+   * - **最近 6 轮不并入**：那几轮本来就会原样进 prompt（`recentTurns(6)`），压进去是浪费；
+   * - **没模型也滚动**：用 `fallbackRollingSummary()`（抽取式），否则"没配密钥"时
+   *   这条机制会静默失效，而它恰恰是长会话里最需要的。
+   */
+  public async rollSummary(): Promise<string> {
+    if (!this.settings.memory) return '';
+    const turns = this.memory.recentTurnsAcrossDays(60);
+    const older = turns.slice(0, Math.max(0, turns.length - 6));
+    const previous = this.memory.getProfile().summary;
+    const covered = this.memory.getProfile().summaryTurns ?? 0;
+    // 没有新的更早轮次就不重复摘要（同一个输入不该产生新的一次调用）
+    if (older.length === 0 || older.length <= covered) return previous;
+
+    // 与上面的事实抽取保持同一种模式：能不能用模型由 `evaluateAIUsability` 决定
+    if (evaluateAIUsability(this.settings).usable) {
+      const messages = buildRollingSummaryMessages({ previous, turns: older, petName: this.settings.petName });
+      const result = await this.llm.complete({
+        messages: [
+          { role: 'system', content: messages.system },
+          { role: 'user', content: messages.user },
+        ],
+        temperature: 0.3,
+        maxTokens: 500,
+      });
+      this.calls += 1;
+      this.config.addUsage(result.totalTokens);
+      this.emotion.refreshTokens();
+      const summary = sanitizeSummary(result.text);
+      if (summary !== '') {
+        this.memory.setSummary(summary, older.length);
+        this.logger.info('rolling summary updated by model', { data: { turns: older.length, chars: summary.length } });
+        return summary;
+      }
+    }
+    const fallback = fallbackRollingSummary(previous, older);
+    this.memory.setSummary(fallback, older.length);
+    this.logger.info('rolling summary updated (local)', { data: { turns: older.length, chars: fallback.length } });
+    return fallback;
   }
 
   /** 到点了就整理（不阻塞对话）。 */
@@ -657,6 +715,10 @@ export class AIService {
               factLines === '' ? '（无）' : factLines,
               '',
               `情绪：${context.mood.start} → ${context.mood.end}（最低 ${context.mood.low}）`,
+              // 滚动前情：日记里也该带上"更早的那些天"，否则日记只看得到今天
+              ...(this.memory.getProfile().summary.trim() === ''
+                ? []
+                : ['', '更早的对话（前情摘要）：', this.memory.getProfile().summary.trim()]),
               `互动片段：`,
               context.highlights.event.length > 0 ? context.highlights.event.join('\n') : '（无）',
               // 今天在做什么（感知模块的时间线）：日记里提一句会让"她记得主人"更具体

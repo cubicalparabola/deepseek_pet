@@ -27,6 +27,63 @@ function minutesBetween(startIso: string, endIso: string): number {
   return Math.round((ms / 60000) * 10) / 10;
 }
 
+/* -------------------------------------------------------------------------- */
+/* 保留期与归档（"不让数据无限增长"）                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 从一堆 `YYYY-MM-DD` 里挑出**超过保留期**的日子（纯函数，可被验收断言）。
+ *
+ * @param days 候选日期（别的形状一律忽略，坏文件名不该被删）
+ * @param nowMs 现在
+ * @param retentionDays 保留天数；**<= 0 表示永久保留**（返回空数组 = 什么都不删）
+ */
+export function selectExpiredDays(days: readonly string[], nowMs: number, retentionDays: number): string[] {
+  if (!Number.isFinite(retentionDays) || retentionDays <= 0) return [];
+  const cutoff = new Date(nowMs);
+  cutoff.setHours(0, 0, 0, 0);
+  cutoff.setDate(cutoff.getDate() - Math.round(retentionDays));
+  return days
+    .filter((day) => /^\d{4}-\d{2}-\d{2}$/.test(day))
+    .filter((day) => {
+      const date = new Date(`${day}T00:00:00`);
+      return !Number.isNaN(date.getTime()) && date.getTime() < cutoff.getTime();
+    })
+    .sort();
+}
+
+/** 归档一行的输入（一天的全部统计都在这儿，别的字段不再落盘）。 */
+export interface ArchiveLineInput {
+  readonly day: string;
+  readonly activeMinutes: number;
+  readonly idleMinutes: number;
+  readonly byScene: readonly { readonly scene: string; readonly minutes: number }[];
+  readonly apps: readonly string[];
+}
+
+/**
+ * 把一天压成**一行**归档文本（纯函数）。
+ *
+ * 为什么要有归档这一步：明细（每 30 秒一条观察、当天的区间 json、当天的 md）
+ * 过了保留期就该删，但"那天在电脑前多久、主要在做什么"值得留一句话 ——
+ * 删掉明细之前先把它写成一行，用户翻 `archive/<月>.md` 仍能看到这一天。
+ */
+export function formatArchiveLine(input: ArchiveLineInput): string {
+  const scenes = input.byScene
+    .slice(0, 3)
+    .map((item) => `${sceneLabel(item.scene as Parameters<typeof sceneLabel>[0])} ${formatDuration(item.minutes)}`)
+    .join('、');
+  const apps = input.apps.slice(0, 3).join('、');
+  const parts = [
+    `- ${input.day}`,
+    `在电脑前 ${formatDuration(input.activeMinutes)}`,
+    input.idleMinutes > 0 ? `离开 ${formatDuration(input.idleMinutes)}` : '',
+    scenes === '' ? '（没有明确活动）' : scenes,
+    apps === '' ? '' : `主要程序 ${apps}`,
+  ].filter((part) => part !== '');
+  return parts.join(' · ');
+}
+
 /** 这一段是不是"人不在/没动"。 */
 export function isIdleSegment(segment: ActivitySegment): boolean {
   return segment.scene === 'idle';

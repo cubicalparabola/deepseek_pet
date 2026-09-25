@@ -273,8 +273,12 @@ export interface MemoryProfile {
   readonly userName: string;
   readonly petName: string;
   readonly facts: readonly MemoryFact[];
-  /** 记忆摘要（由模型整理，供 prompt 用；没有则为空串）。 */
+  /** 记忆摘要（**滚动前情**：更早的对话被压成这一段，供 prompt 用；没有则为空串）。 */
   readonly summary: string;
+  /** 摘要最后更新的时间（ISO；没写过为空串）。 */
+  readonly summaryUpdatedAt?: string;
+  /** 摘要已经覆盖了多少轮对话（下次只并入比它更新的轮次）。 */
+  readonly summaryTurns?: number;
   readonly updatedAt: string;
 }
 

@@ -244,10 +244,51 @@ app.whenReady().then(async () => {
   );
 
   /*
+   * 10) 明细保留天数：面板上改完必须落到主进程。
+   *
+   * 这个数字以前只存在于类型和面板里（"面板承诺了但代码没做"的老毛病），
+   * 所以这里走真实路径：改 input → 点「保存采样与频率」→ 回读主进程设置。
+   */
+  const retention = await run(`(async () => {
+    const before = await window.settingsAPI.perception.status();
+    const input = document.getElementById('perception-retention-days');
+    if (!input) return { ok: false, reason: 'missing-input' };
+    input.value = '45';
+    document.getElementById('perception-sampling-save').click();
+    await new Promise((r) => setTimeout(r, 1200));
+    const after = await window.settingsAPI.perception.status();
+    // 顺手把界面上其它采样字段一起回读，确认这次保存没有把邻居改坏
+    return {
+      ok: true,
+      before: before.settings.retentionDays,
+      after: after.settings.retentionDays,
+      captureInterval: after.settings.captureIntervalMs,
+      windowTtl: after.settings.windowProbeTtlMs,
+      inputValue: input.value,
+    };
+  })()`);
+  const retentionOk = retention.ok === true && retention.after === 45 &&
+    retention.captureInterval > 0 && retention.windowTtl > 0;
+  step(
+    '感知面板：明细保留天数可保存到主进程（0 = 永久；过期先归档成一行再删明细）',
+    retention,
+    retentionOk,
+  );
+  // 复原成默认的 90，避免把诊断的写入留给下一次运行
+  await run(`(async () => {
+    const input = document.getElementById('perception-retention-days');
+    if (!input) return false;
+    input.value = '90';
+    document.getElementById('perception-sampling-save').click();
+    await new Promise((r) => setTimeout(r, 800));
+    return true;
+  })()`);
+
+  /*
    * 截图：滚到感知面板，肉眼验收排版。
    *
    * ⚠️ 这一段**不是断言**，也没有包在 `step()` 里 —— 所以
-   * `build/perception-ui.json` 的 `steps.length` 是 9（9 个断言），截图排在它们之后。
+   * `build/perception-ui.json` 的 `steps.length` 是 10（10 个断言），截图排在它们之后。
    */
   await run(`(() => {
     const target = document.getElementById('perception-panel-root');

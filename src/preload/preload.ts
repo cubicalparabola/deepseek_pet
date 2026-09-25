@@ -322,6 +322,7 @@ function createDefaultPerceptionStatus(): PerceptionStatus {
     cameraReady: false,
     windowContext: { count: 0, foregroundTitle: '', foregroundProcess: '', sample: [], backingOff: false },
     timeline: { date: '', activeMinutes: 0, idleMinutes: 0, byScene: [], byApp: [], recent: [], narrative: '' },
+    retention: { days: 0, lastPrunedAt: '', lastPrunedDays: 0 },
     dataDir: '',
     lastError: '',
   };

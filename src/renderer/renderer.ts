@@ -36,6 +36,7 @@ import { NODE_KINDS, POLICY_MIN_FACTOR } from '../shared/growth-types';
 import {
   applyInsights,
   clampOverlay,
+  compressPalaceNodes,
   defaultPolicyOverlay,
   describePolicy,
   effectivePerception,
@@ -90,13 +91,21 @@ import {
 } from '../shared/perception';
 import { createLoggerFactory } from '../shared/logging';
 import {
+  SUMMARY_MAX_CHARS,
+  buildRollingSummaryMessages,
+  fallbackRollingSummary,
+  sanitizeSummary,
+} from '../shared/memory-summary';
+import {
   SEGMENT_GAP_MS,
   appendObservation,
   buildNarrativeMessages,
+  formatArchiveLine,
   formatDuration,
   formatSegmentLine,
   formatTimelineText,
   localDayOf,
+  selectExpiredDays,
   summarizeDay,
 } from '../shared/timeline';
 import { EventBus } from './core/event-bus';
@@ -1111,6 +1120,13 @@ class PetApplication {
       readonly hungerFromTokens: typeof hungerFromTokens;
       readonly EMOTION: typeof EMOTION;
     };
+    /** 对话的滚动前情摘要（"更早说过的事"怎么压成一段）。 */
+    readonly memorySummary: {
+      readonly fallbackRollingSummary: typeof fallbackRollingSummary;
+      readonly buildRollingSummaryMessages: typeof buildRollingSummaryMessages;
+      readonly sanitizeSummary: typeof sanitizeSummary;
+      readonly SUMMARY_MAX_CHARS: typeof SUMMARY_MAX_CHARS;
+    };
     /** 读取主进程的 AI 状态（异步）。 */
     readonly aiStatus: () => Promise<AIStatusView | null>;    /** 让桌宠说一句话（异步，走与聊天窗口同一条链路）。 */
     readonly aiChat: (text: string) => Promise<AIChatReply | null>;
@@ -1180,6 +1196,9 @@ class PetApplication {
         readonly buildNarrativeMessages: typeof buildNarrativeMessages;
         readonly localDayOf: typeof localDayOf;
         readonly SEGMENT_GAP_MS: typeof SEGMENT_GAP_MS;
+        /** 明细保留期：挑出过期日 + 把一天压成归档的一行。 */
+        readonly selectExpiredDays: typeof selectExpiredDays;
+        readonly formatArchiveLine: typeof formatArchiveLine;
       };
     };
     readonly perceptionStatus: () => Promise<PerceptionStatus | null>;
@@ -1211,6 +1230,8 @@ class PetApplication {
       readonly formatLocalDate: typeof formatLocalDate;
       readonly localMonthKey: typeof localMonthKey;
       readonly renderPalaceMarkdown: typeof renderPalaceMarkdown;
+      /** 记忆宫殿压缩（"很久以前同种类的反复经历折成一条"）。 */
+      readonly compressPalaceNodes: typeof compressPalaceNodes;
     };
     readonly growthStatus: () => Promise<GrowthStatus | null>;
   } {
@@ -1231,6 +1252,12 @@ class PetApplication {
         moodLabel,
         hungerFromTokens,
         EMOTION,
+      },
+      memorySummary: {
+        fallbackRollingSummary,
+        buildRollingSummaryMessages,
+        sanitizeSummary,
+        SUMMARY_MAX_CHARS,
       },
       aiStatus: () => this.runtime.aiStatus(),
       aiChat: async (text: string) => {
@@ -1289,6 +1316,8 @@ class PetApplication {
           buildNarrativeMessages,
           localDayOf,
           SEGMENT_GAP_MS,
+          selectExpiredDays,
+          formatArchiveLine,
         },
       },
       perceptionStatus: async () => {
@@ -1321,6 +1350,7 @@ class PetApplication {
         formatLocalDate,
         localMonthKey,
         renderPalaceMarkdown,
+        compressPalaceNodes,
       },
       growthStatus: async () => {
         const bridge = this.runtime.growth();

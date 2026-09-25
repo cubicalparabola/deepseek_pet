@@ -175,6 +175,31 @@ export class GrowthStore {
     this.writeJson(this.nodesFile, this.nodes);
   }
 
+  /**
+   * 把被压缩掉的原始节点**留档**（`memory/archive/palace-<年>.json`）。
+   *
+   * 为什么必须归档而不是直接删：压缩是"折起来"，不是"丢掉"。
+   * 用户哪天想知道"那句'一起熬夜'到底有几次、分别是哪天"，档案里还查得到。
+   * 年份取这批节点里**最早**那个（同一个"很久以前"的故事留在同一份档案里）。
+   */
+  public appendPalaceArchive(nodes: readonly MemoryNode[], nowMs: number = Date.now()): string {
+    const dir = join(this.dir, 'archive');
+    const earliest = nodes.reduce((min, node) => (node.at < min ? node.at : min), nodes[0]?.at ?? '');
+    const year = /^\d{4}/.test(earliest) ? earliest.slice(0, 4) : String(new Date(nowMs).getFullYear());
+    const file = join(dir, `palace-${year}.json`);
+    try {
+      mkdirSync(dir, { recursive: true });
+      const existing = existsSync(file) ? (JSON.parse(readFileSync(file, 'utf8')) as unknown) : [];
+      const list = Array.isArray(existing) ? existing : [];
+      list.push({ archivedAt: new Date(nowMs).toISOString(), reason: 'compressed', nodes });
+      writeFileSync(file, `${JSON.stringify(list, null, 1)}\n`, 'utf8');
+      this.logger.info('palace archive written', { data: { file, nodes: nodes.length } });
+    } catch (error) {
+      this.logger.warn('writing palace archive failed', { error: describeError(error), data: { file } });
+    }
+    return file;
+  }
+
   /** 写可读镜像（`memory/palace.md`）。 */
   public savePalaceMarkdown(markdown: string): void {
     try {
@@ -392,6 +417,9 @@ export function sanitizeGrowthSettings(raw: unknown, fallback: GrowthSettings = 
   const keep = typeof record.keepReflectionDays === 'number' && Number.isFinite(record.keepReflectionDays)
     ? Math.min(3650, Math.max(7, Math.round(record.keepReflectionDays)))
     : fallback.keepReflectionDays;
+  const compressMonths = typeof record.palaceCompressMonths === 'number' && Number.isFinite(record.palaceCompressMonths)
+    ? Math.min(120, Math.max(0, Math.round(record.palaceCompressMonths)))
+    : fallback.palaceCompressMonths;
   return {
     palace: bool(record.palace, fallback.palace),
     reflection: bool(record.reflection, fallback.reflection),
@@ -399,6 +427,7 @@ export function sanitizeGrowthSettings(raw: unknown, fallback: GrowthSettings = 
     reflectionHour: hour,
     firstMeetAt: typeof record.firstMeetAt === 'string' ? record.firstMeetAt.slice(0, 40) : fallback.firstMeetAt,
     keepReflectionDays: keep,
+    palaceCompressMonths: compressMonths,
   };
 }
 

@@ -30,6 +30,7 @@ import { DEFAULT_GROWTH_SETTINGS, NODE_KINDS } from '../../shared/growth-types';
 import {
   applyInsights,
   daysBetween,
+  compressPalaceNodes,
   defaultPolicyOverlay,
   describePolicy,
   groupByMonth,
@@ -88,6 +89,8 @@ export class GrowthService {
   private pending: { at: number; key: string; kind: string; text: string; scene: string }[] = [];
   private lastError = '';
   private timer: NodeJS.Timeout | null = null;
+  /** 上次做"记忆宫殿压缩"的日子（每天一次）。 */
+  private lastCompressDay = '';
   private busy = false;
 
   public constructor(options: GrowthServiceOptions) {
@@ -109,6 +112,13 @@ export class GrowthService {
     // `keepReflectionDays` 要真的生效：把超期的反思与反馈流水归档删掉（默认 180 天）。
     // 之前这个设置只存在于类型与面板里，属于"面板承诺了但代码没做"（文档评审抓到）。
     this.pruneOldReflections();
+
+    /*
+     * 记忆宫殿压缩：把"很久以前、同种类同标题、反复发生"的节点折成一条
+     * （原始节点进 `memory/archive/palace-<年>.json`）。启动时做一次，
+     * 之后每天由调度器做一次 —— 时间轴不该无限变长。
+     */
+    this.compressPalace();
 
     // 第一次见面节点：装上她就该有一笔"起点"（用户可以在设置里改日期）
     if (this.settings.palace && !this.nodes.some((node) => node.kind === 'first-meet')) {
@@ -136,8 +146,29 @@ export class GrowthService {
     this.timer = null;
   }
 
-  /** 按 `keepReflectionDays` 清理超期反思（启动时一次；反思关掉时不动它的目录）。 */
-  private pruneOldReflections(now: number = Date.now()): void {
+  /**
+   * 压缩记忆宫殿（把很久以前的同类反复经历折成一条），原始节点留档。
+   *
+   * 触发点：启动时一次 + 调度器每天一次（跟反思检查同一个心跳）。
+   * `palaceCompressMonths <= 0` 或宫殿开关关掉时**什么都不做**（不写盘）。
+   */
+  public compressPalace(now: number = Date.now()): GrowthStatus {
+    if (!this.settings.palace || this.settings.palaceCompressMonths <= 0) return this.status();
+    const result = compressPalaceNodes(this.nodes, { nowMs: now, months: this.settings.palaceCompressMonths });
+    if (result.merged === 0 || result.removed.length === 0) return this.status();
+    // 先把被折掉的原始节点写进归档，再落盘新节点 —— 顺序反了就有丢数据窗口
+    this.store.appendPalaceArchive(result.removed, now);
+    this.nodes = result.nodes;
+    this.store.saveNodes(this.nodes);
+    this.store.savePalaceMarkdown(renderPalaceMarkdown(this.nodes, this.daysTogether()));
+    this.logger.info('palace compressed', {
+      data: { merged: result.merged, removed: result.removed.length, nodes: this.nodes.length, months: this.settings.palaceCompressMonths },
+    });
+    this.emitStatus();
+    return this.status();
+  }
+
+  /** 按 `keepReflectionDays` 清理超期反思（启动时一次；反思关掉时不动它的目录）。 */  private pruneOldReflections(now: number = Date.now()): void {
     if (!this.settings.reflection) return;
     const removed = this.store.pruneReflections(this.settings.keepReflectionDays, now);
     if (removed > 0) {
@@ -152,6 +183,13 @@ export class GrowthService {
       try {
         this.resolveFeedback(Date.now());
         void this.dueCheck();
+        // 记忆宫殿压缩：每天一次（与反思检查同一个心跳）。
+        // 跨天判断在 compressPalace 里没有，所以这里自己记一个"上次压缩的日子"。
+        const today = todayKey();
+        if (this.lastCompressDay !== today) {
+          this.lastCompressDay = today;
+          this.compressPalace();
+        }
       } catch (error) {
         this.logger.warn('growth scheduler tick failed', { error: describeError(error) });
       }
