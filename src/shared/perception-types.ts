@@ -78,6 +78,19 @@ export interface PerceptionSettings {
    * `google.com/search?q=...`），而分类只需要域名 —— 少存一点，隐私就多一分。
    */
   readonly storeFullUrl: boolean;
+  /**
+   * 是否把"现在开着哪些窗口 + 最上层窗口"作为判断依据。
+   *
+   * 这是几路证据里**最具体**的一路：进程名说清"用的什么软件"
+   * （`Typora` / `Code` / `msedge`），标题说清"在看什么"（`论文.pdf`、`桌面宠物.md`）。
+   * 实测一次 PowerShell `EnumWindows` 能拿到 29 个可见窗口 + 进程名 + 前台标记（~500ms），
+   * 比逐像素猜准得多。
+   */
+  readonly windowContext: boolean;
+  /** 窗口列表最多给模型看几条（越多越费 token，默认 12）。 */
+  readonly windowListLimit: number;
+  /** 窗口上下文的缓存时长（毫秒，默认 25000）。 */
+  readonly windowProbeTtlMs: number;
   /** 摄像头采样间隔（毫秒）—— 比屏幕采样更稀，省电也省 token。 */
   readonly cameraIntervalMs: number;
   /** 用户是否已显式授权摄像头（默认 false，只能由界面上的按钮置为 true）。 */
@@ -122,6 +135,11 @@ export const DEFAULT_PERCEPTION_SETTINGS: PerceptionSettings = {
   urlCaptureWidth: 1280,
   // 默认只留域名：查询串里可能是搜索词、token 等私人信息
   storeFullUrl: false,
+  // 窗口上下文：默认开。一次 EnumWindows 就能拿到"开着什么、最上层是哪个"，
+  // 是判断"在用哪个应用"最具体的一路证据。
+  windowContext: true,
+  windowListLimit: 12,
+  windowProbeTtlMs: 25000,
   cameraIntervalMs: 60000,
   // 唯一默认关闭的一项：摄像头必须用户显式授权（需求 3.5 原文）
   cameraAuthorized: false,
@@ -152,6 +170,9 @@ export interface PerceptionSettingsPatch {
   readonly captureUrl?: boolean;
   readonly urlCaptureWidth?: number;
   readonly storeFullUrl?: boolean;
+  readonly windowContext?: boolean;
+  readonly windowListLimit?: number;
+  readonly windowProbeTtlMs?: number;
   readonly cameraIntervalMs?: number;
   readonly cameraAuthorized?: boolean;
   readonly proactiveMinIntervalMs?: number;
@@ -182,6 +203,14 @@ export interface ScreenObservation {
    * 也让"浏览网页 vs 记笔记"这类判断有了确定性的第二道依据（见 `refineSceneByUrl`）。
    */
   readonly url?: string;
+  /**
+   * 最上层窗口的标题（**只存这一条**，不存整份窗口列表）。
+   *
+   * 为什么只存最上层：窗口列表是"当下环境"的临时上下文（进提示词就够了），
+   * 整份列表落盘会越积越多、也越来越像一份使用记录；而"最上层那个窗口"
+   * 对复盘"她当时凭什么这么判断"最有价值。
+   */
+  readonly windowTitle?: string;
   /** 是否判定为私人/敏感内容。 */
   readonly sensitive: boolean;
   /** 专注度：deep = 长时间同一件事，shallow = 频繁切换。 */
@@ -283,6 +312,17 @@ export interface PerceptionStatus {
   readonly interventionsToday: number;
   /** 摄像头是否已授权且渲染层已就绪。 */
   readonly cameraReady: boolean;
+  /** 窗口上下文（"开着什么 / 最上层是哪个"）——面板展示与排错用。 */
+  readonly windowContext: {
+    /** 最近一次枚举到的窗口条数。 */
+    readonly count: number;
+    readonly foregroundTitle: string;
+    readonly foregroundProcess: string;
+    /** 前几条窗口标题（预览，最多 5 条）。 */
+    readonly sample: readonly string[];
+    /** 探测是否处于失败退避（没有 PowerShell 等情况）。 */
+    readonly backingOff: boolean;
+  };
   /** 数据目录（观察记录与习惯画像都在里面）。 */
   readonly dataDir: string;
   readonly lastError: string;
@@ -370,6 +410,9 @@ export function sanitizePerceptionSettings(
     captureUrl: bool(record.captureUrl, fallback.captureUrl),
     urlCaptureWidth: num(record.urlCaptureWidth, fallback.urlCaptureWidth, 640, 3840),
     storeFullUrl: bool(record.storeFullUrl, fallback.storeFullUrl),
+    windowContext: bool(record.windowContext, fallback.windowContext),
+    windowListLimit: num(record.windowListLimit, fallback.windowListLimit, 1, 24),
+    windowProbeTtlMs: num(record.windowProbeTtlMs, fallback.windowProbeTtlMs, 5000, 600000),
     cameraIntervalMs: num(record.cameraIntervalMs, fallback.cameraIntervalMs, 10000, 3600000),
     cameraAuthorized: bool(record.cameraAuthorized, fallback.cameraAuthorized),
     proactiveMinIntervalMs: num(record.proactiveMinIntervalMs, fallback.proactiveMinIntervalMs, 60000, 86400000),

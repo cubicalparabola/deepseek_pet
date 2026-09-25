@@ -16,7 +16,7 @@
  */
 
 import type { CameraFrameResult, PerceptionViewMode, PerceptionViewResult, SceneKind, ScreenObservation } from '../../shared/perception-types';
-import { SCENE_LABELS, isUrlLike, matchesSensitiveKeywords, normalizeScene, refineScene, safeHost } from '../../shared/perception';
+import { SCENE_LABELS, isUrlLike, matchesSensitiveKeywords, normalizeScene, normalizeWindowTitle, refineScene, safeHost } from '../../shared/perception';
 import type { LLMContentPart } from '../ai/llm-client';
 import type { LLMClient } from '../ai/llm-client';
 import { LLMError } from '../ai/llm-client';
@@ -33,6 +33,8 @@ export interface VisionAnalyzerOptions {
   readonly getSceneFixes: () => readonly string[];
   /** 是否把完整网址写进观察记录（默认 false = 只存域名）。 */
   readonly storeFullUrl: () => boolean;
+  /** 当前最上层窗口（进程名 + 标题）——用于确定性纠正与写进观察记录。 */
+  readonly getForegroundWindow: () => { readonly process: string; readonly title: string } | null;
   /** 是否允许做"内容理解"（3.2 的开关）。 */
   readonly isVisionEnabled: () => boolean;
 }
@@ -100,12 +102,15 @@ export class VisionAnalyzer {
    * @param imageBase64 JPEG 的 base64（不带 data URL 前缀）
    * @param mimeType 整屏图的 MIME
    * @param addressBar 可选的**地址栏横条**（高分辨率小图）——用来让模型读出网址；
-   *   传了就作为第二张图附在同一次请求里（多几十 token，但换来最可靠的网页线索）
+   *   传了就作为额外的一张图附在同一次请求里（多几十 token，但换来最可靠的网页线索）
+   * @param windowContext 可选的**窗口上下文文本**（最上层窗口 + 打开的窗口列表）——
+   *   这是比像素更具体的证据，直接以文本形式给出
    */
   public async analyzeScene(
     imageBase64: string,
     mimeType = 'image/jpeg',
     addressBar?: { readonly dataBase64: string; readonly mimeType: string } | null,
+    windowContext?: string | null,
   ): Promise<SceneAnalysis | null> {
     const client = this.options.getClient();
     if (!client) return null;
@@ -118,9 +123,15 @@ export class VisionAnalyzer {
       if (addressBar && addressBar.dataBase64 !== '') {
         parts.push({
           type: 'text',
-          text: '第二张图是屏幕顶部的地址栏区域（放大了）：如果你能在里面看清网址，请填进 url 字段；看不清就留空，不要猜。',
+          text: '刚才那张是整屏。这张是屏幕顶部的地址栏区域（放大了）：如果你能在里面看清网址，请填进 url 字段；看不清就留空，不要猜。',
         });
         parts.push({ type: 'image', mimeType: addressBar.mimeType, dataBase64: addressBar.dataBase64 });
+      }
+      if (typeof windowContext === 'string' && windowContext.trim() !== '') {
+        parts.push({
+          type: 'text',
+          text: `另外，这是系统层面的窗口信息（比你从像素里猜的更可靠，请优先参考它来判断 app 与 scene）：\n${windowContext}`,
+        });
       }
       const result = await client.complete({
         messages: [
@@ -148,6 +159,7 @@ export class VisionAnalyzer {
         browserChrome: parsed?.browserChrome === true,
         editorChrome: parsed?.editorChrome === true,
         url: urlLike,
+        window: this.options.getForegroundWindow(),
         fixes: this.options.getSceneFixes(),
       });
       if (refined.reason !== '') {
@@ -160,11 +172,14 @@ export class VisionAnalyzer {
        * 查询串里常有搜索词等私人信息，而分类只需要域名。
        */
       const storedUrl = urlLike === '' ? '' : this.options.storeFullUrl() ? urlLike.slice(0, 300) : safeHost(urlLike);
+      const foreground = this.options.getForegroundWindow();
       const observation: ScreenObservation = {
         at: new Date().toISOString(),
         scene: refined.scene,
         app: app.slice(0, 60),
         ...(storedUrl !== '' ? { url: storedUrl } : {}),
+        // 只把"最上层窗口"存进观察记录（整份窗口列表只进提示词，不落盘）
+        ...(foreground && foreground.title !== '' ? { windowTitle: normalizeWindowTitle(foreground.title).slice(0, 120) } : {}),
         activity: activity.slice(0, 120),
         // 两道闸：模型判定 + 关键词命中（见 shared/perception 的 isSensitive 说明）
         sensitive: modelSensitive || matchesSensitiveKeywords(`${app} ${activity}`, keywords),
@@ -200,12 +215,14 @@ export class VisionAnalyzer {
    *
    * @param addressBar 可选的地址栏横条：网页上的问题（报错、总结）有了网址会答得更准，
    *   例如"这是 GitHub issue 里的报错"。与整屏一样，用完即弃。
+   * @param windowContext 可选的窗口上下文文本（最上层窗口 + 打开的窗口列表）。
    */
   public async view(
     mode: PerceptionViewMode,
     imageBase64: string,
     mimeType = 'image/jpeg',
     addressBar?: { readonly dataBase64: string; readonly mimeType: string } | null,
+    windowContext?: string | null,
   ): Promise<PerceptionViewResult> {
     const client = this.options.getClient();
     if (!this.options.isVisionEnabled()) {
@@ -215,15 +232,23 @@ export class VisionAnalyzer {
       return { ok: false, mode, text: '我还没接上大模型，看不懂屏幕内容（可以去设置里填密钥）。', scene: 'other', sensitive: false, tokens: 0, error: 'no-llm' };
     }
     try {
+      /*
+       * ⚠️ parts 的顺序必须与文案一致：**整屏在前、地址栏横条在后**。
+       * 早期版本把横条 push 到了整屏之前，而提示词写着"第二张图是地址栏区域"——
+       * 模型会把整屏当成地址栏看（文档评审抓到这个不自洽）。
+       */
       const parts: LLMContentPart[] = [{ type: 'text', text: VIEW_INSTRUCTIONS[mode] }];
+      parts.push({ type: 'image', mimeType, dataBase64: imageBase64 });
       if (addressBar && addressBar.dataBase64 !== '') {
         parts.push({
           type: 'text',
-          text: '第二张图是屏幕顶部的地址栏区域（放大了）：如果是网页，请结合里面的网址理解这些内容（例如说明是在哪个网站、什么页面）。',
+          text: '刚才那张是整屏。这张是屏幕顶部的地址栏区域（放大了）：如果是网页，请结合里面的网址理解这些内容（例如说明是在哪个网站、什么页面）。',
         });
         parts.push({ type: 'image', mimeType: addressBar.mimeType, dataBase64: addressBar.dataBase64 });
       }
-      parts.push({ type: 'image', mimeType, dataBase64: imageBase64 });
+      if (typeof windowContext === 'string' && windowContext.trim() !== '') {
+        parts.push({ type: 'text', text: `系统层面的窗口信息（比你从像素里猜的更可靠）：\n${windowContext}` });
+      }
       const result = await client.complete({
         messages: [
           {

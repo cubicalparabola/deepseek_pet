@@ -48,8 +48,11 @@ import {
   isSensitive,
   learnHabit,
   planIntervention,
+  refineSceneByWindow,
   sceneLabel,
   topSceneAtHour,
+  describeWindowContext,
+  withoutOwnWindows,
   type InterventionPlan,
 } from '../../shared/perception';
 import type { PolicyOverlay } from '../../shared/growth-types';
@@ -63,6 +66,7 @@ import { ObservationStore, localDay } from './observation-store';
 import { PerceptionSettingsStore } from './settings-store';
 import { ScreenCapture } from './screen-capture';
 import { VisionAnalyzer } from './vision';
+import { WindowContextProbe } from './window-context';
 
 export interface PerceptionServiceOptions {
   /** 数据根目录（`%APPDATA%\DesktopPet`）。 */
@@ -101,6 +105,8 @@ export class PerceptionService {
   private readonly store: ObservationStore;
   private readonly capture: ScreenCapture;
   private readonly vision: VisionAnalyzer;
+  /** 窗口上下文（"开着什么 / 最上层是哪个"）。 */
+  private readonly windows: WindowContextProbe;
 
   private timer: NodeJS.Timeout | null = null;
   private cameraTimer: NodeJS.Timeout | null = null;
@@ -135,7 +141,13 @@ export class PerceptionService {
       getSensitiveKeywords: () => this.settings.sensitivityKeywords,
       getSceneFixes: () => this.settings.sceneFixes,
       storeFullUrl: () => this.settings.storeFullUrl,
+      getForegroundWindow: () => this.windows.current()?.foreground ?? null,
       isVisionEnabled: () => this.settings.vision && this.settings.screen,
+    });
+    this.windows = new WindowContextProbe({
+      logger: options.logger,
+      isEnabled: () => this.settings.windowContext && !this.settings.privacyMode,
+      ttlMs: this.settings.windowProbeTtlMs,
     });
     this.behavior = buildBehaviorSnapshot({
       idleSeconds: 0,
@@ -203,6 +215,49 @@ export class PerceptionService {
     // 今天的记录在内存里（还没落盘的也算），历史日期读文件
     if (date === localDay()) return this.observations;
     return this.store.readObservations(date);
+  }
+
+  /**
+   * 没模型时的降级观察：只凭最上层窗口的进程名 + 标题判断场景。
+   *
+   * 返回 null 表示"认不出来"（那就**不记观察**，宁可不写也不要写一条 other 污染习惯统计）。
+   */
+  private localObservationFromWindow(now: number): ScreenObservation | null {
+    const foreground = this.windows.current()?.foreground ?? null;
+    if (!foreground) return null;
+    const refined = refineSceneByWindow({ process: foreground.process, title: foreground.title, scene: 'other' });
+    if (refined.reason === '' || refined.scene === 'other') return null;
+    return {
+      at: new Date(now).toISOString(),
+      scene: refined.scene,
+      // 进程名当应用名（没有视觉模型时这是最接近"在用哪个应用"的信息）
+      app: foreground.process.slice(0, 60),
+      activity: refined.reason.slice(0, 120),
+      sensitive: false,
+      focus: 'unknown',
+      summary: '',
+      suggestion: '',
+      mode: 'local',
+      tokens: 0,
+      windowTitle: foreground.title.slice(0, 120),
+    };
+  }
+
+  /**
+   * 窗口上下文 -> 提示词文本（并把快照留给 `refineScene`/状态用）。
+   *
+   * 窗口列表会**过滤掉我们自己的窗口**（设置窗口、聊天窗口）：它们的标题
+   * （"桌宠设置"）混进去只会干扰判断，而且它们常常正好是前台窗口。
+   */
+  private async windowContextText(force = false): Promise<string | null> {
+    if (!this.settings.windowContext || this.settings.privacyMode) return null;
+    const snapshot = await this.windows.probe(force);
+    if (!snapshot) return null;
+    return describeWindowContext({
+      foreground: snapshot.foreground,
+      windows: withoutOwnWindows(snapshot.windows),
+      limit: this.settings.windowListLimit,
+    });
   }
 
   /** 习惯采样总数（成长模块判断"养成的习惯"用）。 */
@@ -363,12 +418,22 @@ export class PerceptionService {
     const llmUsable = this.options.isLLMUsable();
     let observation: ScreenObservation | null = null;
 
+    /*
+     * 窗口上下文**独立于大模型**先取一次。
+     *
+     * 为什么不能放在 `if (llmUsable)` 里：窗口信息本来是纯本地的
+     * （一次 Windows 枚举），没配密钥时也拿得到 ——
+     * 面板要能显示"她现在看到的是什么窗口"，而且它能支撑**无需模型**的粗粒度场景判断
+     * （见下面的本地降级路径）。早期版本把它塞进 LLM 分支，导致没密钥时这一路完全不工作。
+     */
+    const windowContext = await this.windowContextText();
+
     if (llmUsable) {
       const frame = await this.capture.grab();
       if (frame) {
         // 地址栏横条：与整屏同一轮截取，只为让模型读出网址（读不到就整条不传）
         const addressBar = await this.capture.grabAddressBar();
-        const analysis = await this.vision.analyzeScene(frame.dataBase64, frame.mimeType, addressBar);
+        const analysis = await this.vision.analyzeScene(frame.dataBase64, frame.mimeType, addressBar, windowContext);
         if (analysis) {
           observation = analysis.observation;
           this.lastObservation = observation;
@@ -391,12 +456,38 @@ export class PerceptionService {
         this.lastError = '截屏失败（桌面捕获不可用）';
       }
     } else {
-      // 没模型：不截屏、不浪费算力，只跑本地行为信号（连续使用/深夜）
+      /*
+       * 没模型时的**本地降级**：只凭"最上层窗口的进程名 + 标题"判断场景。
+       *
+       * 这一路完全离线：`Typora` -> 写东西、`Code` -> 写代码、标题带 `.pdf` -> 读论文…
+       * 因此没配密钥时习惯统计与"她在做什么"也能有基本信号，
+       * 而不是功能全哑（只是精度不如视觉模型）。
+       */
+      observation = this.localObservationFromWindow(now);
+      if (observation) {
+        this.lastObservation = observation;
+        this.observations.push(observation);
+        if (this.observations.length > OBSERVATION_MEMORY) this.observations.shift();
+        this.store.recordObservation(observation, `${sceneLabel(observation.scene)}（仅窗口信息）`);
+        if (this.settings.habits) {
+          this.habits = learnHabit(this.habits, observation);
+          this.store.saveHabits(this.habits);
+        }
+      }
       this.lastError = '';
     }
 
     this.refreshBehavior(now);
-    this.decide(observation, now);
+    /*
+     * 干预只走**模型判定的那一路**（`observation.mode === 'llm'`）。
+     *
+     * 为什么本地降级不主动开口：离线路径只凭窗口标题猜场景（"标题里有 Code 就当写代码"），
+     * 猜错了就会冒出一句莫名其妙的"主人开始写代码了" —— 主动开口是用户可见的行为，
+     * 只应该建立在更可靠的证据上。
+     * 本地观察仍然**记录**（喂习惯统计/状态/日志），而"久坐/深夜"这类**行为信号**
+     * 不依赖模型（传 null 也照样会触发），所以没密钥时她依然会提醒你休息。
+     */
+    this.decide(observation && observation.mode === 'llm' ? observation : null, now);
     this.emitStatus();
     return this.status();
   }
@@ -427,7 +518,9 @@ export class PerceptionService {
      * 放在"确认能用大模型"之后取，避免白截一张图。
      */
     const addressBar = await this.capture.grabAddressBar();
-    const result = await this.vision.view(mode, frame.dataBase64, frame.mimeType, addressBar);
+    // 按需"立刻看一次"要拿最新的窗口信息（并顺手刷新缓存）
+    const windowContext = await this.windowContextText(true);
+    const result = await this.vision.view(mode, frame.dataBase64, frame.mimeType, addressBar, windowContext);
     if (result.ok) {
       this.store.log('observation', `「${viewModeLabel(mode)}」结果：${result.text.slice(0, 80)}`);
     }
@@ -538,6 +631,17 @@ export class PerceptionService {
       lastIntervention: this.lastIntervention,
       interventionsToday: this.interventionTimes.filter((at) => localDay(new Date(at)) === localDay(new Date(now))).length,
       cameraReady: this.cameraReady && this.settings.cameraAuthorized && this.settings.camera,
+      windowContext: (() => {
+        const snapshot = this.windows.current();
+        const list = snapshot ? withoutOwnWindows(snapshot.windows) : [];
+        return {
+          count: list.length,
+          foregroundTitle: snapshot?.foreground?.title ?? '',
+          foregroundProcess: snapshot?.foreground?.process ?? '',
+          sample: list.slice(0, 5).map((item) => `${item.title}（${item.process || '未知'}）`),
+          backingOff: this.windows.backingOff,
+        };
+      })(),
       dataDir: this.store.dataDir,
       lastError: this.lastError,
     };

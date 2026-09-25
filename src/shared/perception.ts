@@ -320,6 +320,8 @@ export interface SceneRefineInput {
   readonly editorChrome?: boolean;
   /** 模型从地址栏读到的网址（可空；空串表示没读出来）。 */
   readonly url?: string;
+  /** 最上层窗口（进程名 + 标题）——比像素更具体的证据。 */
+  readonly window?: { readonly process: string; readonly title: string } | null;
   /** 用户自定义纠正规则。 */
   readonly fixes?: readonly string[];
 }
@@ -329,10 +331,10 @@ export interface SceneRefineInput {
  *
  * 规则优先级（越靠前越优先）：
  * 1. **用户自定义纠正**（`Chrome=browsing`）—— 用户说了算；
- * 2. **网址域名**（`youtube.com` -> 看视频、`arxiv.org` -> 读论文、任何网页 + 写东西 -> 浏览网页）
- *    —— 只要读到了网址，它比像素和窗口标题都可靠；
- * 3. **应用名判类**（浏览器/影音/游戏/笔记应用）；
- * 4. **界面线索**（browserChrome / editorChrome；两者都缺或都有时不动）。
+ * 2. **网址域名**（`youtube.com` -> 看视频、`arxiv.org` -> 读论文；任何网页 + 写东西 -> 浏览网页）；
+ * 3. **最上层窗口**（进程名 + 标题：`Typora` -> 写东西、`Code` -> 写代码、标题含 `.pdf` -> 读论文）；
+ * 4. **应用名判类**（模型从画面里读到的应用名）；
+ * 5. **界面线索**（browserChrome / editorChrome；两者都缺或都有时不动）。
  *
  * 说明：这里刻意**不做**"看到代码就改成 coding"之类的猜测 —— 纠正必须能解释，
  * 否则只是把一种误判换成另一种。
@@ -350,9 +352,15 @@ export function refineScene(input: SceneRefineInput): { scene: SceneKind; reason
     }
   }
 
-  // 2) 网址域名（最可靠的网页线索）
+  // 2) 网址域名
   const byUrl = refineSceneByUrl(input.url ?? '', input.scene);
   if (byUrl.reason !== '') return byUrl;
+
+  // 3) 最上层窗口
+  if (input.window) {
+    const byWindow = refineSceneByWindow({ process: input.window.process, title: input.window.title, scene: input.scene });
+    if (byWindow.reason !== '') return byWindow;
+  }
 
   const rawScene = input.scene;
 
@@ -469,6 +477,135 @@ export function refineSceneByUrl(url: string, scene: SceneKind): { scene: SceneK
    */
   if (scene === 'writing') return { scene: 'browsing', reason: `浏览器里的网页（${host}）不算写笔记` };
   return { scene, reason: '' };
+}
+
+/* -------------------------------------------------------------------------- */
+/* 二点七、窗口上下文（"现在开着哪些窗口 / 最上层是哪个"）                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 规范化窗口标题。
+ *
+ * 必须做的事（都是实测踩出来的）：
+ * - 去掉**不可见字符**：Chromium 给的标题里混着零宽空格/方向标记
+ *   （`Microsoft​ Edge` 里就有一个），肉眼一样但字符串比较永远不相等；
+ * - 把**不换行空格**（U+00A0/U+2007/U+202F）换成普通空格；
+ * - 压掉多余空白、限长。
+ */
+export function normalizeWindowTitle(raw: string): string {
+  return (raw ?? '')
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2060\ufeff]/g, '')
+    .replace(/[\u00a0\u2007\u202f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200);
+}
+
+/** 进程名 -> 场景（"最上层窗口"这一路证据）。 */
+const PROCESS_SCENE_RULES: readonly { readonly match: RegExp; readonly scene: SceneKind; readonly note: string }[] = [
+  { match: /^(code|cursor|windsurf|devenv|idea64?|pycharm64?|webstorm64?|goland64?|clion64?|rider64?|sublime_text|notepad\+\+|vim|nvim|emacs|zed)$/i, scene: 'coding', note: '代码编辑器' },
+  { match: /^(windowsterminal|wt|cmd|powershell|pwsh|conhost|alacritty|wezterm|mintty|xshell|putty|tabby|termius)$/i, scene: 'terminal', note: '终端' },
+  { match: /^(notepad|winword|wordpad|wps|et|wpp|typora|obsidian|notion|logseq|joplin|onenote|evernote|yuque|zotero|acrobat|acrord32|sumatrapdf|foxitreader)$/i, scene: 'writing', note: '文档/笔记应用' },
+  { match: /^(potplayer64?|potplayermini64?|vlc|mpv|mpc-hc64?|kmplayer|bilibili|iqiyi|youku|tencentvideo|twitch|obs64?)$/i, scene: 'video', note: '影音应用' },
+  { match: /^(steam|steamwebhelper|epicgameslauncher|battle\.net|wegame|genshinimpact|yuanshen|robloxplayerbeta)$/i, scene: 'gaming', note: '游戏应用' },
+  { match: /^(zoom|teams|ms-teams|wemeetapp|dingtalk|feishu|lark|skype)$/i, scene: 'meeting', note: '会议应用' },
+  { match: /^(msedge|chrome|firefox|brave|opera|vivaldi|arc|360se|qqbrowser|sogouexplorer)$/i, scene: 'browsing', note: '浏览器' },
+];
+
+/** 窗口标题里的**内容型**线索（比进程名更具体）。 */
+const TITLE_SCENE_HINTS: readonly { readonly match: RegExp; readonly scene: SceneKind; readonly note: string }[] = [
+  { match: /\.pdf(\s|$|-|—)/i, scene: 'reading', note: '在看 PDF' },
+  { match: /(哔哩哔哩|bilibili|youtube|腾讯视频|爱奇艺|优酷|netflix|twitch)/i, scene: 'video', note: '影音站点标题' },
+  { match: /(arxiv|openreview|参考文献|reference|\.bib)/i, scene: 'reading', note: '文献相关标题' },
+  { match: /(stack\s?overflow|github|gitlab|pull request|issue #|merge request)/i, scene: 'browsing', note: '代码/问答站点标题' },
+  { match: /(visual studio code|devenv|pycharm|intellij|webstorm|sublime)/i, scene: 'coding', note: '编辑器窗口标题' },
+  { match: /(steam|原神|minecraft|英雄联盟|league of legends)/i, scene: 'gaming', note: '游戏窗口标题' },
+  { match: /(zoom|tencent meeting|腾讯会议|teams|飞书会议)/i, scene: 'meeting', note: '会议窗口标题' },
+];
+
+/**
+ * 按"最上层窗口（进程名 + 标题）"纠正场景。
+ *
+ * 这是三路证据里**最具体**的一路：进程名给出"用的什么软件"，标题给出"在看什么"。
+ * 顺序：标题线索 > 进程名规则 > 不动（信息不足时保持模型判断）。
+ */
+export function refineSceneByWindow(input: {
+  readonly process: string;
+  readonly title: string;
+  readonly scene: SceneKind;
+}): { scene: SceneKind; reason: string } {
+  if (input.scene === 'idle' || input.scene === 'sensitive') return { scene: input.scene, reason: '' };
+  const title = normalizeWindowTitle(input.title);
+  const process = (input.process ?? '').toLowerCase().trim();
+
+  for (const hint of TITLE_SCENE_HINTS) {
+    if (hint.match.test(title) && hint.scene !== input.scene) {
+      return { scene: hint.scene, reason: `${hint.note}（${title.slice(0, 40)}）` };
+    }
+  }
+  for (const rule of PROCESS_SCENE_RULES) {
+    if (rule.match.test(process)) {
+      if (rule.scene === input.scene) return { scene: input.scene, reason: '' };
+      // 浏览器进程只在模型给出"做事类"标签时纠正：浏览器里能干太多事，
+      // 具体场景交给标题/网址那两路证据（它们更具体）
+      if (rule.scene === 'browsing' && input.scene !== 'writing' && input.scene !== 'terminal' && input.scene !== 'other') {
+        return { scene: input.scene, reason: '' };
+      }
+      return { scene: rule.scene, reason: `${rule.note}（${process}）` };
+    }
+  }
+  return { scene: input.scene, reason: '' };
+}
+
+/** 窗口上下文 -> 提示词里的一段文本（给模型当参考，不进观察记录）。 */
+export function describeWindowContext(input: {
+  readonly foreground: { readonly title: string; readonly process: string } | null;
+  readonly windows: readonly { readonly title: string; readonly process: string }[];
+  readonly limit?: number;
+}): string {
+  const limit = Math.max(1, Math.min(24, input.limit ?? 12));
+  const lines: string[] = [];
+  /*
+   * 这里**自己再过滤一次**我们自己的窗口，而不是只依赖调用方：
+   * 提示词是这个函数的最终产物，多一道防线就不会因为调用方忘了过滤
+   * 而把"桌宠设置"这种噪声喂给模型（验收断言也钉住了这一点）。
+   */
+  const foreground = input.foreground && !OWN_WINDOW_TITLES.some((own) => input.foreground?.title.includes(own))
+    ? input.foreground
+    : null;
+  if (foreground) {
+    lines.push(`最上层窗口：${foreground.title}（进程 ${foreground.process || '未知'}）`);
+  }
+  const seen = new Set<string>();
+  const list: string[] = [];
+  for (const item of withoutOwnWindows(input.windows)) {
+    const title = normalizeWindowTitle(item.title);
+    if (title === '') continue;
+    // 最上层窗口已经在上面单列一行，列表里**不重复**（省 token 也更清楚）
+    if (foreground && title === normalizeWindowTitle(foreground.title) && (item.process ?? '') === foreground.process) continue;
+    const key = `${item.process}|${title}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    list.push(`${list.length + 1}. ${title}（${item.process || '未知'}）`);
+    if (list.length >= limit) break;
+  }
+  if (list.length > 0) {
+    lines.push('当前打开的窗口（大致按从上到下的顺序）：', ...list);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * 我们自己那几个窗口的标题片段（枚举时排除掉，免得干扰判断）。
+ *
+ * `鲸鱼娘桌宠` 是桌宠页面自己的标题（`index.html`），实测它会出现在窗口列表里
+ * （诊断输出里第一项就是它）—— 不排除的话，"她自己"会变成判断"主人在干什么"的证据。
+ */
+export const OWN_WINDOW_TITLES: readonly string[] = ['桌宠设置', '和鲸鱼娘说话', '鲸鱼娘桌宠', 'DesktopPet'];
+
+/** 过滤掉我们自己的窗口（探针回传的原始列表里带上它们没有意义）。 */
+export function withoutOwnWindows<T extends { readonly title: string }>(windows: readonly T[]): T[] {
+  return windows.filter((item) => !OWN_WINDOW_TITLES.some((own) => item.title.includes(own)));
 }
 
 /* -------------------------------------------------------------------------- */

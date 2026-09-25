@@ -201,7 +201,26 @@ app.whenReady().then(async () => {
     fixes.ok === true && fixes.after.includes('Chrome=browsing') && fixes.after.includes('MyWeirdApp=browsing'),
   );
 
-  /* 7) 滚到感知面板并截图（肉眼验收排版） */
+  /* 7) 窗口上下文：真机验证"最上层窗口 + 窗口列表"能读到（这是本轮新增的证据来源） */
+  const windowCtx = await run(`(async () => {
+    const before = await window.settingsAPI.perception.status();
+    const sampled = await window.settingsAPI.perception.sampleNow();
+    return {
+      beforeCount: before.windowContext.count,
+      count: sampled.windowContext.count,
+      foregroundTitle: sampled.windowContext.foregroundTitle,
+      foregroundProcess: sampled.windowContext.foregroundProcess,
+      sample: sampled.windowContext.sample.slice(0, 3),
+      backingOff: sampled.windowContext.backingOff,
+    };
+  })()`);
+  step(
+    '感知面板：窗口上下文真的读到（最上层窗口 + 窗口列表；真机 Windows 枚举）',
+    windowCtx,
+    windowCtx.count >= 1 && windowCtx.foregroundTitle.length > 0 && windowCtx.backingOff === false,
+  );
+
+  /* 8) 滚到感知面板并截图（肉眼验收排版） */
   await run(`(() => {
     const target = document.getElementById('perception-panel-root');
     if (target) target.scrollIntoView({ block: 'start' });

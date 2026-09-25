@@ -977,9 +977,15 @@ app.whenReady().then(async () => {
       l.shown.actual.offsetTop + l.shown.actual.height <= s.windowInner.height + 2;
 
     // c. 无累积漂移
+    /*
+     * 容差用 4px 而不是 1px：Windows 会把窗口位置量化到**物理像素网格**
+     * （125% 缩放下步长正好是 4px），因此一次显隐往返的偏移本来就可能差一格。
+     * 用 1px 会让这条断言随机变红（实测遇到过：同一份代码两次运行一红一绿，
+     * 且与任何几何改动无关）。累积漂移会远大于 4px，所以这个容差仍然抓得住真问题。
+     */
     const noDrift =
-      near(l.hiddenAgain.offsetTop, l.hidden.actual.offsetTop, 1) &&
-      near(l.hiddenAgain.offsetLeft, l.hidden.actual.offsetLeft, 1);
+      near(l.hiddenAgain.offsetTop, l.hidden.actual.offsetTop, 4) &&
+      near(l.hiddenAgain.offsetLeft, l.hidden.actual.offsetLeft, 4);
 
     return { sizeMatchesLayout, withinWindow, noDrift, hiddenSize: l.hidden.actual, shownSize: l.shown.actual };
   })();
@@ -2229,12 +2235,17 @@ app.whenReady().then(async () => {
   /*
    * "关掉开关就不该留痕迹"：默认全开是需求，但**关掉必须干净**。
    *
-   * 做法：把所有开关关掉 -> 主进程侧清空数据目录 -> 触发一次互动与一次对话
-   * -> 等一会儿（覆盖情绪心跳）-> 目录必须仍然是空的。
-   * 这条是"可配置开关真的生效"最硬的证据（不然用户会以为关不掉）。
+   * 做法：把**所有模块**的开关都关掉（AI + 感知 + 成长）-> 主进程侧清空数据目录
+   * -> 触发一次互动与一次对话 -> 等一会儿（覆盖情绪心跳与感知采样）-> 目录必须仍然是空的。
+   *
+   * ⚠️ 必须连感知/成长一起关：它们是独立模块、各自会往同一个数据目录写文件
+   * （`perception/`、`memory/nodes.json`…），只关 AI 的话这条断言测的就不是"关掉是否干净"，
+   * 而是"别的模块有没有在跑"（实测因此红过一次）。
    */
   await run(`(async () => {
     await window.petAPI.ai.setSettings({ enabled: false, chat: false, memory: false, emotion: false, diary: false });
+    await window.petAPI.perception.setSettings({ screen: false, vision: false, behavior: false, camera: false, habits: false });
+    await window.petAPI.growth.setSettings({ palace: false, reflection: false, policyAdapt: false });
     return true;
   })()`);
   await wait(400);
@@ -2265,18 +2276,19 @@ app.whenReady().then(async () => {
     '关闭全部开关后不落盘（不建目录、不写记忆/日记/情绪）',
     aiDirEntriesAfterOff.length === 0,
     `entries=${JSON.stringify(aiDirEntriesAfterOff)}`,
-  );
-  record(
+  );  record(
     '关闭开关后互动不改心情、对话不记入记忆（开关真的生效，不是摆设）',
     offBehaviour.moodAfter === offBehaviour.moodBefore && offBehaviour.turns === 0,
     JSON.stringify(offBehaviour),
   );
-  /* 后面的用例需要记忆与情绪是开的：改回来 */
+  /* 后面的用例需要记忆与情绪是开的：改回来（感知与成长也要一起恢复） */
   await run(`(async () => {
     await window.petAPI.ai.setSettings({ enabled: true, chat: true, memory: true, emotion: true, diary: true });
+    await window.petAPI.perception.setSettings({ screen: true, vision: true, behavior: true, camera: true, habits: true });
+    await window.petAPI.growth.setSettings({ palace: true, reflection: true, policyAdapt: true });
     return true;
   })()`);
-  await wait(300);
+  await wait(500);
 
   /* 2.3 情绪模型：纯函数直接断言（互动上涨 / 三档衰减 / token -> 饿） */
   const emotionModel = await run(`(() => {
@@ -2974,6 +2986,125 @@ app.whenReady().then(async () => {
     urlPrivacy.captureUrl === true && urlPrivacy.storeFullUrl === false && urlPrivacy.width >= 640,
     JSON.stringify(urlPrivacy),
   );
+
+  /*
+   * 窗口上下文（用户要求："把现在启动的窗口和最上层的窗口传进去辅助判断"）。
+   *
+   * 实测（tools/probe-foreground-window.cjs）：PowerShell `EnumWindows` 一次能拿到
+   * 29 个可见窗口 + 进程名 + 前台标记（~500ms），而 `desktopCapturer` 只枚举到 2 个
+   * 且不告诉哪个是前台 —— 所以走前者。这里断言可测的那一半：
+   * 标题规范化、进程名/标题规则、优先级、列表拼装与过滤、隐私默认值。
+   */
+  const windowRules = await run(`(() => {
+    const model = window.petDebug.perception;
+    // 标题里混着零宽空格/不换行空格是实测常态：不做规范化就永远匹配不上
+    const dirty = 'Microsoft\\u200b Edge\\u00a0- 论文.pdf';
+    return {
+      normalized: model.normalizeWindowTitle(dirty),
+      normalizedHasInvisible: /[\\u200b\\u00a0]/.test(model.normalizeWindowTitle(dirty)),
+      coding: model.refineSceneByWindow({ process: 'Code', title: 'main.ts - Visual Studio Code', scene: 'browsing' }),
+      writing: model.refineSceneByWindow({ process: 'Typora', title: '桌面宠物.md - Typora', scene: 'browsing' }),
+      pdf: model.refineSceneByWindow({ process: 'msedge', title: '论文.pdf - Microsoft Edge', scene: 'writing' }),
+      video: model.refineSceneByWindow({ process: 'msedge', title: '哔哩哔哩 (゜-゜)つロ 干杯~', scene: 'writing' }),
+      gaming: model.refineSceneByWindow({ process: 'steam', title: 'Steam', scene: 'browsing' }),
+      meeting: model.refineSceneByWindow({ process: 'wemeetapp', title: '腾讯会议', scene: 'writing' }),
+      terminal: model.refineSceneByWindow({ process: 'WindowsTerminal', title: 'Windows PowerShell', scene: 'writing' }),
+      // 浏览器进程不该把已经判对的细分场景拉平成 browsing
+      browserKeepsReading: model.refineSceneByWindow({ process: 'msedge', title: '某篇文章 - Microsoft Edge', scene: 'reading' }),
+      // 信息不足时不动
+      unknownProcess: model.refineSceneByWindow({ process: 'weirdapp', title: '标题', scene: 'writing' }),
+      // 前后台标记 / 我们自己的窗口过滤 / 列表拼装
+      filtered: model.withoutOwnWindows([
+        { title: '桌宠设置', process: 'electron' },
+        { title: '论文.pdf - Microsoft Edge', process: 'msedge' },
+        { title: '和鲸鱼娘说话', process: 'electron' },
+        // 桌宠页面自己的窗口标题（实测会出现在枚举结果里）
+        { title: '鲸鱼娘桌宠', process: 'electron' },
+      ]).map((item) => item.title),
+      prompt: model.describeWindowContext({
+        foreground: { title: 'main.ts - Visual Studio Code', process: 'code' },
+        windows: [
+          { title: 'main.ts - Visual Studio Code', process: 'code' },
+          { title: 'main.ts - Visual Studio Code', process: 'code' },
+          { title: '论文.pdf - Microsoft Edge', process: 'msedge' },
+          { title: '桌宠设置', process: 'electron' },
+        ],
+        limit: 10,
+      }),
+    };
+  })()`);
+  record(
+    '感知：窗口标题规范化（去掉零宽字符与不换行空格，否则永远匹配不上）',
+    windowRules.normalized === 'Microsoft Edge - 论文.pdf' && windowRules.normalizedHasInvisible === false,
+    JSON.stringify({ normalized: windowRules.normalized }),
+  );
+  record(
+    '感知：按最上层窗口纠正场景（Code/Typora/PDF/视频/游戏/会议/终端各归各位）',
+    windowRules.coding.scene === 'coding' &&
+      windowRules.writing.scene === 'writing' &&
+      windowRules.pdf.scene === 'reading' &&
+      windowRules.video.scene === 'video' &&
+      windowRules.gaming.scene === 'gaming' &&
+      windowRules.meeting.scene === 'meeting' &&
+      windowRules.terminal.scene === 'terminal',
+    JSON.stringify({
+      coding: windowRules.coding.scene,
+      writing: windowRules.writing.scene,
+      pdf: windowRules.pdf.scene,
+      video: windowRules.video.scene,
+      gaming: windowRules.gaming.scene,
+      meeting: windowRules.meeting.scene,
+      terminal: windowRules.terminal.scene,
+    }),
+  );
+  record(
+    '感知：窗口规则不过度干预（浏览器不拉平细分场景；认不出的进程不动）',
+    windowRules.browserKeepsReading.scene === 'reading' &&
+      windowRules.browserKeepsReading.reason === '' &&
+      windowRules.unknownProcess.scene === 'writing' &&
+      windowRules.unknownProcess.reason === '',
+    JSON.stringify({ browserKeepsReading: windowRules.browserKeepsReading, unknownProcess: windowRules.unknownProcess }),
+  );
+  record(
+    '感知：窗口列表拼装（过滤我们自己的窗口、去重、给出最上层窗口）',
+    windowRules.filtered.length === 1 &&
+      windowRules.filtered[0] === '论文.pdf - Microsoft Edge' &&
+      windowRules.prompt.indexOf('最上层窗口：main.ts - Visual Studio Code') >= 0 &&
+      windowRules.prompt.indexOf('桌宠设置') < 0 &&
+      // 注意：这条断言在**模板字符串之外**，所以这里要写单反斜杠；
+      // 写成 `\\.` 会变成"字面反斜杠 + 任意字符"，永远匹配不到（刚踩过）
+      (windowRules.prompt.match(/main\.ts - Visual Studio Code/g) || []).length === 1,
+    JSON.stringify({ filtered: windowRules.filtered, prompt: windowRules.prompt }),
+  );
+  const windowPrivacy = await run(`(async () => {
+    const status = await window.petAPI.perception.status();
+    return { windowContext: status.settings.windowContext, limit: status.settings.windowListLimit, ttl: status.settings.windowProbeTtlMs, hasStatusField: typeof status.windowContext === 'object' };
+  })()`);
+  record(
+    '感知：窗口上下文默认开启、隐私默认值正确（只存最上层窗口，状态里有独立字段）',
+    windowPrivacy.windowContext === true &&
+      windowPrivacy.limit >= 1 &&
+      windowPrivacy.limit <= 24 &&
+      windowPrivacy.ttl >= 5000 &&
+      windowPrivacy.hasStatusField === true,
+    JSON.stringify(windowPrivacy),
+  );
+  /* 优先级：用户规则 > 网址 > 窗口 > 应用名 */
+  const scenePriority = await run(`(() => {
+    const model = window.petDebug.perception;
+    return {
+      windowBeatsApp: model.refineScene({ scene: 'browsing', app: 'Google Chrome', window: { process: 'typora', title: '笔记.md - Typora' } }),
+      urlBeatsWindow: model.refineScene({ scene: 'browsing', app: 'Google Chrome', url: 'youtube.com/watch', window: { process: 'typora', title: '笔记.md - Typora' } }),
+      userBeatsAll: model.refineScene({ scene: 'browsing', app: 'Google Chrome', url: 'youtube.com/watch', window: { process: 'typora', title: '笔记.md' }, fixes: ['chrome=reading'] }),
+    };
+  })()`);
+  record(
+    '感知：纠正优先级（用户规则 > 网址域名 > 最上层窗口 > 应用名）',
+    scenePriority.windowBeatsApp.scene === 'writing' &&
+      scenePriority.urlBeatsWindow.scene === 'video' &&
+      scenePriority.userBeatsAll.scene === 'reading',
+    JSON.stringify(scenePriority),
+  );
   record(
     '感知：习惯学习按小时聚合，并能预测当前时段（按你平时的习惯…）',
     perceptionModel.habitSamples === 4 &&
@@ -3108,23 +3239,35 @@ app.whenReady().then(async () => {
     JSON.stringify(cameraConsent),
   );
 
-  /* 手动采样：能跑、不抛异常（没配密钥时不会产生观察记录） */
+  /* 手动采样：能跑、不抛异常（没配密钥时走**本地窗口判断**，不截屏、不调模型） */
   const perceptionSample = await run(`(async () => {
     const status = await window.petAPI.perception.sampleNow();
+    const observation = status.lastObservation;
     return {
       capturing: status.capturing,
       lastError: status.lastError,
-      hasObservation: status.lastObservation !== null,
+      hasObservation: observation !== null,
+      // 本地路径的观察必须标记 mode='local' 且 0 token（证明没有偷偷调用模型）
+      mode: observation ? observation.mode : '',
+      tokens: observation ? observation.tokens : -1,
+      scene: observation ? observation.scene : '',
+      windowTitle: observation ? (observation.windowTitle ?? '') : '',
       idle: status.behavior.idleSeconds,
-      userState: status.behavior.userState,
+      windowCount: status.windowContext.count,
     };
   })()`);
   record(
-    '感知：手动采样可运行（没配密钥时不写观察，但没有崩、没有抛异常）',
+    '感知：没配密钥时也能用窗口信息做本地判断（不截屏、不调模型、0 token）',
     typeof perceptionSample.capturing === 'boolean' &&
       typeof perceptionSample.idle === 'number' &&
-      perceptionSample.hasObservation === false,
+      (perceptionSample.hasObservation === false ||
+        (perceptionSample.mode === 'local' && perceptionSample.tokens === 0)),
     JSON.stringify(perceptionSample),
+  );
+  record(
+    '感知：窗口上下文在没配密钥时也能读到（独立于大模型，面板才有东西可显示）',
+    perceptionSample.windowCount >= 1,
+    JSON.stringify({ count: perceptionSample.windowCount, scene: perceptionSample.scene, title: perceptionSample.windowTitle }),
   );
 
   /* 清空感知数据（隐私要求：用户可以一键抹掉她观察到的一切） */

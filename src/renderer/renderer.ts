@@ -54,6 +54,7 @@ import {
   URL_SCENE_RULES,
   appKind,
   capturePermission,
+  describeWindowContext,
   emptyHabitProfile,
   gateIntervention,
   habitPredictionText,
@@ -66,13 +67,16 @@ import {
   matchesAppName,
   matchesSensitiveKeywords,
   normalizeScene,
+  normalizeWindowTitle,
   parseSceneFixes,
   planIntervention,
   refineScene,
   refineSceneByUrl,
+  refineSceneByWindow,
   safeHost,
   sceneLabel,
   topSceneAtHour,
+  withoutOwnWindows,
 } from '../shared/perception';
 import { createLoggerFactory } from '../shared/logging';
 import { EventBus } from './core/event-bus';
@@ -1123,6 +1127,11 @@ class PetApplication {
       readonly safeHost: typeof safeHost;
       readonly refineSceneByUrl: typeof refineSceneByUrl;
       readonly URL_SCENE_RULES: typeof URL_SCENE_RULES;
+      /** 窗口上下文（最上层窗口 + 打开的窗口列表）。 */
+      readonly normalizeWindowTitle: typeof normalizeWindowTitle;
+      readonly refineSceneByWindow: typeof refineSceneByWindow;
+      readonly describeWindowContext: typeof describeWindowContext;
+      readonly withoutOwnWindows: typeof withoutOwnWindows;
       readonly BROWSER_APPS: typeof BROWSER_APPS;
     };
     readonly perceptionStatus: () => Promise<PerceptionStatus | null>;
@@ -1207,6 +1216,10 @@ class PetApplication {
         safeHost,
         refineSceneByUrl,
         URL_SCENE_RULES,
+        normalizeWindowTitle,
+        refineSceneByWindow,
+        describeWindowContext,
+        withoutOwnWindows,
         BROWSER_APPS,
       },
       perceptionStatus: async () => {

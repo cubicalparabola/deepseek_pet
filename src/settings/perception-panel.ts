@@ -211,7 +211,9 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   const quietReadout = makeReadout('免打扰');
   const lastErrorReadout = makeReadout('最近错误');
   const dataDirReadout = makeReadout('数据目录');
-  for (const readout of [captureReadout, observationReadout, behaviorReadout, userStateReadout,
+  // 窗口上下文（"开着什么 / 最上层是哪个"）：判断"在用哪个应用"最具体的一路证据
+  const windowReadout = makeReadout('窗口上下文');
+  for (const readout of [captureReadout, observationReadout, windowReadout, behaviorReadout, userStateReadout,
     presenceReadout, interventionsReadout, quietReadout, lastErrorReadout, dataDirReadout]) {
     statusSection.appendChild(readout.row);
   }
@@ -335,6 +337,33 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     '记录完整网址（含路径与查询串）—— 默认关闭，只留域名，避免把搜索词等私人信息写进观察记录',
     storeFullUrlInput,
   ));
+
+  /*
+   * 窗口上下文：把"现在开着哪些窗口 + 最上层是哪个"喂给模型。
+   *
+   * 为什么这一路最有用：进程名说清"用的什么软件"（Typora / Code / msedge），
+   * 标题说清"在看什么"（论文.pdf、桌面宠物.md）—— 实测一次 Windows 枚举
+   * 能拿到近 30 个窗口 + 进程名 + 前台标记（约 0.5 秒），比逐像素猜准得多。
+   * 隐私注意：窗口标题可能包含文档名，因此**只把"最上层窗口"写进观察记录**，
+   * 整份列表只进当次提示词。
+   */
+  const windowContextInput = makeCheckbox('perception-window-context', '用窗口信息辅助判断');
+  samplingSection.appendChild(checkRow(
+    '用窗口信息辅助判断（枚举"开着的窗口 + 最上层窗口"给模型；只把最上层窗口写进观察记录）',
+    windowContextInput,
+  ));
+  const windowLimitInput = makeInput('number', 'perception-window-list-limit', '窗口列表条数上限');
+  windowLimitInput.min = '1';
+  windowLimitInput.max = '24';
+  windowLimitInput.step = '1';
+  samplingSection.appendChild(fieldRow('perception-window-list-limit', '窗口列表条数上限', windowLimitInput,
+    '默认 12。列得越多越费 token；最上层窗口永远会单独给出，不受这个上限影响。'));
+  const windowTtlInput = makeInput('number', 'perception-window-probe-ttl-ms', '窗口信息缓存（毫秒）');
+  windowTtlInput.min = '5000';
+  windowTtlInput.max = '600000';
+  windowTtlInput.step = '5000';
+  samplingSection.appendChild(fieldRow('perception-window-probe-ttl-ms', '窗口信息缓存（毫秒）', windowTtlInput,
+    '默认 25000：窗口变化慢，没必要每次采样都重新枚举（枚举约 0.5 秒）。'));
 
   const cameraIntervalInput = makeInput('number', 'perception-camera-interval-ms', '摄像头采样间隔（毫秒）');
   cameraIntervalInput.min = '10000';
@@ -558,6 +587,16 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
 
     // 最近观察：场景用受控词表翻译，敏感内容整行标红（用户最需要一眼看到的就是这个）
     const observation = status.lastObservation;
+    // 窗口上下文：把"最上层是哪个 + 一共几个窗口"摊开，方便判断她凭什么这么认
+    const windowInfo = status.windowContext;
+    if (windowInfo.count === 0) {
+      windowReadout.value.textContent = windowInfo.backingOff ? '读不到窗口信息（已退避重试）' : '还没枚举过窗口';
+      windowReadout.value.className = 'perception-readout-value perception-value-muted';
+    } else {
+      windowReadout.value.className = 'perception-readout-value';
+      windowReadout.value.textContent =
+        `最上层：${windowInfo.foregroundTitle || '（无标题）'}（${windowInfo.foregroundProcess || '未知'}）· 共 ${windowInfo.count} 个窗口`;
+    }
     if (observation === null) {
       observationReadout.value.textContent = '还没有观察记录';
       observationReadout.value.className = 'perception-readout-value perception-value-muted';
@@ -692,6 +731,9 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     setValue(urlWidthInput, String(settings.urlCaptureWidth));
     if (!editing(captureUrlInput)) captureUrlInput.checked = settings.captureUrl;
     if (!editing(storeFullUrlInput)) storeFullUrlInput.checked = settings.storeFullUrl;
+    setValue(windowLimitInput, String(settings.windowListLimit));
+    setValue(windowTtlInput, String(settings.windowProbeTtlMs));
+    if (!editing(windowContextInput)) windowContextInput.checked = settings.windowContext;
     setValue(cameraIntervalInput, String(settings.cameraIntervalMs));
     setValue(proactiveMinInput, String(settings.proactiveMinIntervalMs));
     setValue(proactiveMaxInput, String(settings.proactiveMaxPerHour));
@@ -813,6 +855,8 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     const ms = numberValue(intervalInput) ?? 0;
     const px = numberValue(widthInput) ?? 0;
     const urlPx = numberValue(urlWidthInput) ?? 0;
+    const winLimit = numberValue(windowLimitInput) ?? 0;
+    const winTtl = numberValue(windowTtlInput) ?? 0;
     const camMs = numberValue(cameraIntervalInput) ?? 0;
     const proactiveMin = numberValue(proactiveMinInput) ?? 0;
     const proactiveMax = numberValue(proactiveMaxInput) ?? 0;
@@ -826,6 +870,9 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
       captureUrl: captureUrlInput.checked,
       urlCaptureWidth: clampInt(urlPx, 640, 3840),
       storeFullUrl: storeFullUrlInput.checked,
+      windowContext: windowContextInput.checked,
+      windowListLimit: clampInt(winLimit, 1, 24),
+      windowProbeTtlMs: clampInt(winTtl, 5000, 600000),
       cameraIntervalMs: clampInt(camMs, 10000, 3600000),
       proactiveMinIntervalMs: clampInt(proactiveMin, 60000, 86400000),
       proactiveMaxPerHour: clampInt(proactiveMax, 0, 60),
