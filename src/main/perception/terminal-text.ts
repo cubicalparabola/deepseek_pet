@@ -184,10 +184,14 @@ export class TerminalTextProbe {
         return null;
       }
       const raw = record.text;
-      // 顺序很重要：先去控制字符 → 再打码 → 最后截尾（截尾之后才不会再漏出长串）
+      /*
+       * 顺序很重要：先去控制字符 → 再打码 → 最后截尾（截尾之后才不会再漏出长串）。
+       * 默认值写在这里而不是只留在纯函数里：`PerceptionService` 目前不传这两个数，
+       * 把 30 行 / 1200 字显式写出来，读代码的人一眼就知道"实际保留多少"。
+       */
       const cleaned = tailTerminalText(redactTerminalSecrets(stripAnsiEscape(raw)), {
-        maxLines: this.options.maxLines,
-        maxChars: this.options.maxChars,
+        maxLines: this.options.maxLines ?? 30,
+        maxChars: this.options.maxChars ?? 1200,
       });
       const result: TerminalTextResult & { at: number; process: string } = {
         text: cleaned,
