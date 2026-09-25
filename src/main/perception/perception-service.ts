@@ -422,7 +422,12 @@ export class PerceptionService {
       return { ok: false, mode, text: '截屏失败了，可能被系统或安全软件拦住了。', scene: 'other', sensitive: false, tokens: 0, error: 'capture-failed' };
     }
     this.store.log('observation', `用户请求「${viewModeLabel(mode)}」`);
-    const result = await this.vision.view(mode, frame.dataBase64, frame.mimeType);
+    /*
+     * 按需看屏幕也带上地址栏横条：网页上的问题（报错、总结）有了网址会答得更准。
+     * 放在"确认能用大模型"之后取，避免白截一张图。
+     */
+    const addressBar = await this.capture.grabAddressBar();
+    const result = await this.vision.view(mode, frame.dataBase64, frame.mimeType, addressBar);
     if (result.ok) {
       this.store.log('observation', `「${viewModeLabel(mode)}」结果：${result.text.slice(0, 80)}`);
     }

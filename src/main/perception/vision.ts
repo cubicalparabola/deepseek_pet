@@ -195,7 +195,18 @@ export class VisionAnalyzer {
   /* 3.2 按需看屏幕                                                       */
   /* ------------------------------------------------------------------ */
 
-  public async view(mode: PerceptionViewMode, imageBase64: string, mimeType = 'image/jpeg'): Promise<PerceptionViewResult> {
+  /**
+   * 按需"看屏幕"（3.2 的四个动作）。
+   *
+   * @param addressBar 可选的地址栏横条：网页上的问题（报错、总结）有了网址会答得更准，
+   *   例如"这是 GitHub issue 里的报错"。与整屏一样，用完即弃。
+   */
+  public async view(
+    mode: PerceptionViewMode,
+    imageBase64: string,
+    mimeType = 'image/jpeg',
+    addressBar?: { readonly dataBase64: string; readonly mimeType: string } | null,
+  ): Promise<PerceptionViewResult> {
     const client = this.options.getClient();
     if (!this.options.isVisionEnabled()) {
       return { ok: false, mode, text: '内容理解开关没打开（设置 → 环境与用户感知 → 内容理解）。', scene: 'other', sensitive: false, tokens: 0, error: 'vision-disabled' };
@@ -204,6 +215,15 @@ export class VisionAnalyzer {
       return { ok: false, mode, text: '我还没接上大模型，看不懂屏幕内容（可以去设置里填密钥）。', scene: 'other', sensitive: false, tokens: 0, error: 'no-llm' };
     }
     try {
+      const parts: LLMContentPart[] = [{ type: 'text', text: VIEW_INSTRUCTIONS[mode] }];
+      if (addressBar && addressBar.dataBase64 !== '') {
+        parts.push({
+          type: 'text',
+          text: '第二张图是屏幕顶部的地址栏区域（放大了）：如果是网页，请结合里面的网址理解这些内容（例如说明是在哪个网站、什么页面）。',
+        });
+        parts.push({ type: 'image', mimeType: addressBar.mimeType, dataBase64: addressBar.dataBase64 });
+      }
+      parts.push({ type: 'image', mimeType, dataBase64: imageBase64 });
       const result = await client.complete({
         messages: [
           {
@@ -214,13 +234,7 @@ export class VisionAnalyzer {
               '如果画面里包含明显的私人内容（密码/银行/私信/身份信息等），只回复一句"这个是私人的，我不看"，不要复述任何细节。',
             ].join('\n'),
           },
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: VIEW_INSTRUCTIONS[mode] },
-              { type: 'image', mimeType, dataBase64: imageBase64 },
-            ],
-          },
+          { role: 'user', content: parts },
         ],
         temperature: 0.3,
         maxTokens: mode === 'ocr' || mode === 'summarize' ? 700 : 400,
