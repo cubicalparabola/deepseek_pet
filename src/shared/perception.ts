@@ -318,6 +318,8 @@ export interface SceneRefineInput {
   readonly browserChrome?: boolean;
   /** 模型是否看到编辑器界面（光标、行号、笔记侧栏、编辑工具栏）。 */
   readonly editorChrome?: boolean;
+  /** 模型从地址栏读到的网址（可空；空串表示没读出来）。 */
+  readonly url?: string;
   /** 用户自定义纠正规则。 */
   readonly fixes?: readonly string[];
 }
@@ -327,24 +329,19 @@ export interface SceneRefineInput {
  *
  * 规则优先级（越靠前越优先）：
  * 1. **用户自定义纠正**（`Chrome=browsing`）—— 用户说了算；
- * 2. **应用名判类**：
- *    - 浏览器/影音/游戏应用里出现 `writing`，一律纠正为 `browsing`
- *      （在浏览器里看文档不等于在写笔记 —— 这正是用户反馈的那个误判）；
- *    - 笔记/文档应用里出现 `browsing`/`other`，纠正为 `writing`；
- *    - 影音应用只把 `other`/`idle` 之外的"做事类"标签收敛到 `video`/`gaming` 时保守处理：
- *      仅纠正模型自相矛盾的组合（影音应用 + writing/reading/coding）。
- * 3. **界面线索**：只有"看到浏览器界面且没有编辑器界面"时才把 `writing` 拉回 `browsing`；
- *    两条线索同时缺失或同时存在时**不做纠正**（信息不足时保持模型判断）。
+ * 2. **网址域名**（`youtube.com` -> 看视频、`arxiv.org` -> 读论文、任何网页 + 写东西 -> 浏览网页）
+ *    —— 只要读到了网址，它比像素和窗口标题都可靠；
+ * 3. **应用名判类**（浏览器/影音/游戏/笔记应用）；
+ * 4. **界面线索**（browserChrome / editorChrome；两者都缺或都有时不动）。
  *
  * 说明：这里刻意**不做**"看到代码就改成 coding"之类的猜测 —— 纠正必须能解释，
  * 否则只是把一种误判换成另一种。
  */
 export function refineScene(input: SceneRefineInput): { scene: SceneKind; reason: string } {
-  const rawScene = input.scene;
   const app = input.app ?? '';
   const kind = appKind(app);
 
-  // 1) 用户自定义规则优先（关键词匹配应用名或场景名）
+  // 1) 用户自定义规则优先（关键词匹配应用名）
   const fixes = parseSceneFixes(input.fixes ?? []);
   const loweredApp = app.toLowerCase();
   for (const fix of fixes) {
@@ -353,7 +350,13 @@ export function refineScene(input: SceneRefineInput): { scene: SceneKind; reason
     }
   }
 
-  // 2) 应用名判类
+  // 2) 网址域名（最可靠的网页线索）
+  const byUrl = refineSceneByUrl(input.url ?? '', input.scene);
+  if (byUrl.reason !== '') return byUrl;
+
+  const rawScene = input.scene;
+
+  // 3) 应用名判类
   if (kind === 'browser' && (rawScene === 'writing' || rawScene === 'terminal')) {
     return { scene: 'browsing', reason: `浏览器应用（${app.trim()}）里不算写笔记` };
   }
@@ -370,7 +373,7 @@ export function refineScene(input: SceneRefineInput): { scene: SceneKind; reason
     return { scene: 'gaming', reason: `游戏应用（${app.trim()}）` };
   }
 
-  // 3) 界面线索（信息不足时不纠正）
+  // 4) 界面线索（信息不足时不纠正）
   if (rawScene === 'writing' && input.browserChrome === true && input.editorChrome !== true) {
     return { scene: 'browsing', reason: '看到浏览器界面（地址栏/标签页），没有编辑器界面' };
   }
@@ -379,6 +382,93 @@ export function refineScene(input: SceneRefineInput): { scene: SceneKind; reason
   }
 
   return { scene: rawScene, reason: '' };
+}
+
+/* -------------------------------------------------------------------------- */
+/* 二点六、网址线索（"网页里到底在干什么"最可靠的一路证据）                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 判断是不是像网址的字符串。
+ *
+ * 模型有时会把标签页标题当网址报回来，所以这里要求它**至少像个域名**：
+ * 带 `http(s)://`，或者"点号 + 通用顶级域/常见域名"。不满足就整条丢掉 ——
+ * 宁可不纠正，也不要拿一句标题去套域名规则。
+ */
+export function isUrlLike(raw: string): boolean {
+  const text = (raw ?? '').trim();
+  if (text === '' || text.length > 300) return false;
+  if (/\s/.test(text)) return false;
+  if (/^https?:\/\/[^\s/]+/i.test(text)) return true;
+  return /^[a-z0-9-]+(\.[a-z0-9-]+)*\.(com|cn|net|org|io|dev|edu|gov|ai|co|me|tv|xyz|app|info|club|top|site|gg|so|sh|fm)([/:?#].*)?$/i.test(
+    text,
+  );
+}
+
+/**
+ * 从网址里取**域名**（去掉协议、路径、查询串与 `www.`）。
+ *
+ * 只留域名有两个原因：分类只需要域名；查询串里常有搜索词等私人信息
+ * （`google.com/search?q=…`），少存一点，隐私就多一分。
+ *
+ * ⚠️ 不像网址的字符串一律返回空串（而不是把原话当域名返回）：
+ * 模型有时会把标签页标题当网址报回来，那种"域名"进了观察记录只会污染统计。
+ */
+export function safeHost(raw: string): string {
+  const text = (raw ?? '').trim();
+  if (text === '' || !isUrlLike(text)) return '';
+  const withoutScheme = text.replace(/^[a-z]+:\/\//i, '');
+  const hostAndRest = withoutScheme.split(/[/?#]/)[0] ?? '';
+  const host = hostAndRest.split('@').pop() ?? ''; // 去掉 user:pass@
+  return host.replace(/^www\./i, '').toLowerCase().slice(0, 120);
+}
+
+/**
+ * 域名 -> 场景的确定性规则（命中即纠正，顺序即优先级）。
+ *
+ * 注意每条都以 `(\.|$)` 结尾而不是 `\.`：像 `vscode.dev` 这种**自带点**的域名，
+ * 主机名就是它本身（后面没有第二个点），写成 `vscode\.dev\.` 会永远匹配不上
+ * （实测踩到：`vscode.dev/github/x` 被判成 browsing）。
+ */
+export const URL_SCENE_RULES: readonly { readonly match: RegExp; readonly scene: SceneKind; readonly note: string }[] = [
+  // 影音
+  { match: /(^|\.)(youtube|bilibili|iqiyi|youku|netflix|twitch|douyu|huya|vimeo|nicovideo)(\.|$)/i, scene: 'video', note: '影音站点' },
+  // 论文/文献
+  { match: /(^|\.)(arxiv|openreview|scholar\.google|semanticscholar|researchgate|ieee|xueshu|cnki|sciencedirect|springer|acm)(\.|$)/i, scene: 'reading', note: '论文/文献站点' },
+  { match: /\.pdf($|[?#])/i, scene: 'reading', note: 'PDF 文件' },
+  // 代码托管与问答（属"浏览网页"，但明确不是记笔记）
+  { match: /(^|\.)(github|gitlab|gitee|bitbucket|stackoverflow|stackexchange|segmentfault|csdn|juejin)(\.|$)/i, scene: 'browsing', note: '代码/问答站点' },
+  // 在线 IDE（这才算写代码）
+  { match: /(^|\.)(vscode\.dev|codesandbox|stackblitz|replit|colab\.research|jupyter)(\.|$)/i, scene: 'coding', note: '在线 IDE' },
+  // 邮件
+  { match: /(^|\.)(mail\.google|outlook|mail\.qq|mail\.163|foxmail|zoho)(\.|$)/i, scene: 'writing', note: '网页邮箱' },
+  // 在线文档与笔记（这些才是 writing）
+  { match: /(^|\.)(notion\.so|obsidian|yuque|feishu|docs\.google|office|sharepoint|confluence|atlassian)(\.|$)/i, scene: 'writing', note: '在线文档/笔记' },
+  // 游戏
+  { match: /(^|\.)(steam|epicgames|battle\.net|wegame|roblox)(\.|$)/i, scene: 'gaming', note: '游戏平台' },
+  // 会议
+  { match: /(^|\.)(meet\.google|zoom|teams\.microsoft|voov)(\.|$)/i, scene: 'meeting', note: '在线会议' },
+];
+
+/** 域名线索的纠正结果。 */
+export function refineSceneByUrl(url: string, scene: SceneKind): { scene: SceneKind; reason: string } {
+  const host = safeHost(url);
+  if (host === '' || !isUrlLike(url.trim())) return { scene, reason: '' };
+  for (const rule of URL_SCENE_RULES) {
+    if (rule.match.test(host) || rule.match.test(url)) {
+      // 只纠正"做事类"标签：影音站点里报 coding 显然是错的；idle 表示人不在，保留
+      if (scene === 'idle' || scene === 'sensitive') continue;
+      if (rule.scene === scene) return { scene, reason: '' };
+      return { scene: rule.scene, reason: `${rule.note}（${host}）` };
+    }
+  }
+  /*
+   * 没命中规则但**确实是网址**：说明用户在浏览器里看网页。
+   * 只有在模型给出"写东西"时纠正一次 —— 这正是用户实测的那个误判
+   * （浏览器里看长文被判成记笔记）；其它场景不动，避免过度干预。
+   */
+  if (scene === 'writing') return { scene: 'browsing', reason: `浏览器里的网页（${host}）不算写笔记` };
+  return { scene, reason: '' };
 }
 
 /* -------------------------------------------------------------------------- */

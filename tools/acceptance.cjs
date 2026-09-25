@@ -2890,6 +2890,90 @@ app.whenReady().then(async () => {
       appFalsePositives.boundary[2] === true,
     JSON.stringify(appFalsePositives),
   );
+
+  /*
+   * 网址线索（用户提问："如果是网页，可以把网址也一起传过去吗"）。
+   *
+   * 做法：单独截一条**高分辨率地址栏横条**给模型读网址，然后用域名做确定性纠正。
+   * 这里断言的是可测的那一半（解析、域名规则、隐私默认值），
+   * "模型能不能看清地址栏"只能实机验证。
+   */
+  const urlRules = await run(`(() => {
+    const model = window.petDebug.perception;
+    return {
+      // 注意：这里要真的调用 safeHost —— 直接写输入数组会把"输入"当成"输出"比（写错过一次）
+      hosts: ['https://www.github.com/foo/bar?x=1', 'bilibili.com/video/BV1', 'arxiv.org/abs/2401.00001', 'not a url', ''].map((raw) =>
+        model.safeHost(raw),
+      ),
+      parsed: model.isUrlLike('github.com') && model.isUrlLike('https://arxiv.org/abs/1') && !model.isUrlLike('我的笔记') && !model.isUrlLike('两个 词'),
+      // 域名规则：影音/论文/在线 IDE/在线文档/邮件
+      youtube: model.refineSceneByUrl('https://www.youtube.com/watch?v=abc', 'writing'),
+      arxiv: model.refineSceneByUrl('arxiv.org/abs/2401.00001', 'browsing'),
+      vscodeDev: model.refineSceneByUrl('vscode.dev/github/x', 'browsing'),
+      notion: model.refineSceneByUrl('notion.so/xxx', 'browsing'),
+      mail: model.refineSceneByUrl('mail.google.com/u/0', 'browsing'),
+      // 普通网页 + 模型说"写东西" -> 浏览网页（就是用户报的那个误判）
+      plainWriting: model.refineSceneByUrl('example.com/article', 'writing'),
+      // 普通网页 + 模型说"看视频" -> 不动（不过度干预）
+      plainVideo: model.refineSceneByUrl('example.com/a', 'video'),
+      // 没有网址时不纠正
+      noUrl: model.refineSceneByUrl('', 'writing'),
+      // 用户规则优先于域名规则
+      userWins: model.refineScene({ scene: 'video', app: 'Chrome', url: 'youtube.com/watch', fixes: ['chrome=reading'] }),
+      // 域名规则优先于应用名判类
+      urlBeatsApp: model.refineScene({ scene: 'writing', app: 'Google Chrome', url: 'arxiv.org/abs/1' }),
+    };
+  })()`);
+  record(
+    '感知：网址解析（只留域名，去掉协议/路径/查询串与 www）',
+    urlRules.hosts[0] === 'github.com' &&
+      urlRules.hosts[1] === 'bilibili.com' &&
+      urlRules.hosts[2] === 'arxiv.org' &&
+      urlRules.hosts[3] === '' &&
+      urlRules.hosts[4] === '' &&
+      urlRules.parsed === true,
+    JSON.stringify(urlRules.hosts),
+  );
+  record(
+    '感知：按域名纠正场景（视频/论文/在线 IDE/在线文档/邮件各归各位）',
+    urlRules.youtube.scene === 'video' &&
+      urlRules.arxiv.scene === 'reading' &&
+      urlRules.vscodeDev.scene === 'coding' &&
+      urlRules.notion.scene === 'writing' &&
+      urlRules.mail.scene === 'writing' &&
+      urlRules.youtube.reason.length > 0,
+    JSON.stringify({
+      youtube: urlRules.youtube,
+      arxiv: urlRules.arxiv,
+      vscodeDev: urlRules.vscodeDev,
+      notion: urlRules.notion,
+      mail: urlRules.mail,
+    }),
+  );
+  record(
+    '感知：普通网页 + "写东西"纠正为浏览网页，但不改动其它判断（不过度干预）',
+    urlRules.plainWriting.scene === 'browsing' &&
+      urlRules.plainWriting.reason.length > 0 &&
+      urlRules.plainVideo.scene === 'video' &&
+      urlRules.plainVideo.reason === '' &&
+      urlRules.noUrl.scene === 'writing' &&
+      urlRules.noUrl.reason === '',
+    JSON.stringify({ plainWriting: urlRules.plainWriting, plainVideo: urlRules.plainVideo, noUrl: urlRules.noUrl }),
+  );
+  record(
+    '感知：纠正优先级（用户规则 > 域名 > 应用名）',
+    urlRules.userWins.scene === 'reading' && urlRules.urlBeatsApp.scene === 'reading',
+    JSON.stringify({ userWins: urlRules.userWins, urlBeatsApp: urlRules.urlBeatsApp }),
+  );
+  const urlPrivacy = await run(`(async () => {
+    const status = await window.petAPI.perception.status();
+    return { captureUrl: status.settings.captureUrl, storeFullUrl: status.settings.storeFullUrl, width: status.settings.urlCaptureWidth };
+  })()`);
+  record(
+    '感知：网址默认只存域名、可关可调（隐私默认值正确）',
+    urlPrivacy.captureUrl === true && urlPrivacy.storeFullUrl === false && urlPrivacy.width >= 640,
+    JSON.stringify(urlPrivacy),
+  );
   record(
     '感知：习惯学习按小时聚合，并能预测当前时段（按你平时的习惯…）',
     perceptionModel.habitSamples === 4 &&

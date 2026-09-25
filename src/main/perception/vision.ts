@@ -16,7 +16,8 @@
  */
 
 import type { CameraFrameResult, PerceptionViewMode, PerceptionViewResult, SceneKind, ScreenObservation } from '../../shared/perception-types';
-import { SCENE_LABELS, matchesSensitiveKeywords, normalizeScene, refineScene } from '../../shared/perception';
+import { SCENE_LABELS, isUrlLike, matchesSensitiveKeywords, normalizeScene, refineScene, safeHost } from '../../shared/perception';
+import type { LLMContentPart } from '../ai/llm-client';
 import type { LLMClient } from '../ai/llm-client';
 import { LLMError } from '../ai/llm-client';
 import type { Logger } from '../../shared/logger';
@@ -30,6 +31,8 @@ export interface VisionAnalyzerOptions {
   readonly getSensitiveKeywords: () => readonly string[];
   /** 用户自定义的场景纠正规则（每行 `关键词=场景`）。 */
   readonly getSceneFixes: () => readonly string[];
+  /** 是否把完整网址写进观察记录（默认 false = 只存域名）。 */
+  readonly storeFullUrl: () => boolean;
   /** 是否允许做"内容理解"（3.2 的开关）。 */
   readonly isVisionEnabled: () => boolean;
 }
@@ -52,6 +55,7 @@ const SCENE_SYSTEM = [
   `- scene: 只能是这些值之一：${SCENE_LIST}`,
   '- app: 你判断当前正在使用的应用名（尽量短，例如 "VS Code"、"Chrome"、"PDF 阅读器"；判断不出就写 ""）',
   '- activity: 一句话说明用户在做什么（不超过 20 字，中文）',
+  '- url: **如果这是一张网页，且你能看清地址栏里的网址，就把它填在这里**（可以只填域名，例如 "github.com"）；看不到、看不清、或者不是网页就填空字符串 ""。**绝对不要猜**。',
   '- browserChrome: 布尔值。画面上是否能看到**浏览器界面**（地址栏、标签页、书签栏、前进后退按钮）',
   '- editorChrome: 布尔值。画面上是否能看到**编辑器界面**（闪烁的文本光标、行号、笔记列表侧栏、格式工具栏）',
   '- sensitive: 布尔值。**如果画面包含明显的私人内容（密码、银行/支付、私信、身份信息、私密照片等）必须为 true**',
@@ -94,25 +98,37 @@ export class VisionAnalyzer {
    * 分析一帧屏幕。
    *
    * @param imageBase64 JPEG 的 base64（不带 data URL 前缀）
+   * @param mimeType 整屏图的 MIME
+   * @param addressBar 可选的**地址栏横条**（高分辨率小图）——用来让模型读出网址；
+   *   传了就作为第二张图附在同一次请求里（多几十 token，但换来最可靠的网页线索）
    */
-  public async analyzeScene(imageBase64: string, mimeType = 'image/jpeg'): Promise<SceneAnalysis | null> {
+  public async analyzeScene(
+    imageBase64: string,
+    mimeType = 'image/jpeg',
+    addressBar?: { readonly dataBase64: string; readonly mimeType: string } | null,
+  ): Promise<SceneAnalysis | null> {
     const client = this.options.getClient();
     if (!client) return null;
     const startedAt = Date.now();
     try {
+      const parts: LLMContentPart[] = [
+        { type: 'text', text: '这是我当前的屏幕，请按约定输出 JSON。' },
+        { type: 'image', mimeType, dataBase64: imageBase64 },
+      ];
+      if (addressBar && addressBar.dataBase64 !== '') {
+        parts.push({
+          type: 'text',
+          text: '第二张图是屏幕顶部的地址栏区域（放大了）：如果你能在里面看清网址，请填进 url 字段；看不清就留空，不要猜。',
+        });
+        parts.push({ type: 'image', mimeType: addressBar.mimeType, dataBase64: addressBar.dataBase64 });
+      }
       const result = await client.complete({
         messages: [
           { role: 'system', content: SCENE_SYSTEM },
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: '这是我当前的屏幕，请按约定输出 JSON。' },
-              { type: 'image', mimeType, dataBase64: imageBase64 },
-            ],
-          },
+          { role: 'user', content: parts },
         ],
         temperature: 0.2,
-        maxTokens: 320,
+        maxTokens: 360,
       });
       const parsed = parseJsonObject(result.text);
       const keywords = this.options.getSensitiveKeywords();
@@ -122,24 +138,33 @@ export class VisionAnalyzer {
       /*
        * 场景纠正：模型给的 scene 先过一遍确定性规则（纯函数，见 shared/perception.ts 的
        * refineScene）—— 用户实测"浏览网页总被认成笔记软件"，只靠提示词说服模型不稳，
-       * 这里按应用名/界面线索再纠一次，并允许用户自定义规则兜底。
+       * 这里按**网址域名 > 应用名 > 界面线索**再纠一次，并允许用户自定义规则兜底。
        */
+      const rawUrl = stringOr(parsed?.url, '');
+      const urlLike = isUrlLike(rawUrl) ? rawUrl : '';
       const refined = refineScene({
         scene: normalizeScene(parsed?.scene),
         app,
         browserChrome: parsed?.browserChrome === true,
         editorChrome: parsed?.editorChrome === true,
+        url: urlLike,
         fixes: this.options.getSceneFixes(),
       });
       if (refined.reason !== '') {
         this.logger.info('scene corrected', {
-          data: { from: normalizeScene(parsed?.scene), to: refined.scene, app, reason: refined.reason },
+          data: { from: normalizeScene(parsed?.scene), to: refined.scene, app, url: safeHost(urlLike), reason: refined.reason },
         });
       }
+      /*
+       * 网址的存储策略：默认**只留域名**（`storeFullUrl` 打开才存完整地址）。
+       * 查询串里常有搜索词等私人信息，而分类只需要域名。
+       */
+      const storedUrl = urlLike === '' ? '' : this.options.storeFullUrl() ? urlLike.slice(0, 300) : safeHost(urlLike);
       const observation: ScreenObservation = {
         at: new Date().toISOString(),
         scene: refined.scene,
         app: app.slice(0, 60),
+        ...(storedUrl !== '' ? { url: storedUrl } : {}),
         activity: activity.slice(0, 120),
         // 两道闸：模型判定 + 关键词命中（见 shared/perception 的 isSensitive 说明）
         sensitive: modelSensitive || matchesSensitiveKeywords(`${app} ${activity}`, keywords),

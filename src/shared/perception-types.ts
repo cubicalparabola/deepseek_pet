@@ -61,6 +61,23 @@ export interface PerceptionSettings {
   readonly captureIntervalMs: number;
   /** 截图宽度（高按屏幕比例），越小越省 token。 */
   readonly captureWidth: number;
+  /**
+   * 是否额外截一条**地址栏横条**并让模型读出网址。
+   *
+   * 为什么需要：整屏缩到 640 宽时地址栏文字只有几像素，模型读不出来；
+   * 单独把屏幕顶部那条按较大宽度截下来，网址就可读了。
+   * 网址是判断"浏览网页 / 看视频 / 读论文"最可靠的线索（比像素和窗口标题都准）。
+   */
+  readonly captureUrl: boolean;
+  /** 地址栏横条的截取宽度（越大越清楚、越费一点 token；默认 1280）。 */
+  readonly urlCaptureWidth: number;
+  /**
+   * 是否把**完整网址**（含路径与查询串）写进观察记录。
+   *
+   * 默认 false：只存域名（`github.com`）。查询串里常有搜索词等私人信息（
+   * `google.com/search?q=...`），而分类只需要域名 —— 少存一点，隐私就多一分。
+   */
+  readonly storeFullUrl: boolean;
   /** 摄像头采样间隔（毫秒）—— 比屏幕采样更稀，省电也省 token。 */
   readonly cameraIntervalMs: number;
   /** 用户是否已显式授权摄像头（默认 false，只能由界面上的按钮置为 true）。 */
@@ -99,6 +116,12 @@ export const DEFAULT_PERCEPTION_SETTINGS: PerceptionSettings = {
   hideFromCapture: true,
   captureIntervalMs: 30000,
   captureWidth: 640,
+  // 地址栏横条：默认开。它是"浏览网页被认成记笔记"这类误判最有效的解药，
+  // 而代价只是每轮多一张几十 KB 的小图（且用完即弃，不落盘）。
+  captureUrl: true,
+  urlCaptureWidth: 1280,
+  // 默认只留域名：查询串里可能是搜索词、token 等私人信息
+  storeFullUrl: false,
   cameraIntervalMs: 60000,
   // 唯一默认关闭的一项：摄像头必须用户显式授权（需求 3.5 原文）
   cameraAuthorized: false,
@@ -126,6 +149,9 @@ export interface PerceptionSettingsPatch {
   readonly hideFromCapture?: boolean;
   readonly captureIntervalMs?: number;
   readonly captureWidth?: number;
+  readonly captureUrl?: boolean;
+  readonly urlCaptureWidth?: number;
+  readonly storeFullUrl?: boolean;
   readonly cameraIntervalMs?: number;
   readonly cameraAuthorized?: boolean;
   readonly proactiveMinIntervalMs?: number;
@@ -149,6 +175,13 @@ export interface ScreenObservation {
   readonly app: string;
   /** 一句话在做什么。 */
   readonly activity: string;
+  /**
+   * 当前网页的网址（默认**只存域名**，如 `github.com`；`storeFullUrl` 打开时才存完整地址）。
+   *
+   * 来源：模型读地址栏横条。它是"网页里到底在干什么"最可靠的线索，
+   * 也让"浏览网页 vs 记笔记"这类判断有了确定性的第二道依据（见 `refineSceneByUrl`）。
+   */
+  readonly url?: string;
   /** 是否判定为私人/敏感内容。 */
   readonly sensitive: boolean;
   /** 专注度：deep = 长时间同一件事，shallow = 频繁切换。 */
@@ -334,6 +367,9 @@ export function sanitizePerceptionSettings(
     hideFromCapture: bool(record.hideFromCapture, fallback.hideFromCapture),
     captureIntervalMs: num(record.captureIntervalMs, fallback.captureIntervalMs, 5000, 3600000),
     captureWidth: num(record.captureWidth, fallback.captureWidth, 160, 1920),
+    captureUrl: bool(record.captureUrl, fallback.captureUrl),
+    urlCaptureWidth: num(record.urlCaptureWidth, fallback.urlCaptureWidth, 640, 3840),
+    storeFullUrl: bool(record.storeFullUrl, fallback.storeFullUrl),
     cameraIntervalMs: num(record.cameraIntervalMs, fallback.cameraIntervalMs, 10000, 3600000),
     cameraAuthorized: bool(record.cameraAuthorized, fallback.cameraAuthorized),
     proactiveMinIntervalMs: num(record.proactiveMinIntervalMs, fallback.proactiveMinIntervalMs, 60000, 86400000),

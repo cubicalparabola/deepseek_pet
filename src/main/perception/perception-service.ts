@@ -134,6 +134,7 @@ export class PerceptionService {
       logger: options.logger,
       getSensitiveKeywords: () => this.settings.sensitivityKeywords,
       getSceneFixes: () => this.settings.sceneFixes,
+      storeFullUrl: () => this.settings.storeFullUrl,
       isVisionEnabled: () => this.settings.vision && this.settings.screen,
     });
     this.behavior = buildBehaviorSnapshot({
@@ -365,13 +366,18 @@ export class PerceptionService {
     if (llmUsable) {
       const frame = await this.capture.grab();
       if (frame) {
-        const analysis = await this.vision.analyzeScene(frame.dataBase64, frame.mimeType);
+        // 地址栏横条：与整屏同一轮截取，只为让模型读出网址（读不到就整条不传）
+        const addressBar = await this.capture.grabAddressBar();
+        const analysis = await this.vision.analyzeScene(frame.dataBase64, frame.mimeType, addressBar);
         if (analysis) {
           observation = analysis.observation;
           this.lastObservation = observation;
           this.observations.push(observation);
           if (this.observations.length > OBSERVATION_MEMORY) this.observations.shift();
-          const label = `${sceneLabel(observation.scene)}${observation.app ? `（${observation.app}）` : ''}${observation.sensitive ? ' · 判定为私人内容' : ''}`;
+          const label =
+            `${sceneLabel(observation.scene)}${observation.app ? `（${observation.app}）` : ''}` +
+            `${observation.url ? ` ${observation.url}` : ''}` +
+            `${observation.sensitive ? ' · 判定为私人内容' : ''}`;
           this.store.recordObservation(observation, label);
           if (this.settings.habits) {
             this.habits = learnHabit(this.habits, observation);

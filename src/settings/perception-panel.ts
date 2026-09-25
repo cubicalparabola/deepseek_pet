@@ -312,6 +312,30 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   samplingSection.appendChild(fieldRow('perception-capture-width', '截图宽度（像素）', widthInput,
     '高按屏幕比例缩放；越小越省 token，但字太小会读不出来。'));
 
+  /*
+   * 网址线索：单独截一条**放大的地址栏横条**给模型读网址。
+   *
+   * 为什么值得单独做：整屏缩到 640 宽时地址栏只有几像素，模型读不出来；
+   * 而网址是"网页里到底在干什么"最可靠的依据（比像素、窗口标题都准）。
+   * 横条只在当次请求里用一次，不落盘；默认只把**域名**写进观察记录。
+   */
+  const captureUrlInput = makeCheckbox('perception-capture-url', '读取网页地址（地址栏）');
+  samplingSection.appendChild(checkRow(
+    '读取网页地址（额外截一条放大的地址栏横条给模型，"在浏览什么网站"判得更准）',
+    captureUrlInput,
+  ));
+  const urlWidthInput = makeInput('number', 'perception-url-capture-width', '地址栏截取宽度');
+  urlWidthInput.min = '640';
+  urlWidthInput.max = '3840';
+  urlWidthInput.step = '160';
+  samplingSection.appendChild(fieldRow('perception-url-capture-width', '地址栏截取宽度（像素）', urlWidthInput,
+    '默认 1280。地址栏看不清就调大；这张小图不落盘，只在当次请求里用一次。'));
+  const storeFullUrlInput = makeCheckbox('perception-store-full-url', '记录完整网址');
+  samplingSection.appendChild(checkRow(
+    '记录完整网址（含路径与查询串）—— 默认关闭，只留域名，避免把搜索词等私人信息写进观察记录',
+    storeFullUrlInput,
+  ));
+
   const cameraIntervalInput = makeInput('number', 'perception-camera-interval-ms', '摄像头采样间隔（毫秒）');
   cameraIntervalInput.min = '10000';
   cameraIntervalInput.step = '1000';
@@ -665,6 +689,9 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
 
     setValue(intervalInput, String(settings.captureIntervalMs));
     setValue(widthInput, String(settings.captureWidth));
+    setValue(urlWidthInput, String(settings.urlCaptureWidth));
+    if (!editing(captureUrlInput)) captureUrlInput.checked = settings.captureUrl;
+    if (!editing(storeFullUrlInput)) storeFullUrlInput.checked = settings.storeFullUrl;
     setValue(cameraIntervalInput, String(settings.cameraIntervalMs));
     setValue(proactiveMinInput, String(settings.proactiveMinIntervalMs));
     setValue(proactiveMaxInput, String(settings.proactiveMaxPerHour));
@@ -773,7 +800,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   function buildSamplingPatch(): PerceptionSettingsPatch | null {
     // 先读一遍只用来判断"有没有空/非数字"，错误提示要具体到这一步
     const fields = [
-      numberValue(intervalInput), numberValue(widthInput), numberValue(cameraIntervalInput),
+      numberValue(intervalInput), numberValue(widthInput), numberValue(urlWidthInput), numberValue(cameraIntervalInput),
       numberValue(proactiveMinInput), numberValue(proactiveMaxInput), numberValue(longSessionInput),
       numberValue(lateNightInput), numberValue(quietStartInput), numberValue(quietEndInput),
     ];
@@ -785,6 +812,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     // 数组解构仍会带 undefined，项目约定又不许用非空断言）
     const ms = numberValue(intervalInput) ?? 0;
     const px = numberValue(widthInput) ?? 0;
+    const urlPx = numberValue(urlWidthInput) ?? 0;
     const camMs = numberValue(cameraIntervalInput) ?? 0;
     const proactiveMin = numberValue(proactiveMinInput) ?? 0;
     const proactiveMax = numberValue(proactiveMaxInput) ?? 0;
@@ -795,6 +823,9 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     return {
       captureIntervalMs: clampInt(ms, 5000, 3600000),
       captureWidth: clampInt(px, 160, 1920),
+      captureUrl: captureUrlInput.checked,
+      urlCaptureWidth: clampInt(urlPx, 640, 3840),
+      storeFullUrl: storeFullUrlInput.checked,
       cameraIntervalMs: clampInt(camMs, 10000, 3600000),
       proactiveMinIntervalMs: clampInt(proactiveMin, 60000, 86400000),
       proactiveMaxPerHour: clampInt(proactiveMax, 0, 60),

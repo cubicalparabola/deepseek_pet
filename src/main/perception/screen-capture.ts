@@ -89,6 +89,58 @@ export class ScreenCapture {
   }
 
   /**
+   * 截一条**地址栏横条**（屏幕顶部），用于让模型读出网址。
+   *
+   * 为什么单独截这一条：整屏缩到 640 宽时地址栏文字只有几像素，读不出来；
+   * 按 `urlCaptureWidth`（默认 1280）截下顶部约 7%，文字就清楚了。
+   * 这张图**只在本次请求里活一次**，不落盘（与整屏截图同一条隐私纪律）。
+   *
+   * @returns 与 {@link grab} 同构的结果；不需要/失败时返回 null（调用方直接不带这条）
+   */
+  public async grabAddressBar(): Promise<CaptureResult | null> {
+    const settings = this.options.getSettings();
+    if (!settings.captureUrl) return null;
+    const startedAt = Date.now();
+    try {
+      const primary = screen.getPrimaryDisplay();
+      const targetWidth = Math.max(640, Math.round(settings.urlCaptureWidth));
+      const aspect = primary.size.height > 0 ? primary.size.height / Math.max(1, primary.size.width) : 0.5625;
+      const targetHeight = Math.max(160, Math.round(targetWidth * aspect));
+
+      const sources = await desktopCapturer.getSources({
+        types: ['screen'],
+        thumbnailSize: { width: targetWidth, height: targetHeight },
+        fetchWindowIcons: false,
+      });
+      const source = sources.find((item) => String(item.display_id) === String(primary.id)) ?? sources[0];
+      if (!source) return null;
+
+      let image = source.thumbnail;
+      if (image.isEmpty()) return null;
+      const size = image.getSize();
+      if (size.width > targetWidth) image = image.resize({ width: targetWidth, quality: 'good' });
+
+      const full = image.getSize();
+      // 顶部 7%（至少 24px）：最大化浏览器下正好覆盖标签页 + 地址栏
+      const stripHeight = Math.max(24, Math.round(full.height * 0.07));
+      const strip = image.crop({ x: 0, y: 0, width: full.width, height: Math.min(stripHeight, full.height) });
+      if (strip.isEmpty()) return null;
+      const jpeg = strip.toJPEG(80);
+      const stripSize = strip.getSize();
+      return {
+        dataBase64: jpeg.toString('base64'),
+        mimeType: 'image/jpeg',
+        width: stripSize.width,
+        height: stripSize.height,
+        elapsedMs: Date.now() - startedAt,
+      };
+    } catch (error) {
+      this.logger.debug('address bar capture failed', { error: describeError(error) });
+      return null;
+    }
+  }
+
+  /**
    * 让桌宠自己**不进任何截屏/录屏**（Windows 的 `WDA_EXCLUDEFROMCAPTURE`）。
    *
    * 为什么需要：她是一个常驻置顶的浮层，如果出现在画面里，

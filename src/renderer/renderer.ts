@@ -51,6 +51,7 @@ import {
 } from '../shared/growth';
 import {
   BROWSER_APPS,
+  URL_SCENE_RULES,
   appKind,
   capturePermission,
   emptyHabitProfile,
@@ -60,6 +61,7 @@ import {
   isLateNight,
   isPlanEnabled,
   isQuietHour,
+  isUrlLike,
   learnHabit,
   matchesAppName,
   matchesSensitiveKeywords,
@@ -67,6 +69,8 @@ import {
   parseSceneFixes,
   planIntervention,
   refineScene,
+  refineSceneByUrl,
+  safeHost,
   sceneLabel,
   topSceneAtHour,
 } from '../shared/perception';
@@ -1114,6 +1118,11 @@ class PetApplication {
       readonly appKind: typeof appKind;
       readonly matchesAppName: typeof matchesAppName;
       readonly parseSceneFixes: typeof parseSceneFixes;
+      /** 网址线索（读地址栏 -> 域名规则 -> 场景纠正）。 */
+      readonly isUrlLike: typeof isUrlLike;
+      readonly safeHost: typeof safeHost;
+      readonly refineSceneByUrl: typeof refineSceneByUrl;
+      readonly URL_SCENE_RULES: typeof URL_SCENE_RULES;
       readonly BROWSER_APPS: typeof BROWSER_APPS;
     };
     readonly perceptionStatus: () => Promise<PerceptionStatus | null>;
@@ -1194,6 +1203,10 @@ class PetApplication {
         appKind,
         matchesAppName,
         parseSceneFixes,
+        isUrlLike,
+        safeHost,
+        refineSceneByUrl,
+        URL_SCENE_RULES,
         BROWSER_APPS,
       },
       perceptionStatus: async () => {
