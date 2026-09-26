@@ -914,11 +914,14 @@ class DesktopPetApplication {
       });
       if (automatic) return;
       if (request.text.trim() !== '') {
+        /*
+         * 只推正文：这条分支只有 `reply` 会走到，而 reply 从不带 `level`
+         * （`level` 只出现在 `system` 提示上，那种在安静模式下已经整条丢掉了）。
+         */
         this.chatWindow?.pushMessage({
           role: 'pet',
           text: request.text,
           at: new Date().toISOString(),
-          ...(request.level ? { level: request.level } : {}),
         });
       }
       return;
