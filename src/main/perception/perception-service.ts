@@ -251,7 +251,9 @@ export class PerceptionService {
   /**
    * 没模型时的降级观察：只凭最上层窗口的进程名 + 标题判断场景。
    *
-   * 返回 null 表示"认不出来"（那就**不记观察**，宁可不写也不要写一条 other 污染习惯统计）。
+   * 返回 null 表示"认不出来"。这条本地路径**比"记一条 other"更干脆**：干脆不记。
+   * （统计侧现在也安全了 —— `other` 已经进不了习惯画像与时间线，见共享层
+   * `isRecognizedScene()`；这里不记只是少一条没用的记录。）
    */
   private localObservationFromWindow(now: number): ScreenObservation | null {
     const foreground = this.effectiveForeground();
