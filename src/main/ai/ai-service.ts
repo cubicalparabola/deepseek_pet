@@ -45,6 +45,7 @@ import {
 } from '../../shared/emotion';
 import type { Logger } from '../../shared/logger';
 import { describeError } from '../../shared/errors';
+import { net } from 'electron';
 import { AIConfigStore } from './ai-config-store';
 import { DiaryService, todayKey, type DiaryContext } from './diary-service';
 import { buildRollingSummaryMessages, fallbackRollingSummary, sanitizeSummary } from '../../shared/memory-summary';
@@ -52,6 +53,7 @@ import { EmotionService } from './emotion-service';
 import { extractFactsFromModelOutput, extractFactsHeuristic } from './fact-extract';
 import { LLMClient, LLMError, type LLMMessage } from './llm-client';
 import { supportsBalanceQuery } from '../../shared/balance';
+import { classifyOffline } from '../../shared/pet-triggers';
 import { localDiary, localReply } from './local-replies';
 import { MemoryStore } from './memory-store';
 
@@ -311,20 +313,42 @@ export class AIService {
   /**
    * 余额查询是否表明"用不了"（用于 offline 动画）。
    *
-   * 三种情况：没配 key、key/接口返回错误、官方明确 `is_available=false`。
+   * 规则本身在 `shared/pet-triggers.ts` 的 `classifyOffline()`（纯函数，可逐条钉死）；
+   * 这里只负责**取事实**：
+   *   - `no-key`      还没填密钥（最该先告诉用户的那条）
+   *   - `network`     **断网**：系统层面没有网络连接，或最近一次请求在
+   *                   DNS/连接阶段就失败了（`LLMError('NETWORK')`）
+   *   - `invalid-key` 密钥无效（接口 401/403）
+   *   - `no-balance`  余额不足（官方 `is_available = false`）
+   *
+   * 为什么把"断网"也算进来：需求里 offline 是"掉线动画"，
+   * 而用户真正会遇到的掉线有两种 —— 没配 key 和**网断了**。
+   * 只看余额/密钥的话，拔网线时她一声不响（余额还是上次那个），
+   * 反而在最该表达的时候没表达。
    */
   public offlineReason(): { readonly offline: boolean; readonly reason: string } {
     const settings = this.settings;
-    if (!settings.enabled) return { offline: false, reason: '' };
-    if (settings.provider.apiKey.trim() === '') return { offline: true, reason: 'no-key' };
-    if (this.balance !== null && !this.balance.isAvailable) return { offline: true, reason: 'no-balance' };
-    if (this.balanceError !== '' && /HTTP 401|HTTP 403|API Key 无效/.test(this.balanceError)) {
-      return { offline: true, reason: 'invalid-key' };
+    const reason = classifyOffline({
+      enabled: settings.enabled,
+      hasKey: settings.provider.apiKey.trim() !== '',
+      // 系统层面就没网（Chromium 的网络状态，拔网线/关 Wi-Fi 立刻为 false）
+      networkOnline: this.isNetworkOnline(),
+      // 没查过余额（null）时按"可用"处理：不知道就别报掉线
+      balanceAvailable: this.balance === null ? true : this.balance.isAvailable,
+      balanceError: this.balanceError,
+      lastError: this.lastError,
+    });
+    return { offline: reason !== '', reason };
+  }
+
+  /** 系统层面是否连着网；读不出来时按"有网"处理（不谎报掉线）。 */
+  private isNetworkOnline(): boolean {
+    try {
+      return net.isOnline();
+    } catch (error) {
+      this.logger.debug('net.isOnline() unavailable', { error: describeError(error) });
+      return true;
     }
-    if (/HTTP 401|HTTP 403|API Key 无效/.test(this.lastError)) {
-      return { offline: true, reason: 'invalid-key' };
-    }
-    return { offline: false, reason: '' };
   }
 
   public startBalanceScheduler(): void {

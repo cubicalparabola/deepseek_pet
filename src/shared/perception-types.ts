@@ -115,6 +115,16 @@ export interface PerceptionSettings {
   readonly longSessionMinutes: number;
   /** 深夜提醒的起点小时（默认 1 点）。 */
   readonly lateNightHour: number;
+  /**
+   * GPU「过热」阈值（摄氏度，默认 80）。
+   *
+   * 为什么放在感知设置里：这一条感知的是**这台机器本身**（`nvidia-smi` 读温度），
+   * 而不是屏幕或摄像头内容 —— 但和其它几条一样是"越过阈值就表达一次"。
+   * 做成可配置是因为耐热因人因机而异（笔记本 75 度就该提醒了，
+   * 台式机 82 度才算热），写死一个 80 总有一半人不合适。
+   * 读不到温度（没有 N 卡 / 没有 nvidia-smi）时一律不触发，与这个值无关。
+   */
+  readonly overheatThresholdC: number;
   /** 敏感内容关键词（匹配模型给出的 app/activity/summary，命中则按敏感处理）。 */
   readonly sensitivityKeywords: readonly string[];
   /**
@@ -159,6 +169,8 @@ export const DEFAULT_PERCEPTION_SETTINGS: PerceptionSettings = {
   quietHours: { start: 23, end: 8 },
   longSessionMinutes: 120,
   lateNightHour: 1,
+  // 80 度：N 卡默认温度墙通常在 83~90 度，80 度开始提醒还来得及降频/散散热
+  overheatThresholdC: 80,
   sensitivityKeywords: ['密码', '银行', '支付', '身份证', '私密', 'password', 'bank', 'paypal', '1password'],
   /**
    * 默认给两条**最常见**的纠正（浏览器 → 浏览网页），开箱即用；
@@ -191,6 +203,7 @@ export interface PerceptionSettingsPatch {
   readonly quietHours?: { readonly start?: number; readonly end?: number };
   readonly longSessionMinutes?: number;
   readonly lateNightHour?: number;
+  readonly overheatThresholdC?: number;
   readonly sensitivityKeywords?: readonly string[];
   readonly sceneFixes?: readonly string[];
 }
@@ -463,6 +476,8 @@ export function sanitizePerceptionSettings(
     },
     longSessionMinutes: num(record.longSessionMinutes, fallback.longSessionMinutes, 10, 1440),
     lateNightHour: num(record.lateNightHour, fallback.lateNightHour, 0, 6),
+    // 40~110：低于 40 度等于"一直过热"（开机就演），高于 110 度则永远等不到
+    overheatThresholdC: num(record.overheatThresholdC, fallback.overheatThresholdC, 40, 110),
     sensitivityKeywords: keywords,
     sceneFixes: fixes,
   };

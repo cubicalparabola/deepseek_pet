@@ -118,9 +118,10 @@ app.whenReady().then(async () => {
   /*
    * 再抓几张不同偏移的图（只覆盖行内 transform，**不改配置**），
    * 方便人眼挑"再向右一点"到底要多少：build/watch-offset-<n>.png
+   * （配置现在用的是 12%；18% 一起出一张，用户想再往右就有直接的对照图）
    */
   const shots = {};
-  for (const percent of [0, 6, 12]) {
+  for (const percent of [0, 6, 12, 18]) {
     await run(`(() => {
       for (const v of document.querySelectorAll('video')) v.style.transform = 'translate(${percent}%, 0%)';
       return true;

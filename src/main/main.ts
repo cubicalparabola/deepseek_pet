@@ -740,6 +740,9 @@ class DesktopPetApplication {
         return status ? { mood: status.emotion.mood, hunger: status.emotion.hunger } : null;
       },
       getOfflineReason: () => this.aiService?.offlineReason().reason ?? '',
+      // 过热阈值来自感知设置（面板「采样与频率」里可改）；服务没起来时用默认 80 度
+      getOverheatThresholdC: () =>
+        this.perception?.settings.overheatThresholdC ?? DEFAULT_PERCEPTION_SETTINGS.overheatThresholdC,
     });
     this.triggers.start();
   }

@@ -60,11 +60,13 @@ import {
   resolvePlayLoopCount,
 } from '../shared/animation-types';
 import {
+  APPROACH_COOLDOWN_MS,
   APPROACH_RADIUS_PX,
   HUNGRY_THRESHOLD,
   OVERHEAT_TEMP_C,
   SAD_MOOD_THRESHOLD,
   classifyApproach,
+  classifyOffline,
   evaluateHungry,
   evaluateOffline,
   evaluateOverheat,
@@ -1355,6 +1357,7 @@ class PetApplication {
       readonly DOCK_EDGE_THRESHOLD_PX: typeof DOCK_EDGE_THRESHOLD_PX;
       readonly UNDOCK_DISTANCE_PX: typeof UNDOCK_DISTANCE_PX;
       readonly classifyApproach: typeof classifyApproach;
+  readonly classifyOffline: typeof classifyOffline;
       readonly evaluateOverheat: typeof evaluateOverheat;
       readonly evaluateSad: typeof evaluateSad;
       readonly evaluateHungry: typeof evaluateHungry;
@@ -1363,6 +1366,7 @@ class PetApplication {
       readonly sceneTriggerAnimation: typeof sceneTriggerAnimation;
       readonly hungerFromBalance: typeof hungerFromBalance;
       readonly APPROACH_RADIUS_PX: typeof APPROACH_RADIUS_PX;
+  readonly APPROACH_COOLDOWN_MS: typeof APPROACH_COOLDOWN_MS;
       readonly OVERHEAT_TEMP_C: typeof OVERHEAT_TEMP_C;
       readonly SAD_MOOD_THRESHOLD: typeof SAD_MOOD_THRESHOLD;
       readonly HUNGRY_THRESHOLD: typeof HUNGRY_THRESHOLD;
@@ -1543,6 +1547,7 @@ class PetApplication {
         DOCK_EDGE_THRESHOLD_PX,
         UNDOCK_DISTANCE_PX,
         classifyApproach,
+        classifyOffline,
         evaluateOverheat,
         evaluateSad,
         evaluateHungry,
@@ -1551,6 +1556,7 @@ class PetApplication {
         sceneTriggerAnimation,
         hungerFromBalance,
         APPROACH_RADIUS_PX,
+        APPROACH_COOLDOWN_MS,
         OVERHEAT_TEMP_C,
         SAD_MOOD_THRESHOLD,
         HUNGRY_THRESHOLD,

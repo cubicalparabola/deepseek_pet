@@ -409,6 +409,14 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   samplingSection.appendChild(fieldRow('perception-late-night-hour', '深夜提醒起点（0~6 点）', lateNightInput,
     '默认 1 点；判定区间是「起点 ~ 凌晨 5 点」。'));
 
+  const overheatInput = makeInput('number', 'perception-overheat-threshold-c', 'GPU 过热阈值（℃）');
+  overheatInput.min = '40';
+  overheatInput.max = '110';
+  overheatInput.step = '1';
+  samplingSection.appendChild(fieldRow('perception-overheat-threshold-c', 'GPU 过热阈值（℃）', overheatInput,
+    '用 nvidia-smi 读到 GPU 温度达到这个值就演一次「过热」（默认 80）。'
+    + '读不到温度（没有 N 卡 / 没有 nvidia-smi）时不触发，也不会瞎报。'));
+
   const quietStartInput = makeInput('number', 'perception-quiet-start', '免打扰开始小时');
   quietStartInput.min = '0';
   quietStartInput.max = '23';
@@ -825,6 +833,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     setValue(proactiveMaxInput, String(settings.proactiveMaxPerHour));
     setValue(longSessionInput, String(settings.longSessionMinutes));
     setValue(lateNightInput, String(settings.lateNightHour));
+    setValue(overheatInput, String(settings.overheatThresholdC));
     setValue(quietStartInput, String(settings.quietHours.start));
     setValue(quietEndInput, String(settings.quietHours.end));
   }
@@ -931,7 +940,8 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
       numberValue(intervalInput), numberValue(widthInput), numberValue(urlWidthInput), numberValue(cameraIntervalInput),
       numberValue(retentionInput),
       numberValue(proactiveMinInput), numberValue(proactiveMaxInput), numberValue(longSessionInput),
-      numberValue(lateNightInput), numberValue(quietStartInput), numberValue(quietEndInput),
+      numberValue(lateNightInput), numberValue(overheatInput),
+      numberValue(quietStartInput), numberValue(quietEndInput),
     ];
     if (fields.includes(null)) {
       setPanelError('采样与频率的每一项都必须填数字（免打扰时段取值 0~23）。');
@@ -950,6 +960,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     const proactiveMax = numberValue(proactiveMaxInput) ?? 0;
     const longMin = numberValue(longSessionInput) ?? 0;
     const late = numberValue(lateNightInput) ?? 0;
+    const overheat = numberValue(overheatInput) ?? 0;
     const qStart = numberValue(quietStartInput) ?? 0;
     const qEnd = numberValue(quietEndInput) ?? 0;
     return {
@@ -967,6 +978,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
       proactiveMaxPerHour: clampInt(proactiveMax, 0, 60),
       longSessionMinutes: clampInt(longMin, 10, 1440),
       lateNightHour: clampInt(late, 0, 6),
+      overheatThresholdC: clampInt(overheat, 40, 110),
       quietHours: { start: clampInt(qStart, 0, 23), end: clampInt(qEnd, 0, 23) },
     };
   }

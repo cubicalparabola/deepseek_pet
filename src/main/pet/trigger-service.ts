@@ -20,11 +20,13 @@ import { screen } from 'electron';
 import type { Logger } from '../../shared/logger';
 import { describeError } from '../../shared/errors';
 import {
+  APPROACH_COOLDOWN_MS,
   classifyApproach,
   evaluateHungry,
   evaluateOffline,
   evaluateOverheat,
   evaluateSad,
+  OVERHEAT_TEMP_C,
   type TriggerAnimationId,
 } from '../../shared/pet-triggers';
 import type { Rect } from '../../shared/dock';
@@ -48,10 +50,20 @@ export interface TriggerServiceOptions {
   readonly getOfflineReason: () => string;
   /** 光标轮询间隔（毫秒，默认 250）。 */
   readonly cursorIntervalMs?: number;
+  /** 两次"接住"之间的最短间隔（毫秒，默认 `APPROACH_COOLDOWN_MS`）。 */
+  readonly approachCooldownMs?: number;
   /** 慢速状态轮询间隔（毫秒，默认 30 秒）：情绪 / 掉线。 */
   readonly stateIntervalMs?: number;
   /** GPU 温度轮询间隔（毫秒，默认 60 秒）。 */
   readonly gpuIntervalMs?: number;
+  /**
+   * GPU "算过热"的温度阈值（摄氏度，默认 80，来自感知设置）。
+   *
+   * 做成可配置而不是写死：不同机器/季节的耐热不一样（笔记本 75 度就该提醒了），
+   * 而且**可配置才验证得了** —— 真机把阈值调到低于当前温度，就能看到
+   * "真温度 -> 真触发 -> 真动画"这条链路（见 tools/probe-offline-overheat.cjs）。
+   */
+  readonly getOverheatThresholdC?: () => number;
 }
 
 export class TriggerService {
@@ -67,6 +79,9 @@ export class TriggerService {
   private hungryArmed = true;
   private offlineArmed = true;
   private overheatArmed = true;
+
+  /** 上一次"接住"发生的时间（0 = 从没演过）；冷却靠它算。 */
+  private approachLastTriggerAt = 0;
 
   /** 最近一次 GPU 温度（摄氏度）；null = 读不到。 */
   private gpuTempC: number | null = null;
@@ -122,8 +137,11 @@ export class TriggerService {
     this.logger.info('trigger service started', {
       data: {
         cursorMs: this.options.cursorIntervalMs ?? 250,
+        approachCooldownMs: this.options.approachCooldownMs ?? APPROACH_COOLDOWN_MS,
         stateMs: this.options.stateIntervalMs ?? 30_000,
         gpuMs: this.options.gpuIntervalMs ?? 60_000,
+        // 过热阈值是从感知设置读来的：打在启动日志里，"设置没生效"一眼可查
+        overheatThresholdC: this.resolveOverheatThreshold(),
       },
     });
   }
@@ -158,11 +176,31 @@ export class TriggerService {
         dy: cursor.y - (pet.y + pet.height / 2),
       },
       this.approachArmed,
+      {
+        // 冷却：距上次"接住"不足 APPROACH_COOLDOWN_MS 时不再演（见 shared/pet-triggers）
+        cooldownMs: this.options.approachCooldownMs ?? APPROACH_COOLDOWN_MS,
+        sinceLastTriggerMs: this.approachLastTriggerAt === 0
+          ? Number.POSITIVE_INFINITY
+          : Date.now() - this.approachLastTriggerAt,
+      },
     );
     this.approachArmed = decision.armed;
     if (decision.animationId) {
-      this.options.trigger(decision.animationId, 'proximity:cursor');
+      this.approachLastTriggerAt = Date.now();
+      this.fire(decision.animationId, 'proximity:cursor');
     }
+  }
+
+  /**
+   * 真的去触发，并**记一条带原因的日志**。
+   *
+   * 为什么多这一层：这个类存在的意义就是回答"她为什么突然演这个"，
+   * 而原因字符串（`offline:network` / `gpu-hot:52C>=45C`）原来只往 IPC 里塞了一份，
+   * 日志里只有一个动画 id —— 掉线到底是"没配密钥"还是"网断了"就分不出来。
+   */
+  private fire(animationId: TriggerAnimationId, reason: string): void {
+    this.logger.info('trigger fired', { data: { animationId, reason } });
+    this.options.trigger(animationId, reason);
   }
 
   /* ------------------------------------------------------------------ */
@@ -176,11 +214,11 @@ export class TriggerService {
 
     const sad = evaluateSad(emotion.mood, this.sadArmed);
     this.sadArmed = sad.armed;
-    if (sad.animationId) this.options.trigger(sad.animationId, `mood-low:${emotion.mood}`);
+    if (sad.animationId) this.fire(sad.animationId, `mood-low:${emotion.mood}`);
 
     const hungry = evaluateHungry(emotion.hunger, this.hungryArmed);
     this.hungryArmed = hungry.armed;
-    if (hungry.animationId) this.options.trigger(hungry.animationId, `hunger-high:${emotion.hunger}`);
+    if (hungry.animationId) this.fire(hungry.animationId, `hunger-high:${emotion.hunger}`);
   }
 
   /* ------------------------------------------------------------------ */
@@ -192,7 +230,7 @@ export class TriggerService {
     const reason = this.options.getOfflineReason();
     const decision = evaluateOffline(reason, this.offlineArmed);
     this.offlineArmed = decision.armed;
-    if (decision.animationId) this.options.trigger(decision.animationId, `offline:${reason}`);
+    if (decision.animationId) this.fire(decision.animationId, `offline:${reason}`);
   }
 
   /* ------------------------------------------------------------------ */
@@ -236,17 +274,31 @@ export class TriggerService {
 
   private checkOverheat(): void {
     if (this.isPaused()) return;
-    const decision = evaluateOverheat(this.gpuTempC, this.overheatArmed);
+    const threshold = this.resolveOverheatThreshold();
+    const decision = evaluateOverheat(this.gpuTempC, this.overheatArmed, { threshold });
     this.overheatArmed = decision.armed;
     if (decision.animationId) {
-      this.options.trigger(decision.animationId, `gpu-hot:${this.gpuTempC ?? '?'}C`);
+      this.fire(decision.animationId, `gpu-hot:${this.gpuTempC ?? '?'}C>=${threshold}C`);
     }
+  }
+
+  /** 读过热阈值（感知设置坏了就退回默认 80 度，绝不因为配置问题不提醒）。 */
+  private resolveOverheatThreshold(): number {
+    try {
+      const value = this.options.getOverheatThresholdC?.();
+      if (typeof value === 'number' && Number.isFinite(value) && value > 0 && value < 150) return value;
+    } catch (error) {
+      this.logger.debug('overheat threshold unavailable', { error: describeError(error) });
+    }
+    return OVERHEAT_TEMP_C;
   }
 
   /** 供托盘/验收查询：当前读到的 GPU 温度与"这个功能是否可用"。 */
   public describe(): {
     readonly gpuTempC: number | null;
     readonly gpuAvailable: boolean;
+    readonly overheatThresholdC: number;
+    readonly approachCooldownMs: number;
     readonly armed: {
       readonly approach: boolean;
       readonly sad: boolean;
@@ -259,6 +311,8 @@ export class TriggerService {
       gpuTempC: this.gpuTempC,
       // 连续失败 3 次以上就当作"这台机器没有可读的 GPU 温度"
       gpuAvailable: this.gpuFailures < 3,
+      overheatThresholdC: this.resolveOverheatThreshold(),
+      approachCooldownMs: this.options.approachCooldownMs ?? APPROACH_COOLDOWN_MS,
       armed: {
         approach: this.approachArmed,
         sad: this.sadArmed,

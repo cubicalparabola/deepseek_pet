@@ -1136,12 +1136,19 @@ app.whenReady().then(async () => {
     const area = { x: 0, y: 0, width: 1920, height: 1040 };
     const petSize = { width: 288, height: 384 };
     const winSize = { width: 288, height: 384 };
-    // 宠物右边缘距工作区右边缘 10px -> 收起
-    const nearRight = model.petRectIn({ x: 1612, y: 600, width: 288, height: 384 }, petSize);
+    /** 整只宠物（= 窗口）放到某个位置 -> 参与判定用的宠物矩形。 */
+    const at = (x, y) => model.petRectIn({ x, y, width: winSize.width, height: winSize.height }, petSize);
+    // 阈值 8px 的边界：20px 外**不收起**（这是用户反馈"我还没拖到边上她就贴上来了"的那一段）
+    const nearRight = at(1920 - 288 - 20, 600);
     const rightVerdict = model.evaluateDock(nearRight, area);
-    // 贴下边缘
-    const nearBottom = model.petRectIn({ x: 700, y: 1040 - 384 - 6, width: 288, height: 384 }, petSize);
-    const bottomVerdict = model.evaluateDock(nearBottom, area);
+    // 刚好 8px（含等于）-> 收起；9px -> 还不收起
+    const edgeRight = model.evaluateDock(at(1920 - 288 - 8, 600), area);
+    const justOutsideRight = model.evaluateDock(at(1920 - 288 - 9, 600), area);
+    // 推到最右边（窗口允许挂出屏幕 -> 差值是负数）-> 一定收起
+    const overshootRight = model.evaluateDock(at(1920 - 288 + 30, 600), area);
+    // 贴下边缘：差 6px 收起，差 20px 不收起
+    const nearBottom = model.evaluateDock(at(700, 1040 - 384 - 6), area);
+    const offBottom = model.evaluateDock(at(700, 1040 - 384 - 20), area);
     // 中间 -> 不收起
     const middle = model.petRectIn({ x: 700, y: 300, width: 288, height: 384 }, petSize);
     const freeVerdict = model.evaluateDock(middle, area);
@@ -1154,24 +1161,38 @@ app.whenReady().then(async () => {
     const moved40 = model.petRectIn({ x: target.x - 40, y: 528, width: 288, height: 384 }, petSize);
     const moved200 = model.petRectIn({ x: target.x - 200, y: 528, width: 288, height: 384 }, petSize);
     return {
+      threshold: model.DOCK_EDGE_THRESHOLD_PX,
+      nearRightGap: 1920 - (nearRight.x + nearRight.width),
       rightDock: rightVerdict.dock,
-      bottomDock: bottomVerdict.dock,
+      edgeRightDock: edgeRight.dock,
+      justOutsideRightDock: justOutsideRight.dock,
+      overshootRightDock: overshootRight.dock,
+      bottomDock: nearBottom.dock,
+      offBottomDock: offBottom.dock,
       freeDock: freeVerdict.dock,
       targetRightGap: area.width - (targetRect.x + targetRect.width),
       stillDocked: model.shouldUndock('right', moved40, area),
       undocked: model.shouldUndock('right', moved200, area),
       nudged: model.nudgeInward('bottom', { x: 700, y: 656 }),
+      undockDistancePx: model.UNDOCK_DISTANCE_PX,
     };
   })()`);
   record(
-    '贴边收起几何：边缘判定、贴平到边缘、拖离阈值、无记录时的内移兜底',
-    dockModel.rightDock === 'right' &&
+    '贴边收起几何：**必须推到最边上**（8px 内）才收起，差 9px 都不算；贴平到边缘、拖离阈值、内移兜底',
+    dockModel.threshold === 8 &&
+      // 以前 24px 阈值时，离边 20px 就收起了；现在这一段必须是"没收起"
+      dockModel.nearRightGap === 20 &&
+      dockModel.rightDock === 'free' &&
+      dockModel.edgeRightDock === 'right' &&
+      dockModel.justOutsideRightDock === 'free' &&
+      dockModel.overshootRightDock === 'right' &&
       dockModel.bottomDock === 'bottom' &&
+      dockModel.offBottomDock === 'free' &&
       dockModel.freeDock === 'free' &&
       dockModel.targetRightGap === 0 &&
       dockModel.stillDocked === false &&
       dockModel.undocked === true &&
-      dockModel.nudged.y === 656 - 80,
+      dockModel.nudged.y === 656 - dockModel.undockDistancePx - 8,
     JSON.stringify(dockModel),
   );
 
@@ -1251,6 +1272,12 @@ app.whenReady().then(async () => {
       // 过热：阈值附近有回差
       overheat: steps((temp, armed) => model.evaluateOverheat(temp, armed), [85, 84, 76, 70, 82]),
       overheatUnknown: steps((temp, armed) => model.evaluateOverheat(temp, armed), [null, null, null]),
+      // 过热阈值可配置（感知设置里那条）：真温度 52 度配 45 度阈值就该演
+      overheatCustomThreshold: [
+        model.evaluateOverheat(52, true, { threshold: 45 }).animationId,
+        model.evaluateOverheat(44, true, { threshold: 45 }).animationId,
+        model.evaluateOverheat(50, true, { threshold: 80 }).animationId,
+      ],
       // 鼠标靠近：只有下方/右侧会触发，上方不演；离开后重新武装
       approach: [
         model.classifyApproach({ dx: 10, dy: 90 }, true),
@@ -1259,6 +1286,41 @@ app.whenReady().then(async () => {
         model.classifyApproach({ dx: -90, dy: 10 }, true),
         model.classifyApproach({ dx: 0, dy: 400 }, false),
       ].map((item) => ({ id: item.animationId, armed: item.armed })),
+      /*
+       * 鼠标靠近的冷却（用户："需要有一段时间的冷却，不能连续触发"）：
+       * 同一位置反复"走开再回来"，60 秒内只演一次；冷却过后才允许第二次。
+       * 冷却期间"保持武装"是刻意的 —— 冷却一过她自己会补演。
+       */
+      approachCooldown: [
+        { sinceLastTriggerMs: 999999, armed: true },
+        { sinceLastTriggerMs: 500, armed: true },
+        { sinceLastTriggerMs: 59000, armed: true },
+        { sinceLastTriggerMs: 60000, armed: true },
+      ].map((step) => model.classifyApproach({ dx: 0, dy: 90 }, step.armed, { sinceLastTriggerMs: step.sinceLastTriggerMs }))
+        .map((item) => ({ id: item.animationId, armed: item.armed })),
+      approachCooldownMs: model.APPROACH_COOLDOWN_MS,
+      /*
+       * 掉线判定（纯函数，主进程只负责取事实）：
+       * 总开关 / 没配密钥 / **断网** / 余额不可用 / 密钥无效 / 最近一次请求连不上。
+       * 关键的两条：断网要算掉线；**超时不算断网**（否则模型慢会让人去查路由器）。
+       */
+      offlineClassify: [
+        ['disabled', { enabled: false, hasKey: false, networkOnline: true, balanceAvailable: true, balanceError: '', lastError: '' }],
+        ['no-key', { enabled: true, hasKey: false, networkOnline: true, balanceAvailable: true, balanceError: '', lastError: '' }],
+        ['network-no-connection', { enabled: true, hasKey: true, networkOnline: false, balanceAvailable: true, balanceError: '', lastError: '' }],
+        ['network-connect-failed', { enabled: true, hasKey: true, networkOnline: true, balanceAvailable: true, balanceError: '', lastError: '网络请求失败：connect ECONNREFUSED 127.0.0.1:9' }],
+        ['network-balance-failed', { enabled: true, hasKey: true, networkOnline: true, balanceAvailable: true, balanceError: '网络请求失败：getaddrinfo ENOTFOUND api.deepseek.com', lastError: '' }],
+        ['no-balance', { enabled: true, hasKey: true, networkOnline: true, balanceAvailable: false, balanceError: '', lastError: '' }],
+        ['invalid-key', { enabled: true, hasKey: true, networkOnline: true, balanceAvailable: true, balanceError: 'HTTP 401 Authentication Fails', lastError: '' }],
+        ['invalid-key-chat', { enabled: true, hasKey: true, networkOnline: true, balanceAvailable: true, balanceError: '', lastError: 'HTTP 403 Forbidden' }],
+        ['timeout-is-not-offline', { enabled: true, hasKey: true, networkOnline: true, balanceAvailable: true, balanceError: '', lastError: '请求超时（20000ms）' }],
+        ['healthy', { enabled: true, hasKey: true, networkOnline: true, balanceAvailable: true, balanceError: '', lastError: '' }],
+      ].map((entry) => [entry[0], model.classifyOffline(entry[1])]),
+      // 断网/连不上 -> offline；而且这几种都该真的演出来（evaluateOffline 认这些原因）
+      offlineFromNetwork: [
+        model.classifyOffline({ enabled: true, hasKey: true, networkOnline: false, balanceAvailable: true, balanceError: '', lastError: '' }),
+        model.classifyOffline({ enabled: true, hasKey: true, networkOnline: true, balanceAvailable: true, balanceError: '', lastError: '网络请求失败：connect ECONNREFUSED' }),
+      ].map((reason) => model.evaluateOffline(reason, true).animationId),
       // 场景触发：稳定 90 秒 + 不频繁切换 + 冷却（默认冷却 20 分钟）
       sceneCoding: model.evaluateSceneTrigger({ scene: 'coding', stableMs: 120000, switching: false, sinceLastTriggerMs: 9999999 }),
       sceneCodingTooEarly: model.evaluateSceneTrigger({ scene: 'coding', stableMs: 30000, switching: false, sinceLastTriggerMs: 9999999 }),
@@ -1283,6 +1345,48 @@ app.whenReady().then(async () => {
     JSON.stringify(triggerRules.overheat.fired) === JSON.stringify(['overheat', 'overheat']) &&
       triggerRules.overheatUnknown.fired.length === 0,
     JSON.stringify({ hot: triggerRules.overheat, unknown: triggerRules.overheatUnknown }),
+  );
+  record(
+    '触发规则：过热阈值可配置（感知设置里那条）——52 度配 45 度阈值演、50 度配 80 度不演',
+    triggerRules.overheatCustomThreshold[0] === 'overheat' &&
+      triggerRules.overheatCustomThreshold[1] === null &&
+      triggerRules.overheatCustomThreshold[2] === null,
+    JSON.stringify(triggerRules.overheatCustomThreshold),
+  );
+  record(
+    '触发规则：鼠标靠近有冷却（60 秒内"走开再回来"也只演一次，冷却过后才允许下一次）',
+    triggerRules.approachCooldownMs === 60000 &&
+      triggerRules.approachCooldown[0].id === 'catch_down' &&
+      triggerRules.approachCooldown[1].id === null &&
+      triggerRules.approachCooldown[2].id === null &&
+      triggerRules.approachCooldown[3].id === 'catch_down' &&
+      // 真演了的那两次解除武装；冷却期间那两次**保持武装**（冷却一过她还会补演，不会被吃掉）
+      triggerRules.approachCooldown[0].armed === false &&
+      triggerRules.approachCooldown[1].armed === true &&
+      triggerRules.approachCooldown[2].armed === true &&
+      triggerRules.approachCooldown[3].armed === false,
+    JSON.stringify(triggerRules.approachCooldown),
+  );
+  record(
+    '掉线判定：没配密钥 / 断网（系统没连接、请求连不上）/ 余额不足 / 密钥无效都算掉线；关掉 AI 与请求超时不算',
+    JSON.stringify(triggerRules.offlineClassify) === JSON.stringify([
+      ['disabled', ''],
+      ['no-key', 'no-key'],
+      ['network-no-connection', 'network'],
+      ['network-connect-failed', 'network'],
+      ['network-balance-failed', 'network'],
+      ['no-balance', 'no-balance'],
+      ['invalid-key', 'invalid-key'],
+      ['invalid-key-chat', 'invalid-key'],
+      ['timeout-is-not-offline', ''],
+      ['healthy', ''],
+    ]),
+    JSON.stringify(triggerRules.offlineClassify),
+  );
+  record(
+    '掉线判定：断网/连不上会真的演 offline（规则接到动画上）',
+    JSON.stringify(triggerRules.offlineFromNetwork) === JSON.stringify(['offline', 'offline']),
+    JSON.stringify(triggerRules.offlineFromNetwork),
   );
   record(
     '触发规则：鼠标只有从下方/右侧**占主导**地靠近才演 catch_down / catch_right',

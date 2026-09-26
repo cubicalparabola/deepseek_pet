@@ -42,6 +42,17 @@ export interface TriggerDecision {
 export const APPROACH_RADIUS_PX = 150;
 /** 离开半径的多少倍才算"走开了"，重新武装（防止在边界上抖动）。 */
 export const APPROACH_REARM_FACTOR = 1.4;
+/**
+ * 两次"接住"之间的**最短间隔**。
+ *
+ * 为什么光有"重新武装"不够（用户实测反馈："鼠标靠近的动画需要有一段时间的冷却，
+ * 不能连续触发"）：武装只要求光标离开 210px 再回来 —— 手在桌面上划来划去时
+ * 一秒钟就能进出几个来回，于是她一路 catch_down / catch_right 停不下来。
+ * 冷却把"离开再回来"这条捷径也挡住：一分钟内最多接住一次。
+ *
+ * 冷却结束时光标若还停在附近，会补演一次（不是白等）。
+ */
+export const APPROACH_COOLDOWN_MS = 60_000;
 
 /**
  * 光标相对宠物中心的偏移 -> 该演哪条"接住"动画。
@@ -52,11 +63,17 @@ export const APPROACH_REARM_FACTOR = 1.4;
  * @param dx 光标 x - 宠物中心 x（正 = 光标在右边）
  * @param dy 光标 y - 宠物中心 y（正 = 光标在下边）
  * @param armed 是否"还没为这次靠近演过"
+ * @param options.sinceLastTriggerMs 距上次"接住"过了多久（缺省 = 很久以前，不冷却）
  */
 export function classifyApproach(
   offset: { readonly dx: number; readonly dy: number },
   armed: boolean,
-  options: { readonly radius?: number; readonly rearmFactor?: number } = {},
+  options: {
+    readonly radius?: number;
+    readonly rearmFactor?: number;
+    readonly cooldownMs?: number;
+    readonly sinceLastTriggerMs?: number;
+  } = {},
 ): TriggerDecision {
   const radius = options.radius ?? APPROACH_RADIUS_PX;
   const rearmFactor = options.rearmFactor ?? APPROACH_REARM_FACTOR;
@@ -65,6 +82,14 @@ export function classifyApproach(
   // 走远了 -> 重新武装（等待下一次靠近）
   if (distance > radius * rearmFactor) return { animationId: null, armed: true };
   if (!armed || distance > radius) return { animationId: null, armed };
+
+  /*
+   * 冷却中：这一次不演，但**保持武装** —— 冷却一过、如果光标还在附近就补演一次。
+   * 若这里把 armed 置为 false，站着不动的用户就再也等不到"接住"了。
+   */
+  const cooldownMs = options.cooldownMs ?? APPROACH_COOLDOWN_MS;
+  const sinceLast = options.sinceLastTriggerMs ?? Number.POSITIVE_INFINITY;
+  if (sinceLast < cooldownMs) return { animationId: null, armed: true };
 
   /*
    * 只有"主要来自下方 / 右侧"才算：用 `>=` 比较两个分量的绝对值。
@@ -164,8 +189,9 @@ export function evaluateHungry(
 /**
  * 掉线原因 -> 要不要演 offline。
  *
- * 四种原因（需求："没用配置 API 或 API 无效"）：
+ * 四种原因（需求："没用配置 API 或 API 无效"，外加"网断了"）：
  *   - `no-key`      还没填密钥
+ *   - `network`     断网（系统层面没网，或最近一次请求连不上）
  *   - `invalid-key` 密钥无效（接口 401/403）
  *   - `no-balance`  余额不足（官方 `is_available = false`）
  *   - `''`          正常
@@ -179,6 +205,63 @@ export function evaluateOffline(reason: string, armed: boolean): TriggerDecision
     return { animationId: null, armed: false };
   }
   return { animationId: null, armed: true };
+}
+
+/**
+ * 「现在算不算掉线、算哪种」——**纯函数**，输入全是已经取好的事实。
+ *
+ * 为什么从 AIService 里抽出来：这段规则原来长在 `AIService.offlineReason()` 里，
+ * 于是"断网该算掉线"这条判断只能靠真的拔网线才能验。
+ * 抽成纯函数之后，主进程只负责取事实（`net.isOnline()`、余额、错误文案），
+ * 规则本身可以被逐条钉死（见 tools/acceptance.cjs 的"掉线判定"那一组）。
+ *
+ * 判定顺序是有意的：
+ *   1. 总开关关着 -> 不算掉线（用户自己关的，不该报故障）；
+ *   2. 没配密钥 -> `no-key`（这条最该先告诉用户，也最好修）；
+ *   3. 系统没网 -> `network`；
+ *   4. 余额明确不可用 -> `no-balance`；
+ *   5. 401/403 -> `invalid-key`；
+ *   6. 最近一次请求是网络层面失败 -> `network`。
+ *
+ * ⚠️ **超时不算断网**：模型慢和网线被拔是两件事，
+ * 前者报"掉线"会让人去查路由器。
+ */
+export function classifyOffline(input: {
+  /** AI 总开关。 */
+  readonly enabled: boolean;
+  /** 是否配了密钥。 */
+  readonly hasKey: boolean;
+  /** 系统层面是否有网络连接（主进程用 `net.isOnline()` 取）。 */
+  readonly networkOnline: boolean;
+  /** 官方余额接口是否明确说"不可用"（没查过 = true）。 */
+  readonly balanceAvailable: boolean;
+  /** 最近一次余额查询的错误文案。 */
+  readonly balanceError: string;
+  /** 最近一次调用的错误文案。 */
+  readonly lastError: string;
+}): string {
+  if (!input.enabled) return '';
+  if (!input.hasKey) return 'no-key';
+  if (!input.networkOnline) return 'network';
+  if (!input.balanceAvailable) return 'no-balance';
+  if (isInvalidKeyError(input.balanceError) || isInvalidKeyError(input.lastError)) return 'invalid-key';
+  if (isNetworkFailure(input.balanceError) || isNetworkFailure(input.lastError)) return 'network';
+  return '';
+}
+
+/** 密钥无效（401/403）的文案特征 —— 与 `LLMClient.httpError` 的输出对应。 */
+function isInvalidKeyError(message: string): boolean {
+  return /HTTP 401|HTTP 403|API Key 无效/.test(message);
+}
+
+/**
+ * 这条错误文案是不是"网络层面失败"。
+ *
+ * 判定依据是 `LLMClient.normalizeError` 里 NETWORK 分支的固定前缀
+ * （`网络请求失败：`），而不是猜关键词 —— 超时（`请求超时`）**不算**断网。
+ */
+function isNetworkFailure(message: string): boolean {
+  return message.includes('网络请求失败');
 }
 
 /* -------------------------------------------------------------------------- */

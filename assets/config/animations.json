@@ -362,7 +362,7 @@
     ],
     "render": {
       "className": "anim-watch",
-      "offsetXPercent": 6
+      "offsetXPercent": 12
     }
   },
   "sleep": {

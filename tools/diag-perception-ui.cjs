@@ -285,14 +285,56 @@ app.whenReady().then(async () => {
   })()`);
 
   /*
-   * 截图：滚到感知面板，肉眼验收排版。
+   * 11) GPU 过热阈值：面板上改完必须落到主进程设置。
+   *
+   * 这条阈值决定"多少度算过热"，是 GPU 过热动画（overheat）的开关之一 ——
+   * 它必须真的能存进设置、并被主进程读到（触发服务那条链路由
+   * tools/probe-offline-overheat.cjs 真机验证）。
+   */
+  const overheat = await run(`(async () => {
+    const before = await window.settingsAPI.perception.status();
+    const input = document.getElementById('perception-overheat-threshold-c');
+    if (!input) return { ok: false, reason: 'missing-input' };
+    input.value = '45';
+    document.getElementById('perception-sampling-save').click();
+    await new Promise((r) => setTimeout(r, 1200));
+    const after = await window.settingsAPI.perception.status();
+    return {
+      ok: true,
+      before: before.settings.overheatThresholdC,
+      after: after.settings.overheatThresholdC,
+      // 邻居没被改坏（同一个保存按钮管着一整段）
+      longSession: after.settings.longSessionMinutes,
+      lateNightHour: after.settings.lateNightHour,
+      inputValue: input.value,
+    };
+  })()`);
+  step(
+    '感知面板：GPU 过热阈值可保存到主进程（默认 80℃，达到就演一次「过热」）',
+    overheat,
+    overheat.ok === true && overheat.after === 45 &&
+      overheat.longSession === 120 && overheat.lateNightHour === 1,
+  );
+  // 复原成默认的 80
+  await run(`(async () => {
+    const input = document.getElementById('perception-overheat-threshold-c');
+    if (!input) return false;
+    input.value = '80';
+    document.getElementById('perception-sampling-save').click();
+    await new Promise((r) => setTimeout(r, 800));
+    return true;
+  })()`);
+
+  /*
+   * 截图：滚到"采样与频率"那一段，肉眼验收排版（GPU 过热阈值就在这里）。
    *
    * ⚠️ 这一段**不是断言**，也没有包在 `step()` 里 —— 所以
-   * `build/perception-ui.json` 的 `steps.length` 是 10（10 个断言），截图排在它们之后。
+   * `build/perception-ui.json` 的 `steps.length` 是 11（11 个断言），截图排在它们之后。
    */
   await run(`(() => {
-    const target = document.getElementById('perception-panel-root');
-    if (target) target.scrollIntoView({ block: 'start' });
+    const target = document.getElementById('perception-overheat-threshold-c')
+      || document.getElementById('perception-panel-root');
+    if (target) target.scrollIntoView({ block: 'center' });
     return true;
   })()`);
   await wait(900);
