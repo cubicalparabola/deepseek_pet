@@ -127,6 +127,13 @@ class DesktopPetApplication {
   private quitting = false;
   private readonly pendingLogs: LogEntry[] = [];
   private behaviorPaused = false;
+  /**
+   * 用户**显式**按下的「暂停行为」（持久意图）。
+   *
+   * 与 `behaviorPaused`（实际生效值 = 用户暂停 ∪ 已隐藏）分开：
+   * 隐藏带来的暂停是暂时的，显示回来要恢复用户的设置，不能把用户的暂停"顺手清掉"。
+   */
+  private behaviorsPausedByUser = false;
   private currentAnimation: string | null = null;
   private currentState = 'IDLE';
   private windowVisible = true;
@@ -281,7 +288,10 @@ class DesktopPetApplication {
       onAnimationChanged: (payload) => this.handleAnimationChanged(payload),
       onStateChanged: (payload) => this.handleStateChanged(payload),
       onBehaviorPausedChanged: (paused) => {
-        this.behaviorPaused = paused;
+        // 渲染层只在**用户/测试显式要求**时上报这条（镜像主进程自己的指令走的是
+        // 另一条路），因此这里视为"用户的暂停意图"，并参与有效值计算。
+        this.behaviorsPausedByUser = paused;
+        this.syncBehaviorPause();
         this.refreshTray();
       },
       onActionFromRenderer: (action) => this.handleRendererAction(action),
@@ -911,7 +921,7 @@ class DesktopPetApplication {
   }
 
   /**
-   * 切换"收起（贴边）"。
+   * 切换"收起（贴边）"—— **托盘/右键菜单的勾选项**用这条（真正的开/关切换）。
    *
    * ⚠️ 语义已经改过一轮（用户明确要求）：
    * 以前这个菜单项是"**原地不动 + 整窗点击穿透 + 暂停行为**"，
@@ -919,25 +929,52 @@ class DesktopPetApplication {
    *   - 她还在屏幕上、仍然能点（点一下就是展开）；
    *   - 默认动画换成 lie（下方）/ watch（右侧），随机动画只剩一个且间隔更长；
    *   - "完全看不到 / 不打扰" 改由「隐藏桌宠」承担（原来的收起行为其实就是隐藏）。
+   *
+   * 注意与 `dockToNearestEdge()` 的区别：那是**幂等的"收起"动作**
+   * （`ai:set-presence('collapsed')` 这种"设为某状态"的接口要用它，
+   * 否则"已经收起了再设一次"会变成展开 —— 语义就反了）。
    */
   private toggleCollapsed(): boolean {
     if (this.display.dock !== 'free') {
       this.handleUndock();
       return false;
     }
+    return this.dockToNearestEdge();
+  }
+
+  /**
+   * 贴到最近的边缘收起（幂等：已经收起时什么都不做）。
+   *
+   * 托盘/右键进来的"收起"没有鼠标落点，按"离哪条边近就收哪边"：
+   * 下边缘按剩余空间判断，右边同理；两边都远就收下方（桌面宠物最常见的姿势）。
+   */
+  private dockToNearestEdge(): boolean {
+    if (this.display.dock !== 'free') return false;
     const area = this.workAreaRect();
     const pet = this.petRectOnScreen();
     if (!area || !pet) return false;
-    /*
-     * 托盘/右键进来的"收起"没有鼠标落点，按"离哪条边近就收哪边"：
-     * 下边缘按剩余空间判断，右边同理；两边都远就收下方（桌面宠物最常见的姿势）。
-     */
     const rightGap = area.x + area.width - (pet.x + pet.width);
     const bottomGap = area.y + area.height - (pet.y + pet.height);
     const dock: Exclude<PetDock, 'free'> = rightGap < bottomGap ? 'right' : 'bottom';
     this.snapToDock(dock);
     this.setDisplay({ dock });
     return true;
+  }
+
+  /**
+   * 同步"行为暂停"的**实际生效值** = 用户显式暂停 ∪ 已被隐藏。
+   *
+   * 两个来源各自独立：用户的暂停是**持久的**（不该被"她隐藏了一下又显示"清掉），
+   * 隐藏带来的暂停是**暂时的**（显示回来就该恢复她原来的设置）。
+   */
+  private syncBehaviorPause(): void {
+    const effective = this.behaviorsPausedByUser || this.presence === 'hidden';
+    if (effective === this.behaviorPaused) return;
+    this.behaviorPaused = effective;
+    this.ipcManager?.setBehaviorPaused(effective);
+    this.logger.info('behavior pause changed', {
+      data: { paused: effective, byUser: this.behaviorsPausedByUser, hidden: this.presence === 'hidden' },
+    });
   }
 
   /**
@@ -960,13 +997,14 @@ class DesktopPetApplication {
 
     /*
      * 收起（贴边）**不**暂停行为：她有自己的随机池（sleep / peek，3–8 分钟一次），
-     * 暂停了反而"收起之后就彻底死了"。隐藏才暂停 —— 看不到就不该浪费电。
+     * 暂停了反而"收起之后就彻底死了"。只有隐藏才暂停 —— 看不到就不该浪费电。
+     *
+     * ⚠️ 但**不能覆盖用户显式按下的「暂停行为」**：早期实现这里直接
+     * `this.behaviorPaused = (presence === 'hidden')`，于是"用户暂停了行为 ->
+     * 她隐藏/显示一次 -> 暂停被静默解除"，随机动画与触发动画又冒出来。
+     * 现在两件事分开记：用户意图 (`behaviorsPausedByUser`) 与显示状态取"或"。
      */
-    const pause = presence === 'hidden';
-    if (pause !== this.behaviorPaused) {
-      this.behaviorPaused = pause;
-      this.ipcManager?.setBehaviorPaused(pause);
-    }
+    this.syncBehaviorPause();
 
     this.aiService?.setPresence(presence);
     if (wasHidden !== (presence === 'hidden')) {
@@ -1018,8 +1056,8 @@ class DesktopPetApplication {
         onShow: () => this.showPet(),
         onHide: () => this.hidePet(),
         onToggleBehavior: () => {
-          this.behaviorPaused = !this.behaviorPaused;
-          this.ipcManager?.setBehaviorPaused(this.behaviorPaused);
+          this.behaviorsPausedByUser = !this.behaviorsPausedByUser;
+          this.syncBehaviorPause();
           this.refreshTray();
           return this.behaviorPaused;
         },
@@ -1426,7 +1464,8 @@ class DesktopPetApplication {
     }
     if (presence === 'collapsed') {
       if (this.display.hidden) this.setDisplay({ hidden: false });
-      this.toggleCollapsed();
+      // 幂等：已经是收起状态就什么都不做（"设为收起"不该把她展开）
+      this.dockToNearestEdge();
       return;
     }
     if (this.display.hidden) this.setDisplay({ hidden: false });
@@ -1554,7 +1593,13 @@ class DesktopPetApplication {
   }
 
   private applyTrayState(state: TrayStatePayload): void {
-    if (typeof state.behaviorPaused === 'boolean') this.behaviorPaused = state.behaviorPaused;
+    /*
+     * ⚠️ **不**接受渲染层上报的 `behaviorPaused`。
+     *
+     * 暂停状态由主进程持有（托盘菜单改它、隐藏时它也参与），渲染层只是被通知方；
+     * 早期实现把渲染层的值写回主进程，形成回路 —— 主进程刚暂停，
+     * 渲染层下一条状态快照又把"未暂停"报回来，于是暂停时有时无。
+     */
     if (state.currentAnimation !== undefined) this.currentAnimation = state.currentAnimation;
     if (typeof state.currentState === 'string') this.currentState = state.currentState;
     if (state.plugins) this.pluginRecords = state.plugins;

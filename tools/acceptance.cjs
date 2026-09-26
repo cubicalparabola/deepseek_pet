@@ -2168,6 +2168,24 @@ app.whenReady().then(async () => {
   record('拖动不会让窗口持续变大（无累积增长）', dragGrowth.growth <= 1 && dragGrowth.maxGrowth <= 1, JSON.stringify({ first: dragGrowth.first, last: dragGrowth.last, maxWidth: dragGrowth.maxWidth, sizes: dragGrowth.sizes }));
   record('拖动期间窗口不触发 resize（避免闪烁）', dragGrowth.resizeEvents === 0, `resizeEvents=${dragGrowth.resizeEvents}`);
 
+  /*
+   * 拖拽用例会把窗口推到屏幕边缘，于是**贴边收起**会被触发（产品行为，没错）。
+   * 但收起状态下点击 = 展开而不是"点击反应"，下面的断言（点击反应、手动重播、
+   * 交叉淡化…）在收起状态下会看到 watch/lie 的收尾段 —— 实测就是这样红的。
+   * 因此这些用例开始前显式把她放回桌面中间并展开。
+   */
+  const backToDesktop = async () => {
+    const display = await run(`(async () => {
+      await window.petAPI.window.setPosition(400, 240);
+      await new Promise((r) => setTimeout(r, 200));
+      await window.petAPI.window.undock();
+      await new Promise((r) => setTimeout(r, 300));
+      return window.petDebug.display();
+    })()`);
+    return display;
+  };
+  await backToDesktop();
+
   /* --------- 点击之后必须恢复 idle 循环（回归：曾出现点一次就再也不循环） --------- */
   const resumeLoop = await run(`(async () => {
     const anim = window.petDebug.anim;
@@ -2317,6 +2335,8 @@ app.whenReady().then(async () => {
   record('同优先级被拒绝 (equal-priority)', priority.equalPlaying === 'roll' && priority.equalReason === 'equal-priority', `playing=${priority.equalPlaying} reason=${priority.equalReason}`);
   record('interruptible=false 拒绝更高优先级抢占', priority.nonInterruptibleReason === 'not-interruptible', `reason=${priority.nonInterruptibleReason}, playing=${priority.guardedPlaying}`);
   record('动画冷却生效 (cooldown)', priority.cooldownReason === 'cooldown', `reason=${priority.cooldownReason}`);
+
+  await backToDesktop();
 
   /* ------------- 手动播放不被冷却吞掉（回归：bomb 只能播一次） ------------- */
   /*

@@ -461,14 +461,22 @@ export class WindowManager {
     (this.window as BrowserWindow).setIgnoreMouseEvents(ignore, { forward });
   }
 
-  /** 默认出现位置：主屏工作区右下角（留出任务栏）。 */
+  /**
+   * 默认出现位置：主屏工作区右下角（留出任务栏）。
+   *
+   * 边距 48px 而不是"贴边"：贴边收起（`shared/dock.ts`）的判定阈值是 24px，
+   * 如果启动位置本身就落在阈值内，用户随手推她一下（甚至只是挪几像素）
+   * 松手就会立刻收起 —— 那是"我还没想收起啊"的典型来源。
+   * 48px 让她明确地"站在桌面上"，想收起就得真的推到边上。
+   */
   private resolveDefaultPosition(size: WindowSize): WindowPosition {
     try {
       const display = screen.getPrimaryDisplay();
       const area = display.workArea;
+      const margin = 48;
       return {
-        x: Math.round(area.x + area.width - size.width - 24),
-        y: Math.round(area.y + area.height - size.height - 24),
+        x: Math.round(area.x + area.width - size.width - margin),
+        y: Math.round(area.y + area.height - size.height - margin),
       };
     } catch (error) {
       this.logger.warn('failed to resolve default position', { error: describeError(error) });

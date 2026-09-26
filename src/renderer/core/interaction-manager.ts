@@ -189,18 +189,30 @@ export class InteractionManager {
 
   private handlePointerUp = (event: PointerEvent): void => {
     if (!this.pointerDown) return;
-    /* 兜底：pointerup 落在 UI 元素上时同样不当作宠物点击 */
-    if (isFromPetUi(event.target)) return;
+    /*
+     * ⚠️ 顺序很重要：**先把按下状态清掉，再判断"这算不算一次宠物点击"**。
+     *
+     * 早期实现是"pointerup 落在 UI 元素上就直接 return"，于是
+     * 「在气泡上按下 -> 松开」会留下 `pointerDown = true` ——
+     * 之后鼠标随便动一下就被当成拖动：`pet:drag` 事件冒出来，
+     * 而且 `moveDrag` 会让**桌宠跟着鼠标跑**（实测：点完气泡上的「知道了」
+     * 再晃一下鼠标，整个窗口跟着走）。清状态与"算不算点击"是两件事。
+     */
     const wasDragging = this.dragging;
+    const fromUi = isFromPetUi(event.target);
     this.pointerDown = false;
     this.dragging = false;
 
+    // 拖动是在宠物身上开始的：无论松手落在哪都要正常收尾（否则窗口停在"拖到一半"）
     if (wasDragging) {
       this.options.onDragEnd(event.screenX, event.screenY);
       this.emitDrag('end', event.screenX, event.screenY);
       this.logger.info('drag end');
       return;
     }
+
+    /* 兜底：pointerup 落在 UI 元素上时不当作宠物点击 */
+    if (fromUi) return;
 
     if (event.button !== 0) return;
     const elapsed = Date.now() - this.downAt;

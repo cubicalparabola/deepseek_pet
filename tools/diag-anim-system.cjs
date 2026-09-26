@@ -260,39 +260,118 @@ app.whenReady().then(async () => {
       docking.animAfterBottom === 'lie',
   );
 
-  /* 7) 收起时点一下 -> 展开 */
+  /* 7) 收起时点一下 -> 先播 end 再播 idle（不插点击反应） */
   const undock = await run(`(async () => {
     const api = window.petAPI;
-    // 先回到"没贴边"，再贴右边缘，确保 preDockPosition 是自由位置
+    const anim = window.petDebug.anim;
+    // 先回到"没贴边"，再贴右边缘，确保 lastFreePosition 是自由位置
     await api.window.setPosition(500, 300);
     await new Promise((r) => setTimeout(r, 300));
     await api.window.dragEnd();
     await api.window.setPosition(100000, 100000);
     await new Promise((r) => setTimeout(r, 400));
     const docked = await api.window.dragEnd();
-    await new Promise((r) => setTimeout(r, 900));
+    await new Promise((r) => setTimeout(r, 1200));
     const posDocked = await api.window.getPosition();
-    // 走真实点击路径（handleIntent 里"收起状态下点一下就展开"）
+    const beforeClick = anim.getCurrentAnimation();
+
+    /*
+     * 走真实点击路径（handleIntent 里"收起状态下点一下就展开"）。
+     * 需求：先播 end 再播 idle —— 因此这里逐步记录过程：
+     *   1) 立刻进 end 段，且当前**仍是** watch（没有别的动画插进来）；
+     *   2) 收尾播完后变成 idle；
+     *   3) 全程没有出现点击反应动画（cute/fawning/stroke）。
+     */
+    const sawAnimations = new Set();
+    let sawEndPhase = false;
     window.petDebug.click('head', 0.5, 0.4);
-    await new Promise((r) => setTimeout(r, 1500));
-    const posAfter = await api.window.getPosition();
-    const stateAfter = window.petDebug.display();
+    const t0 = Date.now();
+    let afterClick = null;
+    while (Date.now() - t0 < 20000) {
+      await new Promise((r) => setTimeout(r, 60));
+      const current = anim.getCurrentAnimation();
+      if (current !== null) sawAnimations.add(current);
+      if (anim.getPersistentPhase() === 'end' && current === 'watch') sawEndPhase = true;
+      if (current === 'idle') { afterClick = Date.now() - t0; break; }
+    }
     return {
       docked: docked.dock,
       posDocked,
-      stateAfterClick: stateAfter.dock,
+      beforeClick,
+      sawEndPhase,
+      afterClickMs: afterClick,
+      finalAnimation: anim.getCurrentAnimation(),
+      sequence: [...sawAnimations],
+      stateAfterClick: window.petDebug.display().dock,
       // 展开应该回到"收起前的位置"（500,300 附近），而不是留在屏幕边缘
-      posAfter,
-      animation: window.petDebug.anim.getCurrentAnimation(),
+      posAfter: await api.window.getPosition(),
     };
   })()`);
   step(
-    '收起状态下点一下宠物：展开并回到收起前的位置（同时有点击反应）',
+    '收起状态下点一下宠物：先播 end（仍是 watch，没有点击反应插进来）→ 再回 idle，并回到收起前的位置',
     undock,
     undock.docked === 'right' &&
+      undock.beforeClick === 'watch' &&
+      undock.sawEndPhase === true &&
+      typeof undock.afterClickMs === 'number' &&
+      undock.finalAnimation === 'idle' &&
+      // 全程只应看到 watch -> idle；cute/fawning/stroke 出现在这里就是"多插了一段"
+      undock.sequence.every((id) => id === 'watch' || id === 'idle') &&
       undock.stateAfterClick === 'free' &&
-      Math.abs(undock.posAfter.x - 500) < 40 &&
-      ['cute', 'fawning', 'stroke', 'idle'].includes(undock.animation),
+      Math.abs(undock.posAfter.x - 500) < 40,
+  );
+
+  /*
+   * 下方收起同理（默认动画是 lie）。
+   *
+   * ⚠️ 这里能断言的只有"点一下就回 idle，且中途没有点击反应"：
+   * `lie` 是**单文件素材**（没有 start/loop/end 三段），所以它没有 `end` 可播，
+   * 过渡靠交叉淡化而不是收尾段。写清楚这一点，免得以后有人看到"下方收起没有 end"
+   * 以为又是漏接线。
+   */
+  const undockBottom = await run(`(async () => {
+    const api = window.petAPI;
+    const anim = window.petDebug.anim;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    await api.window.setPosition(500, 300);
+    await wait(300);
+    await api.window.dragEnd();
+    await api.window.setPosition(500, 100000);
+    await wait(400);
+    const docked = await api.window.dragEnd();
+    await wait(1500);
+    const beforeClick = anim.getCurrentAnimation();
+    const hasEnd = Boolean((anim.getDefinition('lie').segments || {}).end);
+    const saw = new Set();
+    window.petDebug.click('head', 0.5, 0.4);
+    const t0 = Date.now();
+    let afterClick = null;
+    while (Date.now() - t0 < 15000) {
+      await wait(60);
+      const current = anim.getCurrentAnimation();
+      if (current !== null) saw.add(current);
+      if (current === 'idle') { afterClick = Date.now() - t0; break; }
+    }
+    return {
+      docked: docked.dock,
+      beforeClick,
+      lieHasEndSegment: hasEnd,
+      afterClickMs: afterClick,
+      finalAnimation: anim.getCurrentAnimation(),
+      sequence: [...saw],
+      stateAfterClick: window.petDebug.display().dock,
+    };
+  })()`);
+  step(
+    '下方收起点一下：同样只回 idle（lie 没有 end 段，过渡走交叉淡化）',
+    undockBottom,
+    undockBottom.docked === 'bottom' &&
+      undockBottom.beforeClick === 'lie' &&
+      undockBottom.lieHasEndSegment === false &&
+      typeof undockBottom.afterClickMs === 'number' &&
+      undockBottom.finalAnimation === 'idle' &&
+      undockBottom.sequence.every((id) => id === 'lie' || id === 'idle') &&
+      undockBottom.stateAfterClick === 'free',
   );
 
   /* 8) 隐藏 / 显示 */

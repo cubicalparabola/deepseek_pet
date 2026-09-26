@@ -1011,16 +1011,30 @@ class PetApplication {
     if (intent.kind === 'region-enter') return;
 
     /*
-     * 收起状态下点一下 = 展开（需求："点击宠物展开"）。
-     * 展开与点击反应**同时**发生：只展开不反应会像"点了个寂寞"，
-     * 而被点的时候她本来就该有反应（cute/fawning/stroke）。
-     * 位置回退由主进程负责（回到收起前的位置）。
+     * 收起状态下点一下 = **只展开**（需求："点击宠物展开"，且
+     * "收起时点击宠物应该先播放 end 再播放 idle"）。
+     *
+     * 所以这里**不再同时**播点击反应（cute/fawning/stroke）：
+     * 收起状态的默认动画是 watch（右侧）/ lie（下方），点一下的动作语义是"把我放出来"，
+     * 应该由它自己的收尾段负责过渡 —— 现在走的是 AnimationManager 的三段式语义：
+     *   watch 在 loop 段 -> 立刻进 end 段 -> 收尾播完 -> 接上 idle。
+     * 之前"展开 + 点击反应"同时发生会有两个问题（实测）：
+     *   1. 反应动画（priority 50）会和"接回默认动画"抢同一个挂起位，
+     *      结果是 **end -> 反应 -> idle** 三段，比需求多一段、也更慢；
+     *   2. 展开的 IPC 往返与点击动作谁先到不确定 —— 先到的那条会清掉另一条的挂起请求，
+     *      表现为"有时有反应、有时没有"。
+     * 现在只提交一个意图，顺序完全确定。
+     *
+     * 位置回退由主进程负责（回到最近一次"没贴边"的位置）。
      */
     if (this.displayState.dock !== 'free') {
-      this.logger.info('click while docked: expanding', { data: { dock: this.displayState.dock } });
+      this.logger.info('click while docked: expanding (end -> idle)', {
+        data: { dock: this.displayState.dock, region: intent.region },
+      });
       void this.runtime.requestUndock().then((display) => {
         if (display) void this.applyDisplayState(display, 'click-undock');
       });
+      return;
     }
 
     const payload: PetClickPayload = intent.payload;
