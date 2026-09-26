@@ -86,12 +86,15 @@ export interface BehaviorPool {
   /** 是否只在"没有交互 / 没在播音视频"时触发。默认 true。 */
   readonly onlyWhenIdle?: boolean;
   /**
-   * 池里的**三段式**动画每次播几轮（一/两轮就收尾）。
+   * **这个池**里的三段式动画每次播几轮（一/两轮就收尾）。
    *
-   * 为什么池要管这件事：同一个三段式动画在别处可能有别的用法 ——
-   * `sleep` 作为"下方收起"的默认姿势要永远循环，而 `lie` 作为随机动画
-   * 只该趴一会儿就自己爬起来。定义里写不下两种意图，所以由**播放参数**决定
-   * （见 `PlayOptions.loopCountRange`）。一次性动画忽略这个字段。
+   * 为什么池要管这件事：同一条三段式动画在别处可能有完全不同的用法 ——
+   * `sleep` 是"下方收起"的默认姿势，要**永远循环**（渲染层 `playDisplayDefault()`
+   * 传 `loopCountRange: 'forever'` 覆盖）；而下方收起的随机池里放的是 `lie`，
+   * 它只该趴一两轮就自己爬起来（`behavior.json` 里
+   * `docked-bottom-random.persistentLoopCountRange = [1,2]`，`normal-random` 同理）。
+   * 定义里写不下两种意图，所以由**播放参数**决定（见 `PlayOptions.loopCountRange`）。
+   * 一次性动画忽略这个字段。
    */
   readonly persistentLoopCountRange?: readonly [number, number];
   /** 人类可读名称（托盘 / 调试面板）。 */
