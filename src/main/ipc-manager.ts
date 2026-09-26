@@ -74,6 +74,8 @@ export interface IpcManagerDependencies {
   /** 设置缩放系数，返回新快照。 */
   setScale(scale: number): PetSettingsState;
   setAlwaysOnTop(value: boolean): PetSettingsState;
+  /** 拖到边缘是否自动收起。 */
+  setDockOnEdge(value: boolean): PetSettingsState;
   /**
    * 显示/隐藏对话气泡（null = 隐藏）。返回应用后的状态与布局。
    * 托盘菜单与验收脚本共用这一条实现。
@@ -240,6 +242,9 @@ export class IpcManager {
     });
     this.handle(IpcChannels.SettingsSetAlwaysOnTop, (_event, value) =>
       this.deps.setAlwaysOnTop(asBoolean(value, true)),
+    );
+    this.handle(IpcChannels.SettingsSetDockOnEdge, (_event, value) =>
+      this.deps.setDockOnEdge(asBoolean(value, true)),
     );
 
     /* ---------------------------- 对话气泡 ------------------------------ */

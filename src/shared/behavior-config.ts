@@ -85,6 +85,15 @@ export interface BehaviorPool {
   readonly weights?: Readonly<Record<string, number>>;
   /** 是否只在"没有交互 / 没在播音视频"时触发。默认 true。 */
   readonly onlyWhenIdle?: boolean;
+  /**
+   * 池里的**三段式**动画每次播几轮（一/两轮就收尾）。
+   *
+   * 为什么池要管这件事：同一个三段式动画在别处可能有别的用法 ——
+   * `lie` 作为"下方收起"的默认姿势要永远循环，而作为正常状态的随机动画
+   * 只该趴一会儿就自己爬起来。定义里写不下两种意图，所以由**播放参数**决定
+   * （见 `PlayOptions.loopCountRange`）。一次性动画忽略这个字段。
+   */
+  readonly persistentLoopCountRange?: readonly [number, number];
   /** 人类可读名称（托盘 / 调试面板）。 */
   readonly label?: string;
 }
@@ -133,6 +142,8 @@ export const DEFAULT_BEHAVIOR_CONFIG: BehaviorConfig = {
       intervalMs: NORMAL_RANDOM_INTERVAL_MS,
       initialDelayMs: 15_000,
       cooldownMs: 8_000,
+      // 池里的 lie 是三段式：趴下一两轮就自己爬起来（不是像收起时那样一直趴着）
+      persistentLoopCountRange: [1, 2],
       onlyWhenIdle: true,
       label: '随机小动作',
     },
@@ -219,6 +230,8 @@ function normalizePool(id: string, raw: unknown, issues: BehaviorConfigIssue[]):
     intervalMs,
     initialDelayMs,
     cooldownMs: num(raw.cooldownMs, 0, 0, 3600_000),
+    // 池里的三段式成员默认"播一两轮"就收尾（不写 = 沿用定义里的轮数）
+    persistentLoopCountRange: interval(raw.persistentLoopCountRange, [1, 2]),
     ...(Object.keys(weights).length > 0 ? { weights } : {}),
     onlyWhenIdle: raw.onlyWhenIdle !== false,
     ...(typeof raw.label === 'string' ? { label: raw.label } : {}),

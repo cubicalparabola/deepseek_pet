@@ -19,7 +19,7 @@
 import {
   ANIMATION_DEFAULTS,
   inferAnimationCategory,
-  resolveLoopCount,
+  resolvePlayLoopCount,
   type AnimationDefinition,
   type AnimationRenderOptions,
   type InterruptPolicy,
@@ -67,6 +67,8 @@ interface ActivePlayback {
    * 而同一个 id 在随机池里又只该播一遍 —— 循环与否由播放参数决定，不由定义决定。
    */
   loop: boolean;
+  /** 这次播放的"循环几轮"覆盖（`'forever'` = 无限；见 `PlayOptions.loopCountRange`）。 */
+  loopCountRange: readonly [number, number] | 'forever' | undefined;
   /** 已经请求结束（等本轮循环播完就转收尾），避免重复触发。 */
   endingRequested: boolean;
 }
@@ -574,6 +576,7 @@ export class AnimationManager {
       loopCycles: 0,
       loopTarget: 0,
       loop,
+      loopCountRange: options.loopCountRange,
       endingRequested: false,
     };
     this.active = playback;
@@ -597,6 +600,48 @@ export class AnimationManager {
       },
     });
 
+    /*
+     * 三段式动画**不**走 `startVideo` 那条"一次性"路径。
+     *
+     * 为什么必须分开（实测踩到的真 bug）：`startVideo` 会把 `source`（= start 段素材）
+     * 当一次性动画加载并播一遍，**然后**才进 `beginPersistent` 再播一次 start 段 ——
+     *  1. 开场段被播了两遍，视觉上就是"她趴下、又趴下"；
+     *  2. 更严重的是加载期间 `persistentPhase` 还是 null：这时的抢占会走
+     *     "一次性动画"分支被直接硬切，**收尾段被跳过**（需求要求的
+     *     "loop 中被打断先播 end" 在这段时间里失效）。
+     * 现在三段式直接进 `beginPersistent`（它自己负责加载 start 段 + 双缓冲切换），
+     * 而 `persistentPhase` 在任何 await 之前就设成 'start'，抢占语义立刻生效。
+     */
+    if (definition.kind === 'persistent' && definition.segments) {
+      try {
+        await this.beginPersistent(playback);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : describeError(error);
+        this.logger.error(`persistent animation load failed ${definition.id}`, {
+          error,
+          data: { source: definition.source },
+        });
+        this.eventBus.emit(PetEvents.AnimationRejected, {
+          animationId: definition.id,
+          priority,
+          reason,
+          source,
+          rejection: 'load-failed' as PlayRejectionReason,
+        });
+        this.failAnimation(definition, message);
+        return false;
+      }
+      if (!this.isStillCurrent(playback)) return true;
+      this.eventBus.emit(PetEvents.AnimationStart, {
+        animationId: definition.id,
+        priority,
+        loop: definition.loop,
+        reason,
+        source,
+      });
+      return true;
+    }
+
     try {
       if (definition.type === 'video') {
         await this.startVideo(definition, url, playback);
@@ -618,16 +663,6 @@ export class AnimationManager {
       });
       this.failAnimation(definition, message);
       return false;
-    }
-
-    /*
-     * 持续动画：素材已就绪，进入"开场 -> 循环"编排。
-     * 有 start 段时先播它，由它的 ended 事件驱动进入循环；
-     * 没有 start 段就直接起循环。
-     */
-    if (definition.kind === 'persistent' && definition.segments && this.layers.activeVideo) {
-      await this.beginPersistent(playback);
-      if (!this.isStillCurrent(playback)) return true;
     }
 
     this.eventBus.emit(PetEvents.AnimationStart, {
@@ -656,6 +691,12 @@ export class AnimationManager {
       playback.persistentPhase = 'start';
       this.logger.info('persistent start', { data: { id: playback.animation.id } });
       await this.playSegment(playback, segments.start, false, SEGMENT_CROSSFADE_MS);
+      if (!this.isStillCurrent(playback)) return;
+      /*
+       * 开场段也是 loop=false 的一段：同样要看门狗兜底（丢了 ended 就进不了循环）。
+       * 见 `armCompletionWatchdog` 里 start 阶段的特殊处理。
+       */
+      this.armCompletionWatchdog(playback, this.layers.activeVideo);
       return;
     }
     await this.enterLoopPhase(playback);
@@ -672,13 +713,19 @@ export class AnimationManager {
      * "loop 循环随机次"：每次进入循环段现抽一次并**定下来**（`loopTarget`），
      * 之后每一轮都跟它比 —— 否则每一轮都重抽，收敛性就没法保证了。
      * 0 = 无限循环。
+     *
+     * 轮数来源有三层（`resolvePlayLoopCount`）：这次播放的覆盖 > 定义里的 range > 固定值。
+     * 覆盖是必要的：同一个 lie 作为"收起的默认姿势"要永远循环，
+     * 作为"正常状态的随机动画"只该播一两轮，作为"主人不在"的触发演一次。
      */
-    playback.loopTarget = resolveLoopCount(segments);
+    playback.loopTarget = resolvePlayLoopCount(segments, playback.loopCountRange);
     this.logger.info('persistent loop', {
       data: {
         id: playback.animation.id,
         source,
         loopCount: playback.loopTarget > 0 ? playback.loopTarget : 'infinite',
+        ...(playback.loopCountRange === 'forever' ? { loopOverride: 'forever' } : {}),
+        ...(Array.isArray(playback.loopCountRange) ? { loopOverride: playback.loopCountRange.join('-') } : {}),
         ...(segments?.loopCountRange !== undefined ? { range: segments.loopCountRange.join('-') } : {}),
       },
     });
@@ -1026,6 +1073,19 @@ export class AnimationManager {
       if (!active || active.token !== playback.token) return;
       if (active.persistentPhase === 'loop') return;
       if (active.loop && active.persistentPhase === null) return;
+      /*
+       * 开场段丢了 `ended` 时的兜底：**该进循环**，而不是把整段动画结束掉。
+       * （开场段 loop=false，正常由 ended 驱动；丢了 ended 就卡在 start 永不入循环，
+       * 表现是"她一直定格在开场姿势"。）
+       */
+      if (active.persistentPhase === 'start') {
+        this.logger.warn('no ended event for start segment; entering loop by duration fallback', {
+          data: { id: active.animation.id, timeoutMs },
+        });
+        if (active.endingRequested) void this.playEnd(active);
+        else void this.enterLoopPhase(active);
+        return;
+      }
       this.logger.warn('no ended event; finishing by duration fallback', {
         data: { id: active.animation.id, timeoutMs, phase: active.persistentPhase ?? 'one-shot' },
       });

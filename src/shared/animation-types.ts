@@ -158,16 +158,37 @@ export function resolveLoopCount(
   random: () => number = Math.random,
 ): number {
   if (!segments) return 0;
+  return loopCountFrom(segments.loopCountRange, segments.loopCount, random);
+}
 
-  const range = segments.loopCountRange;
+/**
+ * 解析"这次要循环几轮"的共用实现（定义里的 range / 固定值 / 按次覆盖都走这里）。
+ *
+ * @param override `'forever'` = 无限循环；`[min,max]` = 随机；`undefined` = 用定义值
+ */
+export function resolvePlayLoopCount(
+  segments: PersistentSegments | undefined,
+  override: readonly [number, number] | 'forever' | undefined,
+  random: () => number = Math.random,
+): number {
+  if (override === 'forever') return 0;
+  if (Array.isArray(override)) {
+    return loopCountFrom([override[0], override[1]], undefined, random);
+  }
+  return resolveLoopCount(segments, random);
+}
+
+function loopCountFrom(
+  range: readonly [number, number] | undefined,
+  fixed: number | undefined,
+  random: () => number,
+): number {
   if (range && Number.isFinite(range[0]) && Number.isFinite(range[1])) {
     const min = Math.max(1, Math.floor(Math.min(range[0], range[1])));
     const max = Math.max(min, Math.floor(Math.max(range[0], range[1])));
     return min + Math.floor(random() * (max - min + 1));
   }
-
-  const count = segments.loopCount;
-  return typeof count === 'number' && Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+  return typeof fixed === 'number' && Number.isFinite(fixed) && fixed > 0 ? Math.floor(fixed) : 0;
 }
 
 /**
@@ -257,6 +278,17 @@ export interface PlayOptions {
    * 用播放参数区分则一条素材两种用法都成立。
    */
   readonly loop?: boolean;
+  /**
+   * 覆盖这次播放的"循环几轮"（只对**三段式**动画有意义）。
+   *
+   * 为什么需要按次覆盖：同一个三段式动画在不同场合要的持续时间完全不同 ——
+   *   - 它作为**状态的默认动画**时（收起的 watch / lie）要 `'forever'`：一直保持姿势，
+   *     只在离开这个状态时才播 end；
+   *   - 它作为**随机池成员**时（正常状态的 lie）只该播一两轮就自己爬起来；
+   *   - 它被**触发**时（"主人不在呀"演一次 lie）用定义里的默认轮数。
+   * 定义里只能写一个值，所以把"这次循环几轮"交给播放参数决定。
+   */
+  readonly loopCountRange?: readonly [number, number] | 'forever';
   /**
    * 是否忽略该动画的 `cooldown`（默认 false）。
    *

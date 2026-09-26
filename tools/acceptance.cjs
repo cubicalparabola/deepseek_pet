@@ -67,8 +67,34 @@ function readSavedAlwaysOnTop() {
   }
 }
 
+/**
+ * 读取当前持久化的 `dockOnEdge`（拖到边缘是否自动收起）。
+ *
+ * 验收会临时把它关掉（见下面的说明），所以**必须记下原值并还原** ——
+ * `assets/config/settings.json` 是用户真实配置，不是隔离目录。
+ * （踩过：第一次实现忘了还原，于是验收跑完用户的"拖到边缘自动收起"被永久关掉，
+ * 紧接着 diag-anim-system 全红。）
+ */
+function readSavedDockOnEdge() {
+  try {
+    return JSON.parse(readFileSync(join(root, 'assets', 'config', 'settings.json'), 'utf8')).dockOnEdge;
+  } catch (error) {
+    return null;
+  }
+}
+
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+
+/*
+ * 在**启动桌宠之前**记下用户的"拖到边缘自动收起"。
+ *
+ * 为什么必须这么早：验收自己要临时关掉它（合成指针会产生假拖动），
+ * 而下面构造快照时再读文件就已经是"被关掉之后"的值了 —— 于是收尾会把它
+ * 还原成 false，用户的手感被悄悄改掉（实测踩到，紧接着 diag-anim-system 全红）。
+ * 函数声明会提升，所以在 `require(main)` 之前就能调用。
+ */
+const originalDockOnEdge = readSavedDockOnEdge();
 
 // 启动真实桌宠（dist 产物）
 require(join(root, 'dist', 'main', 'main.js'));
@@ -118,6 +144,26 @@ app.whenReady().then(async () => {
    * 为什么不是产品 bug：没配密钥时演 offline 正是需求要的行为
    * （`tools/probe-triggers.cjs` 专门断言它）；这里只是测试要隔离。
    */
+  /*
+   * 把她放回"桌面中部 + 未收起"。
+   *
+   * 贴边收起（`shared/dock.ts`）会改变**默认动画**（右侧收起 = watch、下方收起 = lie），
+   * 而验收里大量断言在问"现在该播谁"。她默认出现在右下角（距边缘 48px），
+   * 一旦合成指针事件造成位移，拖动结束时可能停到边缘上 -> 收起 ->
+   * 之后所有动画断言都看到 watch/lie。所以：测试里的每次合成拖拽之后、
+   * 以及每段动画断言之前，都显式回到自由状态。
+   */
+  const backToDesktop = async () => {
+    const display = await run(`(async () => {
+      await window.petAPI.window.setPosition(500, 300);
+      await new Promise((r) => setTimeout(r, 200));
+      await window.petAPI.window.undock();
+      await new Promise((r) => setTimeout(r, 300));
+      return window.petDebug.display();
+    })()`);
+    return display;
+  };
+
   for (let i = 0; i < 240; i += 1) {
     const candidate = BrowserWindow.getAllWindows()[0];
     if (candidate && !candidate.isDestroyed()) {
@@ -127,13 +173,25 @@ app.whenReady().then(async () => {
          * 而行为管理器要等渲染层的 start() 才挂上 —— 只判 petAPI 会在
          * "预加载已就绪、渲染层还没起来"时误判成功，然后把主进程的暂停标记
          * 交给渲染层的托盘状态同步（它会报 false）覆盖掉（实测踩到）。
+         *
+         * 同一处顺手关掉"拖到边缘自动收起"（托盘菜单里的开关，默认开）：
+         * 验收里有几处**合成指针**（长按 / 点击 / 拖动）—— 合成事件不会真的"按住"，
+         * 但真实鼠标的移动会被当成拖动，拖动结束若停在边缘就会触发收起，
+         * 而收起会换掉默认动画（右侧 watch / 下方 lie），后面一大批
+         * "现在该播谁"的断言就会集体变红（实测跑几次，收起来的时间点每次还不一样）。
+         * 真实的收/展由 `tools/diag-anim-system.cjs` 与
+         * `tools/probe-dock-transition.cjs` 用**真实拖拽**专门验证。
          */
         const ok = await candidate.webContents.executeJavaScript(
-          `(() => {
+          `(async () => {
             try {
               if (!window.petDebug || !window.petDebug.behaviors) return false;
               window.petAPI.notifyBehaviorPaused(true);
               window.petDebug.behaviors.pause();
+              await window.petAPI.settings.setDockOnEdge(false);
+              await window.petAPI.window.setPosition(500, 300);
+              await new Promise((r) => setTimeout(r, 200));
+              await window.petAPI.window.undock();
               return window.petDebug.behaviors.isPaused() === true;
             } catch (error) { return false; }
           })()`,
@@ -370,6 +428,8 @@ app.whenReady().then(async () => {
   const settingsSnapshot = {
     scale: readSavedScale() ?? 1,
     alwaysOnTop: readSavedAlwaysOnTop() ?? true,
+    // 用启动前读到的原值（验收早段已经把它临时关掉了，见文件顶部）
+    dockOnEdge: originalDockOnEdge ?? true,
   };
   const sizePresets = await run(`(async () => {
     const api = window.petAPI.settings;
@@ -539,26 +599,53 @@ app.whenReady().then(async () => {
     });
     return rows;
   })()`);
-  // 6 条三段式：watch（右侧收起默认，无限循环）与 5 条会自己结束的
-  const persistentIds = ['overheat', 'read', 'sad', 'sleep', 'watch', 'work'];
+  // 7 条三段式：watch 与 lie 是"收起状态的默认姿势"（按次覆盖成无限循环），
+  // 另外 5 条会自己播够轮数后收尾
+  const persistentIds = ['lie', 'overheat', 'read', 'sad', 'sleep', 'watch', 'work'];
   const persistRows = persistentManifest.filter((r) => persistentIds.includes(r.id));
   const oneShotRows = persistentManifest.filter((r) => !persistentIds.includes(r.id));
   record(
-    '6 条持续动画均带 start/loop/end 三段',
-    persistRows.length === 6 && persistRows.every((r) => r.kind === 'persistent' && r.seg && r.seg.start && r.seg.loop && r.seg.end),
+    '7 条持续动画均带 start/loop/end 三段',
+    persistRows.length === 7 && persistRows.every((r) => r.kind === 'persistent' && r.seg && r.seg.start && r.seg.loop && r.seg.end),
     JSON.stringify(persistRows.map((r) => `${r.id}:${r.kind}:${r.seg ? `${r.seg.start ? 'S' : '-'}${r.seg.loop ? 'L' : '-'}${r.seg.end ? 'E' : '-'}${r.seg.range ? `[${r.seg.range.join('-')}]` : r.seg.loopCount === null ? '(inf)' : `(${r.seg.loopCount})`}` : 'none'}`)),
   );
   record(
-    '其余 21 条为一次性动画（无 segments）',
-    oneShotRows.length === 21 && oneShotRows.every((r) => r.kind === 'one-shot' && r.seg === null),
+    '其余 20 条为一次性动画（无 segments）',
+    oneShotRows.length === 20 && oneShotRows.every((r) => r.kind === 'one-shot' && r.seg === null),
     JSON.stringify({ count: oneShotRows.length, kinds: [...new Set(oneShotRows.map((r) => r.kind))] }),
   );
   record(
-    '三段式动画都配了随机循环次数（watch 除外：收起状态的默认动画要无限循环）',
+    '三段式动画都配了随机循环次数（watch 除外：右侧收起的默认姿势要无限循环）',
     persistRows.every((r) =>
-      r.id === 'watch' ? r.seg.range === null && r.seg.loopCount === null : Array.isArray(r.seg.range) && r.seg.range.length === 2 && r.seg.loopCount === null,
+      r.id === 'watch'
+        ? r.seg.range === null && r.seg.loopCount === null
+        : Array.isArray(r.seg.range) && r.seg.range.length === 2 && r.seg.loopCount === null,
     ),
     JSON.stringify(persistRows.map((r) => `${r.id}:${r.seg.range ? r.seg.range.join('-') : 'inf'}`)),
+  );
+  /*
+   * 按次覆盖轮数：同一个三段式动画在不同场合要的持续时间不同 ——
+   * 作为"收起的默认姿势"要无限（`'forever'`），作为随机池成员要短（[1,2]），
+   * 作为触发演一次用定义里的默认值。这条断言把三种来源钉死。
+   */
+  const loopOverride = await run(`(() => {
+    const model = window.petDebug.animationModel;
+    const lie = window.petDebug.anim.getDefinition('lie').segments;
+    return {
+      forever: model.resolvePlayLoopCount(lie, 'forever', () => 0.5),
+      poolShort: [0, 0.99].map((r) => model.resolvePlayLoopCount(lie, [1, 2], () => r)),
+      fromDefinition: [0, 0.99].map((r) => model.resolvePlayLoopCount(lie, undefined, () => r)),
+      // 一次性动画没有 segments：任何覆盖都不该造出轮数
+      oneShot: model.resolvePlayLoopCount(undefined, 'forever', () => 0.5),
+    };
+  })()`);
+  record(
+    '循环轮数三层覆盖：状态默认 forever / 随机池 [1,2] / 触发用定义里的 [2,4]',
+    loopOverride.forever === 0 &&
+      JSON.stringify(loopOverride.poolShort) === JSON.stringify([1, 2]) &&
+      JSON.stringify(loopOverride.fromDefinition) === JSON.stringify([2, 4]) &&
+      loopOverride.oneShot === 0,
+    JSON.stringify(loopOverride),
   );
 
   // 完整走一遍：start -> loop -> 循环到次数 -> end -> 结束
@@ -1737,15 +1824,20 @@ app.whenReady().then(async () => {
    *
    * 断言用**事件计数**而不是看动画名：动画可能被别的来源触发（例如插件），
    * 只关心"这次点击有没有产生宠物交互事件"。
+   *
+   * ⚠️ 只看**按下按钮之后 400ms 内**产生的事件。
+   * 为什么：这台机器上真实鼠标是活的 —— 跑到这里时如果真人在拖桌宠，
+   * 会冒出一串 `pet:drag`（实测就是这么红的）。那是环境噪声，
+   * 与本条断言要问的问题（"按钮上的按下会不会被当成宠物交互"）无关。
    */
   const ackNoAnim = await run(`(async () => {
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     const bus = window.petDebug.bus;
     const seen = [];
     const subs = [
-      bus.on('pet:click', (p) => seen.push({ t: 'pet:click', region: p.region })),
-      bus.on('pet:dblclick', (p) => seen.push({ t: 'pet:dblclick', region: p.region })),
-      bus.on('pet:drag', (p) => seen.push({ t: 'pet:drag', phase: p.phase })),
+      bus.on('pet:click', (p) => seen.push({ t: 'pet:click', region: p.region, at: Date.now() })),
+      bus.on('pet:dblclick', (p) => seen.push({ t: 'pet:dblclick', region: p.region, at: Date.now() })),
+      bus.on('pet:drag', (p) => seen.push({ t: 'pet:drag', phase: p.phase, at: Date.now() })),
     ];
     await window.petAPI.bubble.set({ visible: true, text: '点下面的按钮关闭我' });
     for (let i = 0; i < 30; i++) { await wait(120); }
@@ -1754,6 +1846,7 @@ app.whenReady().then(async () => {
     const point = { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
 
     /* 用真实指针事件（合成 DOM click 不经过 InteractionManager，测不出冒泡） */
+    const pressedAt = Date.now();
     ack.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: point.x, clientY: point.y, screenX: point.x, screenY: point.y }));
     ack.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, clientX: point.x, clientY: point.y, screenX: point.x, screenY: point.y }));
     ack.click();
@@ -1763,7 +1856,8 @@ app.whenReady().then(async () => {
       return s.display === 'none' || s.visibility === 'hidden';
     })();
     subs.forEach((s) => s.unsubscribe());
-    return { point, eventsDuringAck: seen, bubbleHidden };
+    const caused = seen.filter((item) => item.at >= pressedAt - 40 && item.at <= pressedAt + 400);
+    return { point, eventsDuringAck: caused, ignoredNoise: seen.length - caused.length, bubbleHidden };
   })()`);
 
   record(
@@ -1878,6 +1972,9 @@ app.whenReady().then(async () => {
    * 但反应动画要等收尾播完 —— 这是需求明确要求的顺序，
    * 所以这里断言的是"立刻进 end"而不是"立刻看到 stroke"。
    */
+  // 这一大段都在问"现在该播谁"：先确保她没被收起（收起时默认动画是 watch/lie）
+  await backToDesktop();
+
   const stealRun = await run(`(async () => {
     const anim = window.petDebug.anim;
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -2090,6 +2187,12 @@ app.whenReady().then(async () => {
       transforms.add(getComputedStyle(video()).transform);
     }
     window.dispatchEvent(new PointerEvent('pointerup', opts));
+    /*
+     * 再补一发 pointercancel：合成事件不会真的'按住'，但真实鼠标的移动
+     * 可能在她被窗口移动/缩放时产生 pointermove —— 那会被当成拖动，
+     * 拖动结束若停在边缘就会触发贴边收起（实测：验收跑到一半她收起来了）。
+     */
+    stage.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, pointerId: 1, isPrimary: true }));
     await new Promise((r) => setTimeout(r, 300));
 
     return {
@@ -2104,6 +2207,9 @@ app.whenReady().then(async () => {
       hasImageLayer: document.getElementById('pet-image') !== null,
     };
   })()`);
+  // 长按用例用合成指针'按住'了 1.5 秒：期间真实光标的任何移动都会被当成拖动，
+  // 拖完可能停在边缘上（收起）—— 后面还有一大批动画断言，先把她放回中部。
+  await backToDesktop();
   record('长按期间画面尺寸不变（无拉伸）', geometry.distinctRects.length === 1, JSON.stringify(geometry.distinctRects));
   record('长按期间无 transform 形变', geometry.distinctTransforms.length === 1 && geometry.distinctTransforms[0] === 'none', JSON.stringify(geometry.distinctTransforms));
   record('视频保持 object-fit: contain（不变形）', geometry.objectFit === 'contain', `object-fit=${geometry.objectFit}`);
@@ -2174,16 +2280,6 @@ app.whenReady().then(async () => {
    * 交叉淡化…）在收起状态下会看到 watch/lie 的收尾段 —— 实测就是这样红的。
    * 因此这些用例开始前显式把她放回桌面中间并展开。
    */
-  const backToDesktop = async () => {
-    const display = await run(`(async () => {
-      await window.petAPI.window.setPosition(400, 240);
-      await new Promise((r) => setTimeout(r, 200));
-      await window.petAPI.window.undock();
-      await new Promise((r) => setTimeout(r, 300));
-      return window.petDebug.display();
-    })()`);
-    return display;
-  };
   await backToDesktop();
 
   /* --------- 点击之后必须恢复 idle 循环（回归：曾出现点一次就再也不循环） --------- */
@@ -2275,21 +2371,26 @@ app.whenReady().then(async () => {
   record('恢复后的 idle 时间轴继续前进', resumeLoop.advanced === true, JSON.stringify({ advanced: resumeLoop.advanced, advancedSamples: resumeLoop.advancedSamples, t: resumeLoop.currentTime, dur: resumeLoop.duration }));
 
   /* --------------------- 优先级 / 打断 / 冷却 --------------------- */
+  // 同样先确保"正常显示状态"（收起时默认动画是 watch/lie，会干扰下面的断言）
+  await backToDesktop();
+
   const priority = await run(`(async () => {
     const anim = window.petDebug.anim;
     const out = {};
-    // 低优先级先播。
-    // play() 里换源是异步的（等解码 + 缓冲交换），刚 await 完时 active 已经是 lie，
-    // 但为了对"当前动画"的读取稳定，这里再确认一次。
-    await anim.play('lie', { priority: 10, interrupt: 'force', reason: 'test' });
+    /*
+     * 低优先级'受害者'用一次性动画 sing(30)。
+     * 不能用 lie：它现在是**三段式**（下方收起的默认姿势），被抢占时会先播收尾段
+     * 再让位 —— 那是需求要的语义，但会让"立刻抢占"这条断言读到 lie。
+     */
+    await anim.play('sing', { priority: 30, interrupt: 'force', reason: 'test' });
     let lowWaited = 0;
-    while (lowWaited < 3000 && anim.getCurrentAnimation() !== 'lie') {
+    while (lowWaited < 3000 && anim.getCurrentAnimation() !== 'sing') {
       await new Promise((r) => setTimeout(r, 100));
       lowWaited += 100;
     }
     out.low = anim.getCurrentAnimation();
     out.lowWaited = lowWaited;
-    // 高优先级抢占（cute priority 50 > lie 10）
+    // 高优先级抢占（cute 50 > sing 30；两者都是一次性，立刻切换）
     const r1 = await anim.play('cute', { priority: 50, reason: 'test' });
     out.interruptAccepted = r1.accepted;
     out.after = anim.getCurrentAnimation();
@@ -2330,7 +2431,7 @@ app.whenReady().then(async () => {
     anim.stop('test-cleanup');
     return out;
   })()`);
-  record('低优先级动画可正常播放', priority.low === 'lie', JSON.stringify(priority));
+  record('低优先级动画可正常播放', priority.low === 'sing', JSON.stringify(priority));
   record('高优先级可抢占低优先级', priority.interruptAccepted === true && priority.after === 'cute', `after=${priority.after}`);
   record('同优先级被拒绝 (equal-priority)', priority.equalPlaying === 'roll' && priority.equalReason === 'equal-priority', `playing=${priority.equalPlaying} reason=${priority.equalReason}`);
   record('interruptible=false 拒绝更高优先级抢占', priority.nonInterruptibleReason === 'not-interruptible', `reason=${priority.nonInterruptibleReason}, playing=${priority.guardedPlaying}`);
@@ -4820,20 +4921,29 @@ app.whenReady().then(async () => {
    */
   const restoreScale = settingsSnapshot.scale;
   const restoreTop = settingsSnapshot.alwaysOnTop;
+  const restoreDock = settingsSnapshot.dockOnEdge;
   const restore = await run(`(async () => {
     try {
       await window.petAPI.settings.setScale(${restoreScale});
       await window.petAPI.settings.setAlwaysOnTop(${restoreTop});
+      await window.petAPI.settings.setDockOnEdge(${restoreDock});
       return true;
     } catch (error) {
       return false;
     }
   })()`);
   const savedAfterRun = readSavedScale();
+  const dockAfterRun = readSavedDockOnEdge();
   record(
     '验收结束后已还原用户尺寸设置',
     restore === true && savedAfterRun !== null && Math.abs(savedAfterRun - restoreScale) < 1e-6,
     `restored=${restore} scale=${savedAfterRun} expected=${restoreScale}`,
+  );
+  // 贴边收起是这一轮新增的开关：验收临时关掉它，跑完必须还原（否则用户的手感被悄悄改掉）
+  record(
+    '验收结束后已还原「拖到边缘自动收起」',
+    restore === true && dockAfterRun === restoreDock,
+    `dockOnEdge=${dockAfterRun} expected=${restoreDock}`,
   );
 
   finish({});

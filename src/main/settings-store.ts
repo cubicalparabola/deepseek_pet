@@ -85,6 +85,8 @@ export class SettingsStore {
       scale: typeof record.scale === 'number' ? clampPetScale(record.scale) : DEFAULT_PET_SETTINGS.scale,
       alwaysOnTop:
         typeof record.alwaysOnTop === 'boolean' ? record.alwaysOnTop : DEFAULT_PET_SETTINGS.alwaysOnTop,
+      dockOnEdge:
+        typeof record.dockOnEdge === 'boolean' ? record.dockOnEdge : DEFAULT_PET_SETTINGS.dockOnEdge,
     };
   }
 }

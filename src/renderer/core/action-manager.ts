@@ -162,6 +162,7 @@ export class ActionManager {
       ...(action.priority !== undefined ? { priority: action.priority } : {}),
       ...(action.interrupt !== undefined ? { interrupt: action.interrupt } : {}),
       ...(action.bypassCooldown === true ? { bypassCooldown: true } : {}),
+      ...(action.loopCountRange !== undefined ? { loopCountRange: action.loopCountRange } : {}),
       ...(action.reason !== undefined ? { reason: action.reason } : {}),
       source: action.source,
     });
@@ -241,6 +242,7 @@ export class ActionManager {
         ...(action.animationId !== undefined ? { animationId: action.animationId } : {}),
         ...(action.interrupt !== undefined ? { interrupt: action.interrupt } : {}),
         ...(action.bypassCooldown === true ? { bypassCooldown: true } : {}),
+        ...(action.loopCountRange !== undefined ? { loopCountRange: action.loopCountRange } : {}),
       };
     }
     return { type, ...base } as PetAction;

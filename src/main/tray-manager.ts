@@ -42,6 +42,8 @@ export interface TrayManagerCallbacks {
   onShowBubble(text: string): void;
   onHideBubble(): void;
   onSetAlwaysOnTop(value: boolean): void;
+  /** 拖到边缘是否自动收起（shared/dock.ts）。 */
+  onSetDockOnEdge(value: boolean): void;
   onOpenSettings(): void;
   onQuit(): void;
 
@@ -400,6 +402,7 @@ export class TrayManager {
     const visible = this.state.visible ?? true;
     const paused = this.state.behaviorPaused ?? false;
     const alwaysOnTop = this.state.alwaysOnTop ?? true;
+    const dockOnEdge = this.state.dockOnEdge ?? true;
     const callbacks = this.options.callbacks;
     const docked = (this.state.display?.dock ?? 'free') !== 'free';
     const dockText = this.state.display?.dock === 'right' ? '右侧收起' : this.state.display?.dock === 'bottom' ? '下方收起' : '正常';
@@ -435,6 +438,12 @@ export class TrayManager {
         type: 'checkbox',
         checked: alwaysOnTop,
         click: (item) => callbacks.onSetAlwaysOnTop(item.checked),
+      },
+      {
+        label: '拖到边缘自动收起',
+        type: 'checkbox',
+        checked: dockOnEdge,
+        click: (item) => callbacks.onSetDockOnEdge(item.checked),
       },
       { type: 'separator' },
       { label: '播放动画（测试）', submenu: this.buildAnimationSubmenu() },

@@ -233,6 +233,7 @@ class DesktopPetApplication {
       getSettingsState: () => this.settingsState(),
       setScale: (scale) => this.applyScale(scale),
       setAlwaysOnTop: (value) => this.applyAlwaysOnTop(value),
+      setDockOnEdge: (value) => this.applyDockOnEdge(value),
       // 对话气泡：托盘菜单与验收脚本共用这一条实现（null = 隐藏）
       setBubble: (state) => this.applyBubble(state),
       // Renderer 量出的文本行数回报 -> 重算气泡高度（气泡随文本长短变化的闭环）
@@ -600,13 +601,13 @@ class DesktopPetApplication {
        * 自己去托盘点「显示桌宠」—— 用户会以为她崩了（文档评审抓到）。
        * 这里 20 秒后自动回来；期间用户手动显示过就不再干预。
        */
-      this.setDisplay({ hidden: true });
+      this.setDisplay({ hidden: true }, 'self-hide:sensitive');
       if (this.revealTimer !== null) clearTimeout(this.revealTimer);
       this.revealTimer = setTimeout(() => {
         this.revealTimer = null;
         if (this.presence === 'hidden') {
           this.logger.info('pet reveals itself after hiding for sensitive content');
-          this.setDisplay({ hidden: false });
+          this.setDisplay({ hidden: false }, 'self-reveal');
         }
       }, SELF_HIDE_MS);
       this.revealTimer.unref?.();
@@ -818,9 +819,25 @@ class DesktopPetApplication {
    * 与托盘「播放动画（测试）」的 `setAnimation` 分开：那条会强制切换并绕过冷却，
    * 这条走普通优先级仲裁 —— 触发的动画（work / read / sad / shy…）不该硬切掉
    * 用户正在看的点击反应，也不该绕过防刷屏的冷却。
+   *
+   * ⚠️ **收起 / 隐藏 / 暂停行为时一律不触发**（用户点托盘菜单仍可手动播）。
+   * 为什么必须在这里拦：收起状态的默认动画是 watch / lie，而它是三段式 ——
+   * 每来一条触发动画都要"先播它的 end 再播新的"，然后结束后又要重新起默认动画。
+   * 也就是说在她安静待着的时候，任何自动来源的动画都会让她**反复播收尾段**
+   * （实测表现："右侧一直在循环 end"）。收起 = 安静待着，就不该有这些动画。
    */
   private triggerAnimation(animationId: string, reason: string, source: string): void {
     if (!animationId) return;
+    if (this.display.hidden || this.display.dock !== 'free') {
+      this.logger.debug('trigger animation skipped: pet is docked or hidden', {
+        data: { animationId, reason, dock: this.display.dock, hidden: this.display.hidden },
+      });
+      return;
+    }
+    if (this.behaviorPaused) {
+      this.logger.debug('trigger animation skipped: behaviors paused', { data: { animationId, reason } });
+      return;
+    }
     this.ipcManager?.triggerAnimation({ animationId, reason, source });
   }
 
@@ -957,7 +974,7 @@ class DesktopPetApplication {
     const bottomGap = area.y + area.height - (pet.y + pet.height);
     const dock: Exclude<PetDock, 'free'> = rightGap < bottomGap ? 'right' : 'bottom';
     this.snapToDock(dock);
-    this.setDisplay({ dock });
+    this.setDisplay({ dock }, 'dock:nearest-edge');
     return true;
   }
 
@@ -1079,6 +1096,9 @@ class DesktopPetApplication {
         },
         onSetAlwaysOnTop: (value) => {
           this.applyAlwaysOnTop(value);
+        },
+        onSetDockOnEdge: (value) => {
+          this.applyDockOnEdge(value);
         },
         onOpenSettings: () => this.settingsWindow?.open(),
 
@@ -1298,7 +1318,24 @@ class DesktopPetApplication {
     return {
       size: this.resolveWindowSize(),
       alwaysOnTop: this.settings.alwaysOnTop,
+      dockOnEdge: this.settings.dockOnEdge,
     };
+  }
+
+  /**
+   * 拖到边缘是否自动收起（`shared/dock.ts`）。
+   *
+   * 关掉后 `handleDragEnd` 不再判贴边（拖动就只是拖动），
+   * 托盘/右键的「收起（贴边）」仍然可用 —— 那是用户显式要求的动作，
+   * 与"手滑推到边缘"不是一回事。
+   */
+  private applyDockOnEdge(value: boolean): PetSettingsState {
+    this.settings = this.settingsStore?.update({ dockOnEdge: value }) ?? { ...this.settings, dockOnEdge: value };
+    this.logger.info('dock-on-edge setting updated', { data: { dockOnEdge: value } });
+    // 关掉时顺手把"已经收起"的状态解开：否则她会一直贴着边，用户以为没生效
+    if (!value && this.display.dock !== 'free') this.handleUndock();
+    this.refreshTray();
+    return this.settingsState();
   }
 
   /**
@@ -1416,14 +1453,14 @@ class DesktopPetApplication {
     this.windowVisible = true;
     // 隐藏是"显示状态"的一部分，必须一起改：否则渲染层仍以为自己被藏着，
     // 默认动画与随机池都不对。
-    this.setDisplay({ hidden: false });
+    this.setDisplay({ hidden: false }, 'show-pet');
     this.refreshTray();
   }
 
   private hidePet(): void {
     this.windowManager?.hide();
     this.windowVisible = false;
-    this.setDisplay({ hidden: true });
+    this.setDisplay({ hidden: true }, 'hide-pet');
     this.refreshTray();
   }
 
@@ -1459,21 +1496,27 @@ class DesktopPetApplication {
    */
   private applyPresenceFromUI(presence: PetPresence): void {
     if (presence === 'hidden') {
-      this.setDisplay({ hidden: true });
+      this.setDisplay({ hidden: true }, 'presence-api:hidden');
       return;
     }
     if (presence === 'collapsed') {
-      if (this.display.hidden) this.setDisplay({ hidden: false });
+      if (this.display.hidden) this.setDisplay({ hidden: false }, 'presence-api:collapsed');
       // 幂等：已经是收起状态就什么都不做（"设为收起"不该把她展开）
       this.dockToNearestEdge();
       return;
     }
-    if (this.display.hidden) this.setDisplay({ hidden: false });
+    if (this.display.hidden) this.setDisplay({ hidden: false }, 'presence-api:visible');
     if (this.display.dock !== 'free') this.handleUndock();
   }
 
-  /** 更新显示状态并广播给渲染层（不变则不广播，避免无谓的状态重置）。 */
-  private setDisplay(patch: Partial<PetDisplayState>): PetDisplayState {
+  /**
+   * 更新显示状态并广播给渲染层（不变则不广播，避免无谓的状态重置）。
+   *
+   * @param reason **谁**改的（`drag-end:dock` / `dock:nearest-edge` / `show-pet`…）。
+   *   这个参数是为排查加的：显示状态牵动默认动画、随机池、在场状态与行为暂停，
+   *   一旦出现"她自己突然收起来了"这类问题，日志里必须一眼看出是哪条路径干的。
+   */
+  private setDisplay(patch: Partial<PetDisplayState>, reason: string): PetDisplayState {
     const next: PetDisplayState = { ...this.display, ...patch };
     if (next.dock === this.display.dock && next.hidden === this.display.hidden) return this.display;
     const before = this.display;
@@ -1489,6 +1532,7 @@ class DesktopPetApplication {
         from: `${before.dock}${before.hidden ? '+hidden' : ''}`,
         to: `${next.dock}${next.hidden ? '+hidden' : ''}`,
         state: resolveDisplayState(next),
+        reason,
       },
     });
     this.refreshTray();
@@ -1524,6 +1568,16 @@ class DesktopPetApplication {
    * @returns 新的显示状态（渲染层据此换默认动画）
    */
   private handleDragEnd(): PetDisplayState {
+    /*
+     * 关掉"拖到边缘自动收起"时：拖动就只是拖动。
+     * 顺手记下"她现在好好待在桌面上"的位置（点一下展开时要用）。
+     */
+    if (!this.settings.dockOnEdge) {
+      if (this.display.dock !== 'free') return this.setDisplay({ dock: 'free' }, 'drag-end:disabled');
+      this.lastFreePosition = this.windowManager?.getPosition() ?? this.lastFreePosition;
+      return this.display;
+    }
+
     const pet = this.petRectOnScreen();
     const area = this.workAreaRect();
     if (!pet || !area) return this.display;
@@ -1532,11 +1586,11 @@ class DesktopPetApplication {
     if (evaluation.dock === 'free') {
       // 放在中间 = 展开（拖动离开边缘即展开，与"点一下展开"是同一结果）
       this.lastFreePosition = this.windowManager?.getPosition() ?? this.lastFreePosition;
-      return this.setDisplay({ dock: 'free' });
+      return this.setDisplay({ dock: 'free' }, 'drag-end:free');
     }
 
     this.snapToDock(evaluation.dock);
-    return this.setDisplay({ dock: evaluation.dock });
+    return this.setDisplay({ dock: evaluation.dock }, 'drag-end:dock');
   }
 
   /** 把宠物贴平到边缘（只挪窗口位置）。 */
@@ -1570,7 +1624,7 @@ class DesktopPetApplication {
     const area = this.workAreaRect();
     if (!pet || !area) return;
     if (!shouldUndock(this.display.dock, pet, area)) return;
-    this.setDisplay({ dock: 'free' });
+    this.setDisplay({ dock: 'free' }, 'drag-away');
   }
 
   /** 请求展开（收起状态下点了宠物）：回到最近一次"好好待在桌面上"的位置。 */
@@ -1578,7 +1632,7 @@ class DesktopPetApplication {
     if (this.display.dock === 'free') return this.display;
     const dock = this.display.dock;
     const restore = this.lastFreePosition;
-    const next = this.setDisplay({ dock: 'free' });
+    const next = this.setDisplay({ dock: 'free' }, 'undock-request');
     if (restore) {
       this.windowManager?.setPosition(restore.x, restore.y);
       return next;

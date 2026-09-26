@@ -287,6 +287,7 @@ const settingsFallback: SettingsWindowBootstrap = {
       baseHeight: 480,
     },
     alwaysOnTop: true,
+    dockOnEdge: true,
   },
   configPath: '',
   ai: createDefaultAIStatus(),
@@ -472,6 +473,8 @@ function buildPetBridge(): PetBridge {
         ipcRenderer.invoke(IpcChannels.SettingsSetScale, scale) as Promise<PetSettingsState>,
       setAlwaysOnTop: (value: boolean): Promise<PetSettingsState> =>
         ipcRenderer.invoke(IpcChannels.SettingsSetAlwaysOnTop, value) as Promise<PetSettingsState>,
+      setDockOnEdge: (value: boolean): Promise<PetSettingsState> =>
+        ipcRenderer.invoke(IpcChannels.SettingsSetDockOnEdge, value) as Promise<PetSettingsState>,
       onChanged: (handler: (state: PetSettingsState) => void): Unsubscribe =>
         subscribe<PetSettingsState>(IpcChannels.CommandSizeChanged, handler),
     },

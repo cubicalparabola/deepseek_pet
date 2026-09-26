@@ -48,6 +48,10 @@
       ],
       "initialDelayMs": 15000,
       "cooldownMs": 8000,
+      "persistentLoopCountRange": [
+        1,
+        2
+      ],
       "onlyWhenIdle": true
     },
     "docked-bottom-random": {

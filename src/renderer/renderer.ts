@@ -56,6 +56,7 @@ import {
   ANIMATION_CATEGORIES,
   inferAnimationCategory,
   resolveLoopCount,
+  resolvePlayLoopCount,
 } from '../shared/animation-types';
 import {
   APPROACH_RADIUS_PX,
@@ -727,8 +728,11 @@ class PetApplication {
   /**
    * 播放当前显示状态的默认动画。
    *
-   * `loop: true` 是关键：这些默认动画要**一直循环**（idle 本来就是循环素材；
-   * lie 是"一次性"素材，靠播放参数循环起来，这样它在随机池里仍然只播一遍）。
+   * 两个播放参数是关键：
+   * - `loop: true`：一次性素材（idle）要一直循环；
+   * - `loopCountRange: 'forever'`：**三段式**素材（watch / lie）也要一直循环，
+   *   只在离开这个状态时才播它的收尾段（需求："收起时点击先播 end 再播 idle"）。
+   *   同一个 lie 在随机池里则被池压成 [1,2] 轮，在触发路径上用定义里的 [2,4]。
    */
   private async playDisplayDefault(reason: string): Promise<void> {
     const animationId = this.defaultAnimationId();
@@ -737,6 +741,7 @@ class PetApplication {
     await this.animationManager.play(animationId, {
       interrupt: 'force',
       loop: true,
+      loopCountRange: 'forever',
       reason,
       source: 'system',
       ...(isFallback ? {} : { priority: 5 }),
@@ -1232,6 +1237,7 @@ class PetApplication {
      */
     readonly animationModel: {
       readonly resolveLoopCount: typeof resolveLoopCount;
+      readonly resolvePlayLoopCount: typeof resolvePlayLoopCount;
       readonly inferAnimationCategory: typeof inferAnimationCategory;
       readonly ANIMATION_CATEGORIES: typeof ANIMATION_CATEGORIES;
       readonly parseBehaviorConfig: typeof parseBehaviorConfig;
@@ -1419,6 +1425,7 @@ class PetApplication {
       display: () => this.displayState,
       animationModel: {
         resolveLoopCount,
+        resolvePlayLoopCount,
         inferAnimationCategory,
         ANIMATION_CATEGORIES,
         parseBehaviorConfig,

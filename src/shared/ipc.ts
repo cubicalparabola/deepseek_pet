@@ -79,6 +79,8 @@ export const IpcChannels = {
   SettingsGet: 'pet:settings-get',
   SettingsSetScale: 'pet:settings-set-scale',
   SettingsSetAlwaysOnTop: 'pet:settings-set-always-on-top',
+  /** 拖到边缘是否自动收起（shared/dock.ts）。 */
+  SettingsSetDockOnEdge: 'pet:settings-set-dock-on-edge',
   /** 显示/隐藏对话气泡（托盘菜单与验收脚本共用同一条实现）。 */
   PetSetBubble: 'pet:set-bubble',
   /**
@@ -388,6 +390,8 @@ export interface TrayStatePayload {
   /** 当前尺寸（用于菜单勾选状态）。 */
   readonly size?: PetSizeInfo;
   readonly alwaysOnTop?: boolean;
+  /** 拖到边缘是否自动收起（菜单勾选状态）。 */
+  readonly dockOnEdge?: boolean;
   /** 全部已注册动画（仅供主进程构造「播放动画」菜单使用）。 */
   readonly animations?: readonly AnimationSummary[];
   /** AI 状态（仅供主进程构造「AI（认知与人格）」子菜单使用）。 */
@@ -518,6 +522,12 @@ export interface SettingsAPI {
   /** 设置缩放系数（会被 clamp 到合法区间）。返回实际生效的尺寸信息。 */
   setScale(scale: number): Promise<PetSettingsState>;
   setAlwaysOnTop(value: boolean): Promise<PetSettingsState>;
+  /**
+   * 拖到屏幕边缘是否自动收起。
+   *
+   * 关掉后边缘不再触发收起（托盘的「收起（贴边）」仍然可用 —— 那是显式动作）。
+   */
+  setDockOnEdge(value: boolean): Promise<PetSettingsState>;
   /** 订阅尺寸/设置变化（含托盘菜单触发的调整）。 */
   onChanged(handler: (state: PetSettingsState) => void): () => void;
 }

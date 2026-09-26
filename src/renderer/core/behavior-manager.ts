@@ -289,6 +289,10 @@ export class BehaviorManager {
       animationId,
       source: 'behavior',
       reason,
+      // 池里的三段式动画压成一两轮（见 BehaviorPool.persistentLoopCountRange）
+      ...(runtime.pool.persistentLoopCountRange
+        ? { loopCountRange: runtime.pool.persistentLoopCountRange }
+        : {}),
       metadata: {
         poolId: runtime.pool.id,
         state: runtime.state,

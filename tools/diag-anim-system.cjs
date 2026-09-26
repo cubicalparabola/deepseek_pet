@@ -194,55 +194,74 @@ app.whenReady().then(async () => {
   const docking = await run(`(async () => {
     const api = window.petAPI;
     const model = window.petDebug.animationModel;
-    // 先把窗口挪到工作区正中间，保证起点是"没贴边"
-    const before = await api.window.getPosition();
-    await api.window.setPosition(500, 300);
-    await new Promise((r) => setTimeout(r, 400));
-    const free0 = await api.window.dragEnd();
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    /** 重新开始：回到工作区中部并确认"未收起"。 */
+    const resetFree = async () => {
+      await api.window.setPosition(500, 300);
+      await wait(400);
+      await api.window.dragEnd();
+      for (let i = 0; i < 20; i += 1) {
+        if (window.petDebug.display().dock === 'free') break;
+        await wait(100);
+      }
+      return window.petDebug.display().dock;
+    };
+    /** 挪到某个坐标 -> 松手 -> 轮询等它稳定到期望的贴边方向。 */
+    const dockAt = async (x, y, expected) => {
+      await api.window.setPosition(x, y);
+      await wait(400);
+      await api.window.dragEnd();
+      for (let i = 0; i < 25; i += 1) {
+        if (window.petDebug.display().dock === expected) break;
+        await wait(100);
+      }
+      return window.petDebug.display().dock;
+    };
+
+    const free0 = await resetFree();
 
     // 拖到右下角（主进程会收敛到工作区内）再松手
     await api.window.setPosition(100000, 100000);
-    await new Promise((r) => setTimeout(r, 400));
+    await wait(400);
     const cornerPos = await api.window.getPosition();
-    const right = await api.window.dragEnd();
-    await new Promise((r) => setTimeout(r, 1400));
+    const rightDock = await dockAt(100000, 100000, 'right');
+    await wait(1400);
     const animAfterRight = window.petDebug.anim.getCurrentAnimation();
     const posRight = await api.window.getPosition();
 
     // 拖离边缘（向左上 300px）应该自动展开
     await api.window.setPosition(posRight.x - 300, posRight.y - 300);
-    await new Promise((r) => setTimeout(r, 600));
-    const free = await api.window.dragEnd();
+    await wait(600);
+    const freeDock = (await api.window.dragEnd()).dock;
     /*
      * 回到 idle 需要等 watch 的**收尾段**播完（三段式语义：loop 中被打断先播 end）。
      * watch-end 约 4.4s，所以这里轮询等待而不是固定 sleep。
      */
     let animAfterFree = null;
     for (let i = 0; i < 60; i += 1) {
-      await new Promise((r) => setTimeout(r, 200));
+      await wait(200);
       if (window.petDebug.anim.getCurrentAnimation() === 'idle') { animAfterFree = 'idle'; break; }
       animAfterFree = window.petDebug.anim.getCurrentAnimation();
     }
 
     // 再拖到下边缘（横向放到中间，避免又判成右边）
-    await api.window.setPosition(500, 100000);
-    await new Promise((r) => setTimeout(r, 400));
-    const bottom = await api.window.dragEnd();
+    await resetFree();
+    const bottomDock = await dockAt(500, 100000, 'bottom');
     let animAfterBottom = null;
     for (let i = 0; i < 60; i += 1) {
-      await new Promise((r) => setTimeout(r, 200));
+      await wait(200);
       animAfterBottom = window.petDebug.anim.getCurrentAnimation();
       if (animAfterBottom === 'lie') break;
     }
     return {
-      startPos: before,
-      free0: free0.dock,
+      free0,
       cornerPos,
-      rightDock: right.dock,
+      rightDock,
       animAfterRight,
-      freeDock: free.dock,
+      freeDock,
       animAfterFree,
-      bottomDock: bottom.dock,
+      bottomDock,
       animAfterBottom,
       display: window.petDebug.display(),
       threshold: model.DOCK_EDGE_THRESHOLD_PX,
@@ -264,16 +283,34 @@ app.whenReady().then(async () => {
   const undock = await run(`(async () => {
     const api = window.petAPI;
     const anim = window.petDebug.anim;
-    // 先回到"没贴边"，再贴右边缘，确保 lastFreePosition 是自由位置
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    /** 回到"没贴边"，再贴右边缘（并等它稳定），确保 lastFreePosition 是自由位置。 */
+    const settle = async (expected) => {
+      for (let i = 0; i < 25; i += 1) {
+        if (window.petDebug.display().dock === expected) break;
+        await wait(100);
+      }
+      return window.petDebug.display().dock;
+    };
+    /** 贴到期望的边并确认**点击前**仍然是这个状态（真人鼠标可能刚拖过她）。 */
+    const dockAndConfirm = async (x, y, expected) => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await api.window.setPosition(x, y);
+        await wait(400);
+        await api.window.dragEnd();
+        if (await settle(expected) === expected) return expected;
+      }
+      return window.petDebug.display().dock;
+    };
     await api.window.setPosition(500, 300);
-    await new Promise((r) => setTimeout(r, 300));
+    await wait(400);
     await api.window.dragEnd();
-    await api.window.setPosition(100000, 100000);
-    await new Promise((r) => setTimeout(r, 400));
-    const docked = await api.window.dragEnd();
-    await new Promise((r) => setTimeout(r, 1200));
+    await settle('free');
+    const docked = await dockAndConfirm(100000, 100000, 'right');
+    await wait(1200);
     const posDocked = await api.window.getPosition();
     const beforeClick = anim.getCurrentAnimation();
+    const phaseBeforeClick = anim.getPersistentPhase();
 
     /*
      * 走真实点击路径（handleIntent 里"收起状态下点一下就展开"）。
@@ -288,16 +325,17 @@ app.whenReady().then(async () => {
     const t0 = Date.now();
     let afterClick = null;
     while (Date.now() - t0 < 20000) {
-      await new Promise((r) => setTimeout(r, 60));
+      await wait(60);
       const current = anim.getCurrentAnimation();
       if (current !== null) sawAnimations.add(current);
       if (anim.getPersistentPhase() === 'end' && current === 'watch') sawEndPhase = true;
       if (current === 'idle') { afterClick = Date.now() - t0; break; }
     }
     return {
-      docked: docked.dock,
+      docked,
       posDocked,
       beforeClick,
+      phaseBeforeClick,
       sawEndPhase,
       afterClickMs: afterClick,
       finalAnimation: anim.getCurrentAnimation(),
@@ -324,25 +362,41 @@ app.whenReady().then(async () => {
   /*
    * 下方收起同理（默认动画是 lie）。
    *
-   * ⚠️ 这里能断言的只有"点一下就回 idle，且中途没有点击反应"：
-   * `lie` 是**单文件素材**（没有 start/loop/end 三段），所以它没有 `end` 可播，
-   * 过渡靠交叉淡化而不是收尾段。写清楚这一点，免得以后有人看到"下方收起没有 end"
-   * 以为又是漏接线。
+   * `lie` 现在是**三段式**：start = sleep-start（从站到趴下）、
+   * loop = lie（趴着的姿势）、end = sleep-end（从趴到站起来）——
+   * 所以下方收起离开时同样"先播 end 再回 idle"（需求）。
    */
   const undockBottom = await run(`(async () => {
     const api = window.petAPI;
     const anim = window.petDebug.anim;
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const settle = async (expected) => {
+      for (let i = 0; i < 25; i += 1) {
+        if (window.petDebug.display().dock === expected) break;
+        await wait(100);
+      }
+      return window.petDebug.display().dock;
+    };
+    const dockAndConfirm = async (x, y, expected) => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await api.window.setPosition(x, y);
+        await wait(400);
+        await api.window.dragEnd();
+        if (await settle(expected) === expected) return expected;
+      }
+      return window.petDebug.display().dock;
+    };
     await api.window.setPosition(500, 300);
-    await wait(300);
-    await api.window.dragEnd();
-    await api.window.setPosition(500, 100000);
     await wait(400);
-    const docked = await api.window.dragEnd();
+    await api.window.dragEnd();
+    await settle('free');
+    const docked = await dockAndConfirm(500, 100000, 'bottom');
     await wait(1500);
     const beforeClick = anim.getCurrentAnimation();
-    const hasEnd = Boolean((anim.getDefinition('lie').segments || {}).end);
+    const phaseBeforeClick = anim.getPersistentPhase();
+    const segments = anim.getDefinition('lie').segments || {};
     const saw = new Set();
+    let sawEndPhase = false;
     window.petDebug.click('head', 0.5, 0.4);
     const t0 = Date.now();
     let afterClick = null;
@@ -350,12 +404,15 @@ app.whenReady().then(async () => {
       await wait(60);
       const current = anim.getCurrentAnimation();
       if (current !== null) saw.add(current);
+      if (anim.getPersistentPhase() === 'end' && current === 'lie') sawEndPhase = true;
       if (current === 'idle') { afterClick = Date.now() - t0; break; }
     }
     return {
-      docked: docked.dock,
+      docked,
       beforeClick,
-      lieHasEndSegment: hasEnd,
+      phaseBeforeClick,
+      lieHasStartEnd: Boolean(segments.start) && Boolean(segments.end),
+      sawEndPhase,
       afterClickMs: afterClick,
       finalAnimation: anim.getCurrentAnimation(),
       sequence: [...saw],
@@ -363,11 +420,12 @@ app.whenReady().then(async () => {
     };
   })()`);
   step(
-    '下方收起点一下：同样只回 idle（lie 没有 end 段，过渡走交叉淡化）',
+    '下方收起点一下：同样先播 end（lie 拿 sleep-end 当收尾）→ 再回 idle',
     undockBottom,
     undockBottom.docked === 'bottom' &&
       undockBottom.beforeClick === 'lie' &&
-      undockBottom.lieHasEndSegment === false &&
+      undockBottom.lieHasStartEnd === true &&
+      undockBottom.sawEndPhase === true &&
       typeof undockBottom.afterClickMs === 'number' &&
       undockBottom.finalAnimation === 'idle' &&
       undockBottom.sequence.every((id) => id === 'lie' || id === 'idle') &&

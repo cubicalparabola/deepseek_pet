@@ -18,23 +18,6 @@
       "className": "anim-idle"
     }
   },
-  "lie": {
-    "type": "video",
-    "source": "animations/lie.webm",
-    "loop": false,
-    "priority": 10,
-    "interruptible": true,
-    "cooldown": 0,
-    "category": "state",
-    "label": "趴下",
-    "tags": [
-      "state",
-      "rest"
-    ],
-    "render": {
-      "className": "anim-lie"
-    }
-  },
   "roll": {
     "type": "video",
     "source": "animations/roll.webm",
@@ -379,6 +362,33 @@
     ],
     "render": {
       "className": "anim-watch"
+    }
+  },
+  "lie": {
+    "type": "video",
+    "source": "animations/sleep-start.webm",
+    "loop": false,
+    "priority": 10,
+    "interruptible": true,
+    "cooldown": 0,
+    "category": "state",
+    "kind": "persistent",
+    "segments": {
+      "start": "animations/sleep-start.webm",
+      "loop": "animations/lie.webm",
+      "end": "animations/sleep-end.webm",
+      "loopCountRange": [
+        2,
+        4
+      ]
+    },
+    "label": "趴下",
+    "tags": [
+      "state",
+      "rest"
+    ],
+    "render": {
+      "className": "anim-lie"
     }
   },
   "sleep": {

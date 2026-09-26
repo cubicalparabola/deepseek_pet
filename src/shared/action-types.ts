@@ -46,6 +46,13 @@ export interface AnimationAction extends PetActionBase {
    * 见 `PlayOptions.bypassCooldown`：自动化来源不得传 true。
    */
   readonly bypassCooldown?: boolean;
+  /**
+   * 这次播放的"循环几轮"覆盖（只对三段式动画有意义；见 `PlayOptions.loopCountRange`）。
+   *
+   * 随机池用它把池里的三段式动画压成"一两轮"（正常状态下趴下休息一会儿就自己起来），
+   * 而"状态默认动画"用 `'forever'` 保持姿势、只在离开该状态时才播收尾。
+   */
+  readonly loopCountRange?: readonly [number, number] | 'forever';
 }
 
 export interface StateAction extends PetActionBase {

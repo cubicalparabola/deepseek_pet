@@ -35,10 +35,8 @@ const LOOP_COUNT_RANGE = [2, 5];
 const ONE_SHOTS = [
   // ── 状态动画 ──────────────────────────────────────────────────────────
   // idle 是正常状态的兜底：必须循环，否则反应动画结束后画面会停在最后一帧。
-  // lie 同时也在"正常状态随机池"里（那时只播一遍）—— 作为下方收起的默认动画时，
-  // 渲染层会用 `loop: true` 的播放参数把它循环起来（见 display-state 的默认动画播放）。
+  // （lie 也是状态动画，但它是三段式，写在下面的 PERSISTENT 里。）
   { id: 'idle', label: '待机', category: 'state', priority: 0, cooldown: 0, fallback: true, loop: true, tags: ['idle', 'loop', 'base'] },
-  { id: 'lie', label: '趴下', category: 'state', priority: 10, cooldown: 0, tags: ['state', 'rest'] },
 
   // ── 随机动画 ──────────────────────────────────────────────────────────
   { id: 'roll', label: '翻滚', category: 'random', priority: 45, cooldown: 5000, tags: ['random', 'action'] },
@@ -74,6 +72,20 @@ const PERSISTENT = [
   // watch 是"右侧收起"的默认动画：**故意不配轮数**（无限循环），
   // 只在离开收起状态（或被打断）时才播收尾 —— 所以这里显式写 null
   { id: 'watch', label: '看着你', category: 'state', priority: 15, loopCountRange: null, tags: ['state', 'idle'] },
+  /*
+   * lie 是"下方收起"的默认姿势，但它是**三段式**（需求：收起时点击要先播 end 再播 idle）：
+   *   start = sleep-start（从站到趴下）
+   *   loop  = lie（趴着的姿势循环）
+   *   end   = sleep-end（从趴到站起来）
+   * 默认轮数 [2,4]：被触发时（"主人不在呀"演一次）趴一会儿就自己起来；
+   * 作为"收起的默认姿势"时渲染层会传 `loopCountRange: 'forever'` 覆盖成无限，
+   * 作为正常状态的随机动画时池会传 [1,2] 压短（见 behavior.json）。
+   */
+  {
+    id: 'lie', label: '趴下', category: 'state', priority: 10,
+    segments: { start: 'animations/sleep-start.webm', loop: 'animations/lie.webm', end: 'animations/sleep-end.webm' },
+    loopCountRange: [2, 4], tags: ['state', 'rest'],
+  },
   { id: 'sleep', label: '睡觉', category: 'random', priority: 10, tags: ['random', 'rest'] },
   { id: 'sad', label: '难过', category: 'trigger', priority: 45, tags: ['trigger', 'mood'] },
   { id: 'overheat', label: '过热', category: 'trigger', priority: 40, tags: ['trigger', 'state'] },
@@ -100,10 +112,17 @@ for (const item of ONE_SHOTS) {
 }
 
 for (const item of PERSISTENT) {
+  const segments = item.segments ?? {
+    start: `animations/${item.id}-start.webm`,
+    loop: `animations/${item.id}-loop.webm`,
+    end: `animations/${item.id}-end.webm`,
+  };
+  // 轮数：显式 null = 不写（无限循环）；显式数组 = 用它；没写 = 默认 [2,5]
+  const range = item.loopCountRange === null ? null : (item.loopCountRange ?? LOOP_COUNT_RANGE);
   manifest[item.id] = {
     type: 'video',
     // source 指向 start 段：分段素材万一被删也能播点东西出来
-    source: `animations/${item.id}-start.webm`,
+    source: segments.start,
     loop: false,
     priority: item.priority,
     interruptible: true,
@@ -111,12 +130,8 @@ for (const item of PERSISTENT) {
     category: item.category,
     kind: 'persistent',
     segments: {
-      start: `animations/${item.id}-start.webm`,
-      loop: `animations/${item.id}-loop.webm`,
-      end: `animations/${item.id}-end.webm`,
-      ...(item.loopCountRange === null
-        ? {}
-        : { loopCountRange: item.loopCountRange ?? LOOP_COUNT_RANGE }),
+      ...segments,
+      ...(range ? { loopCountRange: range } : {}),
     },
     label: item.label,
     tags: item.tags,
@@ -145,6 +160,8 @@ const behavior = {
       intervalMs: [25000, 60000],
       initialDelayMs: 15000,
       cooldownMs: 8000,
+      // 池里的三段式成员压成一两轮：趴下歇一会儿就自己爬起来，不是一直趴着
+      persistentLoopCountRange: [1, 2],
       onlyWhenIdle: true,
     },
     'docked-bottom-random': {

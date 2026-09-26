@@ -39,11 +39,21 @@ export interface PetSettings {
   readonly scale: number;
   /** 是否始终置顶。 */
   readonly alwaysOnTop: boolean;
+  /**
+   * 拖到屏幕右/下边缘时是否自动收起（`shared/dock.ts`）。
+   *
+   * 默认开（需求："拖动宠物放到最右边或者最下边时触发收起宠物状态"）。
+   * 做成开关的理由：自动吸附是"很主观"的手感 —— 有人喜欢她贴着边待着，
+   * 也有人只是想把窗口挪到角落、并不想让她换姿势。关掉后边缘不再触发收起，
+   * 但托盘的「收起（贴边）」仍然可用（那是显式动作）。
+   */
+  readonly dockOnEdge: boolean;
 }
 
 export const DEFAULT_PET_SETTINGS: PetSettings = {
   scale: PET_SCALE_DEFAULT,
   alwaysOnTop: true,
+  dockOnEdge: true,
 };
 
 /**
@@ -108,6 +118,7 @@ export interface PetSizeInfo {
 export interface PetSettingsState {
   readonly size: PetSizeInfo;
   readonly alwaysOnTop: boolean;
+  readonly dockOnEdge: boolean;
 }
 
 export function clampPetScale(scale: number): number {
