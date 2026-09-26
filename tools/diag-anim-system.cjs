@@ -284,7 +284,7 @@ app.whenReady().then(async () => {
     const api = window.petAPI;
     const anim = window.petDebug.anim;
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-    /** 回到"没贴边"，再贴右边缘（并等它稳定），确保 lastFreePosition 是自由位置。 */
+    /** 回到"没贴边"，再贴右边缘（并等它稳定）：确保点之前的状态是"自由位置上的收起"。 */
     const settle = async (expected) => {
       for (let i = 0; i < 25; i += 1) {
         if (window.petDebug.display().dock === expected) break;
