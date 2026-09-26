@@ -154,8 +154,9 @@ app.whenReady().then(async () => {
     poolAnimationStillAllowed: result.poolAllowed.peekAccepted === true,
     // 收起状态不该被 idle 之类的动画顶掉
     idleRejectedWhileDocked: result.poolAllowed.idleAccepted === false && result.poolAllowed.idleReason === 'docked',
-    // 收起结束时仍应停在该状态的默认动画上（watch 的 loop 段）
-    settledOnDefault: result.afterA.animation === 'watch' || result.afterA.animation === 'idle',
+    // 被重复请求打扰之后，必须**仍然稳稳停在该状态的默认姿势上**
+    // （watch 的 loop 段）—— 而不是退化成 idle 站在那儿"忘了自己收着"
+    settledOnDefault: result.afterA.animation === 'watch' && result.afterA.phase === 'loop',
   };
 
   writeFileSync(outFile, JSON.stringify(result, null, 1), 'utf8');
