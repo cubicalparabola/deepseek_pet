@@ -321,6 +321,8 @@ app.whenReady().then(async () => {
      */
     const sawAnimations = new Set();
     let sawEndPhase = false;
+    /** end 段期间窗口位置的集合：需求要求"播 end 时不要移动位置"。 */
+    const positionsDuringEnd = new Set();
     window.petDebug.click('head', 0.5, 0.4);
     const t0 = Date.now();
     let afterClick = null;
@@ -328,8 +330,22 @@ app.whenReady().then(async () => {
       await wait(60);
       const current = anim.getCurrentAnimation();
       if (current !== null) sawAnimations.add(current);
-      if (anim.getPersistentPhase() === 'end' && current === 'watch') sawEndPhase = true;
+      if (anim.getPersistentPhase() === 'end' && current === 'watch') {
+        sawEndPhase = true;
+        const at = await api.window.getPosition();
+        positionsDuringEnd.add(at.x + ',' + at.y);
+      }
       if (current === 'idle') { afterClick = Date.now() - t0; break; }
+    }
+    /*
+     * 位置是**等收尾段播完**才挪的（需求："播 end 时不要移动位置"），
+     * 所以这里要再等一会儿才读得到终点位置 —— 最多等 3 秒。
+     */
+    let posAfter = await api.window.getPosition();
+    for (let i = 0; i < 30; i += 1) {
+      if (Math.abs(posAfter.x - 500) < 40) break;
+      await wait(100);
+      posAfter = await api.window.getPosition();
     }
     return {
       docked,
@@ -337,20 +353,22 @@ app.whenReady().then(async () => {
       beforeClick,
       phaseBeforeClick,
       sawEndPhase,
+      movedDuringEnd: positionsDuringEnd.size > 1 ? [...positionsDuringEnd] : [],
       afterClickMs: afterClick,
       finalAnimation: anim.getCurrentAnimation(),
       sequence: [...sawAnimations],
       stateAfterClick: window.petDebug.display().dock,
       // 展开应该回到"收起前的位置"（500,300 附近），而不是留在屏幕边缘
-      posAfter: await api.window.getPosition(),
+      posAfter,
     };
   })()`);
   step(
-    '收起状态下点一下宠物：先播 end（仍是 watch，没有点击反应插进来）→ 再回 idle，并回到收起前的位置',
+    '收起状态下点一下宠物：先播 end（不动位置）→ 再回 idle，并回到收起前的位置',
     undock,
     undock.docked === 'right' &&
       undock.beforeClick === 'watch' &&
       undock.sawEndPhase === true &&
+      undock.movedDuringEnd.length === 0 &&
       typeof undock.afterClickMs === 'number' &&
       undock.finalAnimation === 'idle' &&
       // 全程只应看到 watch -> idle；cute/fawning/stroke 出现在这里就是"多插了一段"

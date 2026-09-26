@@ -1633,17 +1633,21 @@ class DesktopPetApplication {
     const dock = this.display.dock;
     const restore = this.lastFreePosition;
     const next = this.setDisplay({ dock: 'free' }, 'undock-request');
-    if (restore) {
-      this.windowManager?.setPosition(restore.x, restore.y);
-      return next;
-    }
-    // 没有记录（例如启动时就已经是收起状态）：至少把她从边缘往里挪开
-    const current = this.windowManager?.getPosition();
-    if (current) {
-      const target = nudgeInward(dock, current);
-      this.windowManager?.setPosition(target.x, target.y);
-    }
+    /*
+     * ⚠️ 位置**不在这里**改：她此刻正开始播默认姿势的收尾段（watch-end / sleep-end），
+     * 需求要求"播 end 时不要移动位置"。所以只把目标坐标发给渲染层，
+     * 由它在收尾段播完、新默认动画真正开始时才挪窗口（见 CommandMoveWhenSettled）。
+     */
+    const target = restore ?? this.nudgeTarget(dock);
+    if (target) this.ipcManager?.moveWhenSettled({ x: target.x, y: target.y, reason: 'undock' });
     return next;
+  }
+
+  /** 没有"上次自由位置"可回退时（例如启动即收起）的兜底目标：从贴边位置往里挪一点。 */
+  private nudgeTarget(dock: Exclude<PetDock, 'free'>): WindowPosition | null {
+    const current = this.windowManager?.getPosition();
+    if (!current) return null;
+    return nudgeInward(dock, current);
   }
 
   private applyTrayState(state: TrayStatePayload): void {

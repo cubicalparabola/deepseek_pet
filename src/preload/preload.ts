@@ -26,6 +26,7 @@ import type {
   StateChangedPayload,
   TrayStatePayload,
   TriggerAnimationPayload,
+  MoveWhenSettledPayload,
   WindowPosition,
 } from '../shared/ipc';
 import type { PetDisplayState } from '../shared/behavior-config';
@@ -458,6 +459,8 @@ function buildPetBridge(): PetBridge {
         subscribe<TriggerAnimationPayload>(IpcChannels.CommandTriggerAnimation, handler),
       onDisplayState: (handler: (payload: PetDisplayState) => void): Unsubscribe =>
         subscribe<PetDisplayState>(IpcChannels.CommandDisplayState, handler),
+      onMoveWhenSettled: (handler: (payload: MoveWhenSettledPayload) => void): Unsubscribe =>
+        subscribe<MoveWhenSettledPayload>(IpcChannels.CommandMoveWhenSettled, handler),
       onSizeChanged: (handler: (size: PetSizeInfo) => void): Unsubscribe =>
         subscribe<PetSizeInfo>(IpcChannels.CommandSizeChanged, handler),
       onBubble: (handler: (payload: BubblePayload) => void): Unsubscribe =>

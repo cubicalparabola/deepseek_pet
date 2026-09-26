@@ -361,7 +361,8 @@
       "idle"
     ],
     "render": {
-      "className": "anim-watch"
+      "className": "anim-watch",
+      "offsetXPercent": 6
     }
   },
   "sleep": {

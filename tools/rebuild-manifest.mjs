@@ -69,9 +69,17 @@ const ONE_SHOTS = [
  * `loopCountRange` 省略 = 无限循环（只在中途被打断时才播收尾）。
  */
 const PERSISTENT = [
-  // watch 是"右侧收起"的默认动画：**故意不配轮数**（无限循环），
-  // 只在离开收起状态（或被打断）时才播收尾 —— 所以这里显式写 null
-  { id: 'watch', label: '看着你', category: 'state', priority: 15, loopCountRange: null, tags: ['state', 'idle'] },
+  /*
+   * watch 是"右侧收起"的默认动画：**故意不配轮数**（无限循环），
+   * 只在离开收起状态（或被打断）时才播收尾 —— 所以这里显式写 null。
+   *
+   * `offsetXPercent`：把这套素材整体**向右**挪一点再渲染（用户要求
+   * "watch 动画再向右一点播放位置"）。素材本身在她贴住屏幕右边缘时
+   * 看着还差一点，用渲染偏移补最省事 —— 不动窗口、也不动贴边几何。
+   * 数值是相对**素材自身宽度**的百分比（6 ≈ 默认尺寸下 13px）。
+   * 想再挪就改这一个数（清单里的 `render.offsetXPercent`）。
+   */
+  { id: 'watch', label: '看着你', category: 'state', priority: 15, loopCountRange: null, offsetXPercent: 6, tags: ['state', 'idle'] },
   /*
    * sleep 是"下方收起"的默认姿势（用户要求与 lie 对调角色）。
    * 它本来就是三段式，动作正好连贯：
@@ -142,7 +150,7 @@ for (const item of PERSISTENT) {
     },
     label: item.label,
     tags: item.tags,
-    render: { className: `anim-${item.id}` },
+    render: { className: `anim-${item.id}`, ...(item.offsetXPercent !== undefined ? { offsetXPercent: item.offsetXPercent } : {}) },
   };
 }
 

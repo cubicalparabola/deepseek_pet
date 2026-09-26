@@ -17,6 +17,7 @@ import type { PetAction } from '../shared/action-types';
 import type { DiscoveredPlugin } from '../shared/plugin-types';
 import type { PetState } from '../shared/state-types';
 import type { RuntimeInfo } from '../shared/ipc';
+import type { MoveWhenSettledPayload } from '../shared/ipc';
 import type { PetSizeInfo } from '../shared/pet-size';
 import { resolveBubbleLayout, type BubblePayload } from '../shared/bubble';
 import {
@@ -504,10 +505,14 @@ class PetApplication {
       // SLEEPING 由 ActionManager 的 stateHint 负责；BUSY 结束后自行回到 PLAYING
       if (this.stateMachine.is('PLAYING') || this.stateMachine.is('SLEEPING') || this.stateMachine.is('BUSY')) {
         this.pushTrayState();
+        // 新动画已开始 -> 收尾段播完了，可以挪窗口（幂等）
+        this.applyPendingWindowMoveIfSettled();
         return;
       }
       this.stateMachine.request('PLAYING', `animation-start:${payload.animationId}`, payload.source ?? 'system');
       this.pushTrayState();
+      // 新动画真正开始 = 收尾段已经播完：这时才是"可以挪窗口"的时刻
+      this.applyPendingWindowMoveIfSettled();
     });
 
     // 动画结束 -> 回到 IDLE（“WebM 播放结束自动回到 IDLE”就实现在这里）
@@ -600,6 +605,32 @@ class PetApplication {
     });
     this.runtime.onDisplayState((payload) => {
       void this.applyDisplayState(payload, 'main-process');
+    });
+    /*
+     * "等过渡播完再挪窗口"（主进程在展开时发的目标坐标）：先记下来，
+     * 等新默认动画真正开始再落地 —— 需求要求播 end 时不要移动位置。
+     */
+    this.runtime.onMoveWhenSettled((payload) => {
+      this.pendingWindowMove = payload;
+      this.logger.info('window move deferred until the transition settles', {
+        data: { to: `${payload.x},${payload.y}`, reason: payload.reason },
+      });
+      this.applyPendingWindowMoveIfSettled();
+      /*
+       * 兜底：万一收尾段的 ended 丢了、或她被别的东西打断在半路，
+       * 也不能让她永远停在屏幕边缘 —— 最多等 8 秒就落地。
+       */
+      if (this.pendingWindowMove !== null && this.pendingWindowMoveTimer === null) {
+        this.pendingWindowMoveTimer = window.setTimeout(() => {
+          this.pendingWindowMoveTimer = null;
+          if (this.pendingWindowMove === null) return;
+          this.logger.warn('deferred window move timed out; applying anyway', {
+            data: { phase: this.animationManager.getPersistentPhase() },
+          });
+          this.pendingWindowMove = null;
+          void this.runtime.setWindowPosition(payload.x, payload.y).catch(() => undefined);
+        }, 8000);
+      }
     });
     this.runtime.onShutdown(() => this.shutdown());
     this.runtime.onSizeChanged((size) => {
@@ -793,6 +824,45 @@ class PetApplication {
   private watchdogTimer: number | null = null;
   private recoveryAttempts = 0;
   private recovering = false;
+
+  /**
+   * 待落地的窗口位置（主进程要求"等当前过渡播完再挪"）。
+   *
+   * 场景：从收起状态展开时她正在播默认姿势的收尾段（watch-end / sleep-end）。
+   * 那一刻就挪窗口 = "一边起身一边滑走"，需求要求播 end 时不要动。
+   * 这里等新默认动画真正开始（`AnimationStart`）时再落地，另有超时兜底。
+   */
+  private pendingWindowMove: MoveWhenSettledPayload | null = null;
+  private pendingWindowMoveTimer: number | null = null;
+
+  /**
+   * 过渡已经结束了吗（可以安全挪窗口了）。
+   *
+   * 判据：没有"等收尾段播完再播"的挂起请求，且当前动画不是持续动画的收尾段 ——
+   * 也就是她要么已经在播新默认动画，要么根本没有动画在播。
+   */
+  private isTransitionSettled(): boolean {
+    if (this.animationManager.hasPendingAfterEnd()) return false;
+    if (this.animationManager.getPersistentPhase() === 'end') return false;
+    return true;
+  }
+
+  /** 能挪就挪（幂等：没挂起目标或过渡没结束就什么都不做）。 */
+  private applyPendingWindowMoveIfSettled(): void {
+    const pending = this.pendingWindowMove;
+    if (!pending || !this.isTransitionSettled()) return;
+    this.pendingWindowMove = null;
+    if (this.pendingWindowMoveTimer !== null) {
+      window.clearTimeout(this.pendingWindowMoveTimer);
+      this.pendingWindowMoveTimer = null;
+    }
+    this.logger.info('applying deferred window move', {
+      data: { to: `${pending.x},${pending.y}`, reason: pending.reason },
+    });
+    void this.runtime.setWindowPosition(pending.x, pending.y).catch((error: unknown) => {
+      this.logger.warn('deferred window move failed', { error: describeError(error) });
+    });
+  }
 
   /**
    * 画面健康检查 + 自愈。

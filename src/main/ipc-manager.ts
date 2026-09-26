@@ -19,6 +19,7 @@ import {
   type StateChangedPayload,
   type TrayStatePayload,
   type TriggerAnimationPayload,
+  type MoveWhenSettledPayload,
 } from '../shared/ipc';
 import type { PetSettingsState, PetSizeInfo } from '../shared/pet-size';
 import type { BubblePayload, BubbleState } from '../shared/bubble';
@@ -610,6 +611,16 @@ export class IpcManager {
   /** 通知 Renderer：显示状态（收起方向 / 隐藏）变了。 */
   public notifyDisplayState(display: PetDisplayState): void {
     this.broadcast(IpcChannels.CommandDisplayState, display);
+  }
+
+  /**
+   * 通知 Renderer：**等当前过渡播完再挪窗口**（展开时用）。
+   *
+   * 为什么不让主进程自己 `setTimeout` 估时间：收尾段有多长取决于当前是哪条
+   * 默认动画、以及它有没有被打断；渲染层才是"现在播到哪了"的权威。
+   */
+  public moveWhenSettled(payload: MoveWhenSettledPayload): void {
+    this.broadcast(IpcChannels.CommandMoveWhenSettled, payload);
   }
 
   /** 通知 Renderer：尺寸发生变化。 */
