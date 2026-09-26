@@ -267,6 +267,19 @@ export interface PlayOptions {
   readonly reason?: string;
   /** 触发来源（"user" | "behavior" | "plugin:<id>" | "ai-agent" | "system"）。 */
   readonly source?: string;
+  /**
+   * 是否允许"重新开始正在播的同一条动画"（默认 false）。
+   *
+   * ⚠️ 默认 false 是一条**硬规则**：请求正在播放的那条动画一律按
+   * `same-animation` 忽略 —— **即使 `interrupt: 'force'`**。
+   *
+   * 为什么必须这样（实测真 bug）：三段式动画"正在 loop 时被请求"会走
+   * "先播 end 再播这条请求"，于是"重复请求当前动画"就变成
+   * `end -> start -> end -> start ...` 的死循环 —— 画面上就是**end 一直在循环、
+   * 永远回不到 idle**（自愈链路 `playFallback()` 每次心跳都请求 idle，
+   * 正好是这种重复请求）。想重播请显式传 `restart: true`（目前没有业务需要）。
+   */
+  readonly restart?: boolean;
   /** 播完后是否回到 fallback 动画（默认 true）。 */
   readonly returnToFallback?: boolean;
   /**
@@ -313,6 +326,8 @@ export type PlayRejectionReason =
   | 'equal-priority'
   | 'not-interruptible'
   | 'same-animation'
+  /** 桌宠处于"收起（贴边）"状态：只允许它自己的默认姿势，其它自动来源一律拒绝。 */
+  | 'docked'
   | 'load-failed';
 
 /** 播放请求的裁决结果。 */

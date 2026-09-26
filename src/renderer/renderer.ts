@@ -286,6 +286,18 @@ class PetApplication {
       eventBus: this.eventBus,
       layers: this.layers,
       resolveAsset: (relative) => this.runtime.resolveAsset(relative),
+      /*
+       * 收起（贴边）时的"安静模式"：只允许她当前状态的默认姿势**与自己那个随机池**
+       * （需求：收起时只有 sleep / peek 一个随机动画）。正常状态返回 null（不限制）。
+       * 见 AnimationManagerOptions.getQuietPolicy —— 这是"end 一直循环"的根治点。
+       */
+      getQuietPolicy: () => {
+        const state = resolveDisplayState(this.displayState);
+        if (state === 'normal' || state === 'hidden') return null;
+        const fallback = defaultAnimationFor(this.behaviorConfig, state);
+        const poolAnimations = poolsFor(this.behaviorConfig, state).flatMap((pool) => [...pool.animations]);
+        return { allowed: [...new Set([...(fallback ? [fallback] : []), ...poolAnimations])] };
+      },
     });
 
     this.stateMachine = new StateMachine({
@@ -728,15 +740,20 @@ class PetApplication {
   /**
    * 播放当前显示状态的默认动画。
    *
-   * 两个播放参数是关键：
+   * 三个播放参数/守卫是关键：
    * - `loop: true`：一次性素材（idle）要一直循环；
    * - `loopCountRange: 'forever'`：**三段式**素材（watch / lie）也要一直循环，
-   *   只在离开这个状态时才播它的收尾段（需求："收起时点击先播 end 再播 idle"）。
-   *   同一个 lie 在随机池里则被池压成 [1,2] 轮，在触发路径上用定义里的 [2,4]。
+   *   只在离开这个状态时才播它的收尾段（需求："收起时点击先播 end 再播 idle"）；
+   * - **幂等**：已经在播这条默认动画就什么都不做。
+   *   这不是优化，而是**防死循环**：调用方（自愈链路、resumeFallbackLoop）
+   *   可能在很短的间隔里重复调用，而"重复请求正在播的三段式动画"会走
+   *   "loop 被打断 -> 先播 end" —— 那就是"end 一直循环、回不到 idle"。
+   *   （AnimationManager 里也对 `same-animation` 做了同样的硬规则，这里是第一道。）
    */
   private async playDisplayDefault(reason: string): Promise<void> {
     const animationId = this.defaultAnimationId();
     if (!animationId) return;
+    if (this.animationManager.getCurrentAnimation() === animationId) return;
     const isFallback = animationId === this.animationManager.getFallbackId();
     await this.animationManager.play(animationId, {
       interrupt: 'force',
@@ -811,8 +828,17 @@ class PetApplication {
     if (this.recoveryAttempts % 2 === 1) {
       this.layers.forceReloadActiveVideo();
     }
-    void this.animationManager
-      .playFallback({ reason: `self-heal-after:${reason}`, source: 'system' })
+    /*
+     * ⚠️ 修的是这条：自愈要回到**当前显示状态的默认动画**，不是硬编码 idle。
+     * 收起状态的默认是 watch / lie（三段式）—— 回 idle 会让
+     * `resumeFallbackLoop()` 再把默认动画接回来，形成
+     * `watch -> end -> idle -> watch -> end ...` 的循环（用户报告"end 一直循环"）。
+     * `playDisplayDefault()` 自身幂等，重复自愈也不会反复打断。
+     */
+    void this.playDisplayDefault(`self-heal-after:${reason}`)
+      .catch((error: unknown) => {
+        this.logger.warn('self-heal default play failed', { error: describeError(error) });
+      })
       .finally(() => {
         this.recovering = false;
       });
@@ -858,11 +884,14 @@ class PetApplication {
     if (this.recovering) return;
     this.recovering = true;
     this.recoveryAttempts += 1;
-    this.logger.warn('no active animation but a frozen frame is visible; resuming fallback', {
+    this.logger.warn('no active animation but a frozen frame is visible; resuming default', {
       data: { reason, attempt: this.recoveryAttempts, state: this.stateMachine.get() },
     });
-    void this.animationManager
-      .playFallback({ reason: `self-heal-stuck:${reason}`, source: 'system' })
+    // 同 checkVideoHealth：回到**当前显示状态的默认动画**（收起时是 watch/lie）
+    void this.playDisplayDefault(`self-heal-stuck:${reason}`)
+      .catch((error: unknown) => {
+        this.logger.warn('self-heal default play failed', { error: describeError(error) });
+      })
       .finally(() => {
         this.recovering = false;
       });

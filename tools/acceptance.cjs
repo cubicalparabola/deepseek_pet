@@ -995,21 +995,33 @@ app.whenReady().then(async () => {
     const anim = window.petDebug.anim;
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     const seen = [];
-    for (let i = 0; i < 5; i += 1) {
+    const rejected = [];
+    /*
+     * 采样 8 次而不是 5 次：范围 2~5 时"5 次全是同一个数"有约 0.4% 的概率纯属运气
+     * （实测踩到过一次，白红了一条断言），8 次全同约 0.002%。
+     * 同时把"被拒原因"带出来 —— 万一以后哪条规则（same-animation / docked…）
+     * 把它挡住，detail 里能一眼看出是"根本没播成"而不是"随机不好"。
+     */
+    for (let i = 0; i < 8; i += 1) {
       anim.stop('loop-probe');
+      anim.clearPendingAfterEnd();
+      anim.clearQueue();
       anim.resetCooldowns();
-      await anim.play('sad', { reason: 'loop-probe', source: 'system', interrupt: 'force' });
+      await wait(150);
+      const played = await anim.play('sad', { reason: 'loop-probe', source: 'system', interrupt: 'force' });
+      if (!played.accepted) rejected.push(played.reason ?? 'unknown');
       for (let k = 0; k < 40 && anim.getPersistentPhase() !== 'loop'; k += 1) await wait(100);
       seen.push(anim.getLoopTarget());
     }
     anim.stop('loop-probe');
-    return seen;
+    return { seen, rejected };
   })()`);
   record(
     '真机：每次播放的 loop 轮数都在 2~5 之间且不是常数',
-    Array.isArray(loopReal) &&
-      loopReal.every((value) => value >= 2 && value <= 5) &&
-      new Set(loopReal).size >= 2,
+    Array.isArray(loopReal?.seen) &&
+      loopReal.rejected.length === 0 &&
+      loopReal.seen.every((value) => value >= 2 && value <= 5) &&
+      new Set(loopReal.seen).size >= 2,
     JSON.stringify(loopReal),
   );
 

@@ -41,6 +41,24 @@ export interface AnimationManagerOptions {
   readonly layers: PetLayers;
   /** 把 assets 相对路径解析为可用 URL（由 preload 提供）。 */
   readonly resolveAsset: (relativePath: string) => string;
+  /**
+   * "安静模式"策略：桌宠处于**收起（贴边）**状态时允许演哪些动画。
+   *
+   * 返回 `null` = 没有限制（正常状态 / 隐藏）；否则只允许 `allowed` 里的 id，
+   * 其它自动来源（system / behavior / plugin / ai）的请求一律拒 `'docked'`。
+   * **用户明确点的**（`source: 'user'`）不受限。
+   *
+   * 为什么必须在这一层拦（实测真 bug）：收起状态的默认姿势是 watch / lie（三段式）。
+   * 只要有别的动画被请求（例如自愈链路硬编码回 idle、插件、AI），
+   * 就会 `watch -> end -> 别的动画`；而那条动画若自己循环（idle 就是），
+   * 她就停在"没收起的样子"，再被 `resumeFallbackLoop` 接回默认又是一次 end ——
+   * 表现就是**end 一直循环、回不到 idle**。
+   *
+   * `allowed` 里除了默认姿势，还必须包含**该状态自己的随机池**（下方收起 = sleep、
+   * 右侧收起 = peek）—— 需求要求"收起的随机动画只有一个、随机时间触发"，
+   * 那是收起状态的一部分，不能被这条规则挡掉。
+   */
+  readonly getQuietPolicy?: () => { readonly allowed: readonly string[] } | null;
 }
 
 interface ActivePlayback {
@@ -104,6 +122,7 @@ export class AnimationManager {
   private readonly eventBus: EventBus;
   private readonly layers: PetLayers;
   private readonly resolveAsset: (relativePath: string) => string;
+  private readonly getQuietPolicy: (() => { readonly allowed: readonly string[] } | null) | undefined;
 
   private readonly registry = new Map<string, ResolvedAnimation>();
   private active: ActivePlayback | null = null;
@@ -111,6 +130,15 @@ export class AnimationManager {
   private queue: QueuedRequest | null = null;
   /** "等持续动画收尾段播完再播"的挂起请求（见 requestAnimation 第 5 步）。 */
   private pendingAfterEnd: PendingRequest | null = null;
+  /**
+   * 收尾段抖动看门狗：`animationId -> 最近几次进入 end 段的时间戳`。
+   *
+   * 用途：三段式动画"进 end"本应是一次性的（离开这个状态时才播）。
+   * 如果同一条动画在短时间内反复进 end，说明有调用方在**重复请求**它 ——
+   * 那正是"end 一直循环、回不到 idle"的病根。这里做**熔断**：
+   * 触发阈值后不再延迟，直接让位给新请求，保证桌宠不会卡在收尾段里。
+   */
+  private readonly endEntries = new Map<string, number[]>();
 
   private tokenCounter = 0;
   /** 非循环动画的结束看门狗（ended 事件丢失时兜底）。 */
@@ -128,6 +156,7 @@ export class AnimationManager {
     this.eventBus = options.eventBus;
     this.layers = options.layers;
     this.resolveAsset = options.resolveAsset;
+    this.getQuietPolicy = options.getQuietPolicy;
     this.bindVideoEvents();
   }
 
@@ -269,9 +298,28 @@ export class AnimationManager {
     }
 
     // 2) 同一个动画正在播放 -> 忽略（避免重复触发把动画重置到第一帧）
-    if (current && current.animation.id === animationId && interrupt !== 'force') {
-      this.logger.debug('duplicate play request ignored', { data: { animationId } });
+    //
+    // ⚠️ 这条对 `force` 同样生效（除非显式 `restart: true`）。
+    // 原因是实测到的真 bug：三段式动画在 loop 段被"请求同一条动画"时会走
+    // "先播 end 再播这条请求"，于是重复请求 = `end -> start -> end -> ...`
+    // 死循环（用户报告"end 一直循环、回不到 idle"）。`force` 的语义是
+    // "允许抢占其它动画"，不是"允许把自己重播一遍"。
+    if (current && current.animation.id === animationId && (interrupt !== 'force' || options.restart !== true)) {
+      this.logger.debug('duplicate play request ignored', { data: { animationId, forced: interrupt === 'force' } });
       return { accepted: false, animationId, reason: 'same-animation' };
+    }
+
+    /*
+     * 2.5) 收起（贴边）状态的"安静模式"：只允许它自己的默认姿势。
+     *
+     * 用户明确点的（`source: 'user'`，例如托盘里手动挑一条动画）不受限；
+     * 自动来源（自愈 / 插件 / AI / 行为 / 系统）一律拒绝 —— 见
+     * `AnimationManagerOptions.getQuietDefault` 的注释（这就是"end 一直循环"的病根）。
+     */
+    const quiet = this.getQuietPolicy?.() ?? null;
+    if (quiet !== null && !quiet.allowed.includes(animationId) && (options.source ?? 'system') !== 'user') {
+      this.reject(animationId, 'docked', options, `收起状态只允许 ${quiet.allowed.join('/')}`);
+      return { accepted: false, animationId, reason: 'docked' };
     }
 
     // 3) 排队策略（排队不算"打断"，所以在硬锁判定之前）
@@ -326,7 +374,10 @@ export class AnimationManager {
     const interruptedId = current?.animation.id;
 
     if (current) {
-      if (current.persistentPhase === 'start' || current.persistentPhase === 'loop') {
+      if (
+        (current.persistentPhase === 'start' || current.persistentPhase === 'loop') &&
+        !this.isEndChurning(current.animation.id)
+      ) {
         this.pendingAfterEnd = {
           animationId: definition.id,
           options: { ...options, priority },
@@ -902,6 +953,52 @@ export class AnimationManager {
     this.loopEdgeFrame = null;
   }
 
+  /* ------------------------------------------------------------------ */
+  /* 收尾段抖动熔断                                                      */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * 收尾段抖动的判定窗口与阈值。
+   *
+   * ⚠️ 这是**最后一道保险**，阈值必须远高于任何真实交互：
+   * 用户连续点击 / 连续换动画时，持续动画每次都会"先播 end"，一分钟里出现几次
+   * 完全正常（实测：验收里 click-defer + 菜单切换 + 反复 toggle 一共 6~8 次 end）。
+   * 阈值定得太低会把正常交互的收尾段吃掉 —— 第一版定 3 次/60s，
+   * 直接把"点击持续动画先播 end"这条断言判红了。现在取 8 次/30 秒：
+   * 真实操作达不到，而真正的死循环（实测 12 次/9 秒）会在十几秒内被熔断。
+   */
+  private static readonly END_CHURN_WINDOW_MS = 30_000;
+  private static readonly END_CHURN_LIMIT = 8;
+
+  private noteEndEntry(animationId: string): void {
+    const now = Date.now();
+    const recent = (this.endEntries.get(animationId) ?? []).filter(
+      (at) => now - at < AnimationManager.END_CHURN_WINDOW_MS,
+    );
+    recent.push(now);
+    this.endEntries.set(animationId, recent);
+  }
+
+  /**
+   * 这条动画是不是正在"收尾段抖动"（短时间反复进 end）。
+   *
+   * 熔断行为：命中后**不再延迟**，直接结束当前播放并让新请求立刻开始 ——
+   * 宁可少播一次收尾，也不能让她卡在一串 end 里回不到 idle。
+   */
+  private isEndChurning(animationId: string): boolean {
+    const now = Date.now();
+    const recent = (this.endEntries.get(animationId) ?? []).filter(
+      (at) => now - at < AnimationManager.END_CHURN_WINDOW_MS,
+    );
+    const churning = recent.length >= AnimationManager.END_CHURN_LIMIT;
+    if (churning) {
+      this.logger.error('animation end segment is churning; bypassing the end-first rule', {
+        data: { animationId, entriesInWindow: recent.length, windowMs: AnimationManager.END_CHURN_WINDOW_MS },
+      });
+    }
+    return churning;
+  }
+
   /** 播放收尾段；播完即结束整个动画。 */
   private async playEnd(playback: ActivePlayback): Promise<void> {
     const active = this.active;
@@ -912,6 +1009,7 @@ export class AnimationManager {
       return;
     }
 
+    this.noteEndEntry(playback.animation.id);
     this.clearLoopEdgeWatch();
     playback.persistentPhase = 'end';
     // 进入收尾段即视为"结束请求已兑现"；此后若再被打断，由 endPersistent 立刻收干净
