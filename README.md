@@ -205,12 +205,15 @@ Manifest 在加载时会做校验：重复 ID、未知 `type`、非法 `source`�
 
 拖到屏幕**右边缘或下边缘** -> 收起：贴平边缘、默认动画换成 `watch`（右侧）/ `lie`（下方），
 随机池缩到只剩一个候选且间隔更长。**拖动离开边缘**或**点一下她**即展开
-（点击展开会回到最近一次"好好待在桌面上"的位置）。
+（展开是**就地站立**：播完收尾段直接留在边缘，位置一动不动）。
 托盘/右键的「收起（贴边）」与「隐藏桌宠」是两个不同的状态：
 前者仍在屏幕上、仍可交互，后者窗口直接藏起来（情绪衰减也按"看不到主人"算）。
 
+收起/隐藏还是**安静模式**：她不自发开口（不冒泡、感知干预整条不发生），
+用户主动要她说话时先就地展开再开口。
+
 判定与几何全是纯函数（`src/shared/dock.ts`）：`petRectIn` / `evaluateDock` /
-`dockTargetPosition` / `shouldUndock` / `nudgeInward` —— 阈值 24px 触发、
+`dockTargetPosition` / `shouldUndock` —— 阈值 8px 触发（必须推到最边上）、
 拖离 56px 展开（刻意做成两个不同的数，否则会在边缘反复抖动）。
 
 ### 4.3 优先级与打断规则（由核心统一裁决）
@@ -952,7 +955,7 @@ npm run acceptance          # 等价于 electron tools/acceptance.cjs
 | `probe-dock-range.cjs` | 收起的触发范围：必须推到最边上（8px 内）才收；离边 20px 松手不再收起 |
 | `probe-dock-transition.cjs` | 收起稳态与离开收起的过渡（不反复播 end、点击/拖离都先播 end 再回 idle） |
 | `probe-end-loop.cjs` | 「end 一直循环回不到 idle」的回归：自愈路径不会把 end 播成循环 |
-| `probe-end-and-offset.cjs` | 播 end 期间窗口不动 + watch 渲染偏移（并出对照图 `build/watch-offset-*.png`） |
+| `probe-end-and-offset.cjs` | 展开就地站立（从点击到回 idle 位置一次都不变）+ watch 渲染偏移（并出对照图 `build/watch-offset-*.png`） |
 | `probe-catch-cooldown.cjs` | 鼠标靠近的冷却：真光标（`SetCursorPos`）四次靠近只接住一次，60 秒后才有第二次 |
 | `probe-quiet-when-docked.cjs` | 收起/隐藏 = 安静模式：屏幕边上不冒泡、回复只进聊天窗口、用户点「让她说句话」先展开再开口、自动开口整条不发生 |
 | `probe-offline-overheat.cjs` | 断网与 GPU 过热：真 `nvidia-smi` 温度 + 真连不上的地址 -> `offline:network` |
