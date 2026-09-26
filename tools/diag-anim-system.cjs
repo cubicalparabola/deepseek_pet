@@ -252,7 +252,7 @@ app.whenReady().then(async () => {
     for (let i = 0; i < 60; i += 1) {
       await wait(200);
       animAfterBottom = window.petDebug.anim.getCurrentAnimation();
-      if (animAfterBottom === 'lie') break;
+      if (animAfterBottom === 'sleep') break;
     }
     return {
       free0,
@@ -268,7 +268,7 @@ app.whenReady().then(async () => {
     };
   })()`);
   step(
-    '拖到右下角 -> 右侧收起并演 watch；拖到下边缘 -> 下方收起并演 lie；拖离边缘 -> 自动展开回 idle',
+    '拖到右下角 -> 右侧收起并演 watch；拖到下边缘 -> 下方收起并演 sleep；拖离边缘 -> 自动展开回 idle',
     docking,
     docking.free0 === 'free' &&
       docking.rightDock === 'right' &&
@@ -276,7 +276,7 @@ app.whenReady().then(async () => {
       docking.freeDock === 'free' &&
       docking.animAfterFree === 'idle' &&
       docking.bottomDock === 'bottom' &&
-      docking.animAfterBottom === 'lie',
+      docking.animAfterBottom === 'sleep',
   );
 
   /* 7) 收起时点一下 -> 先播 end 再播 idle（不插点击反应） */
@@ -360,11 +360,11 @@ app.whenReady().then(async () => {
   );
 
   /*
-   * 下方收起同理（默认动画是 lie）。
+   * 下方收起同理（默认动画是 **sleep**：躺下睡觉）。
    *
-   * `lie` 现在是**三段式**：start = sleep-start（从站到趴下）、
-   * loop = lie（趴着的姿势）、end = sleep-end（从趴到站起来）——
-   * 所以下方收起离开时同样"先播 end 再回 idle"（需求）。
+   * `sleep` 是三段式：start = sleep-start（从站到躺下）、loop = sleep-loop（睡着）、
+   * end = sleep-end（醒来站起）—— 所以下方收起离开时同样"先播 end 再回 idle"（需求）。
+   * 它自己的随机动画是 `lie`（趴一会儿），由 behavior.json 的池配置决定。
    */
   const undockBottom = await run(`(async () => {
     const api = window.petAPI;
@@ -394,7 +394,7 @@ app.whenReady().then(async () => {
     await wait(1500);
     const beforeClick = anim.getCurrentAnimation();
     const phaseBeforeClick = anim.getPersistentPhase();
-    const segments = anim.getDefinition('lie').segments || {};
+    const segments = anim.getDefinition('sleep').segments || {};
     const saw = new Set();
     let sawEndPhase = false;
     window.petDebug.click('head', 0.5, 0.4);
@@ -404,14 +404,14 @@ app.whenReady().then(async () => {
       await wait(60);
       const current = anim.getCurrentAnimation();
       if (current !== null) saw.add(current);
-      if (anim.getPersistentPhase() === 'end' && current === 'lie') sawEndPhase = true;
+      if (anim.getPersistentPhase() === 'end' && current === 'sleep') sawEndPhase = true;
       if (current === 'idle') { afterClick = Date.now() - t0; break; }
     }
     return {
       docked,
       beforeClick,
       phaseBeforeClick,
-      lieHasStartEnd: Boolean(segments.start) && Boolean(segments.end),
+      sleepHasStartEnd: Boolean(segments.start) && Boolean(segments.end),
       sawEndPhase,
       afterClickMs: afterClick,
       finalAnimation: anim.getCurrentAnimation(),
@@ -420,15 +420,15 @@ app.whenReady().then(async () => {
     };
   })()`);
   step(
-    '下方收起点一下：同样先播 end（lie 拿 sleep-end 当收尾）→ 再回 idle',
+    '下方收起点一下：同样先播 end（sleep 的收尾 = 醒来站起）→ 再回 idle',
     undockBottom,
     undockBottom.docked === 'bottom' &&
-      undockBottom.beforeClick === 'lie' &&
-      undockBottom.lieHasStartEnd === true &&
+      undockBottom.beforeClick === 'sleep' &&
+      undockBottom.sleepHasStartEnd === true &&
       undockBottom.sawEndPhase === true &&
       typeof undockBottom.afterClickMs === 'number' &&
       undockBottom.finalAnimation === 'idle' &&
-      undockBottom.sequence.every((id) => id === 'lie' || id === 'idle') &&
+      undockBottom.sequence.every((id) => id === 'sleep' || id === 'idle') &&
       undockBottom.stateAfterClick === 'free',
   );
 
@@ -499,7 +499,7 @@ app.whenReady().then(async () => {
       dockedPool.animations.length === 1 &&
       dockedPool.interval[0] === 180000 &&
       dockedPool.interval[1] === 480000 &&
-      pools.config['docked-bottom'].defaultAnimation === 'lie' &&
+      pools.config['docked-bottom'].defaultAnimation === 'sleep' &&
       pools.config['docked-right'].defaultAnimation === 'watch',
   );
 

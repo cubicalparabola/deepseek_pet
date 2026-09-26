@@ -364,33 +364,6 @@
       "className": "anim-watch"
     }
   },
-  "lie": {
-    "type": "video",
-    "source": "animations/sleep-start.webm",
-    "loop": false,
-    "priority": 10,
-    "interruptible": true,
-    "cooldown": 0,
-    "category": "state",
-    "kind": "persistent",
-    "segments": {
-      "start": "animations/sleep-start.webm",
-      "loop": "animations/lie.webm",
-      "end": "animations/sleep-end.webm",
-      "loopCountRange": [
-        2,
-        4
-      ]
-    },
-    "label": "趴下",
-    "tags": [
-      "state",
-      "rest"
-    ],
-    "render": {
-      "className": "anim-lie"
-    }
-  },
   "sleep": {
     "type": "video",
     "source": "animations/sleep-start.webm",
@@ -398,7 +371,7 @@
     "priority": 10,
     "interruptible": true,
     "cooldown": 0,
-    "category": "random",
+    "category": "state",
     "kind": "persistent",
     "segments": {
       "start": "animations/sleep-start.webm",
@@ -411,11 +384,38 @@
     },
     "label": "睡觉",
     "tags": [
-      "random",
+      "state",
       "rest"
     ],
     "render": {
       "className": "anim-sleep"
+    }
+  },
+  "lie": {
+    "type": "video",
+    "source": "animations/sleep-start.webm",
+    "loop": false,
+    "priority": 10,
+    "interruptible": true,
+    "cooldown": 0,
+    "category": "random",
+    "kind": "persistent",
+    "segments": {
+      "start": "animations/sleep-start.webm",
+      "loop": "animations/lie.webm",
+      "end": "animations/sleep-end.webm",
+      "loopCountRange": [
+        2,
+        4
+      ]
+    },
+    "label": "趴下",
+    "tags": [
+      "random",
+      "rest"
+    ],
+    "render": {
+      "className": "anim-lie"
     }
   },
   "sad": {

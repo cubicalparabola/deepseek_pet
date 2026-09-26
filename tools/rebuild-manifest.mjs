@@ -73,20 +73,27 @@ const PERSISTENT = [
   // 只在离开收起状态（或被打断）时才播收尾 —— 所以这里显式写 null
   { id: 'watch', label: '看着你', category: 'state', priority: 15, loopCountRange: null, tags: ['state', 'idle'] },
   /*
-   * lie 是"下方收起"的默认姿势，但它是**三段式**（需求：收起时点击要先播 end 再播 idle）：
-   *   start = sleep-start（从站到趴下）
-   *   loop  = lie（趴着的姿势循环）
-   *   end   = sleep-end（从趴到站起来）
-   * 默认轮数 [2,4]：被触发时（"主人不在呀"演一次）趴一会儿就自己起来；
-   * 作为"收起的默认姿势"时渲染层会传 `loopCountRange: 'forever'` 覆盖成无限，
-   * 作为正常状态的随机动画时池会传 [1,2] 压短（见 behavior.json）。
+   * sleep 是"下方收起"的默认姿势（用户要求与 lie 对调角色）。
+   * 它本来就是三段式，动作正好连贯：
+   *   start = sleep-start（从站到躺下、闭眼）
+   *   loop  = sleep-loop（睡觉）
+   *   end   = sleep-end（醒来站起来）
+   * 作为"收起的默认姿势"时渲染层会传 `loopCountRange: 'forever'` 覆盖成无限；
+   * 作为触发（深夜劝睡）时用定义里的默认轮数 [2,5] 自己结束。
+   */
+  { id: 'sleep', label: '睡觉', category: 'state', priority: 10, tags: ['state', 'rest'] },
+  /*
+   * lie 现在的角色是"下方收起的**随机**动画"（用户要求与 sleep 对调），
+   * 同时也在正常状态的随机池里。它同样是三段式，首尾复用 sleep 的躺下/起身：
+   *   start = sleep-start、loop = lie（趴着的姿势）、end = sleep-end
+   * 默认轮数 [2,4]：被触发时（"主人不在呀"演一次）趴一会儿自己起来；
+   * 池里会传 [1,2] 压短（见 behavior.json）。
    */
   {
-    id: 'lie', label: '趴下', category: 'state', priority: 10,
+    id: 'lie', label: '趴下', category: 'random', priority: 10,
     segments: { start: 'animations/sleep-start.webm', loop: 'animations/lie.webm', end: 'animations/sleep-end.webm' },
-    loopCountRange: [2, 4], tags: ['state', 'rest'],
+    loopCountRange: [2, 4], tags: ['random', 'rest'],
   },
-  { id: 'sleep', label: '睡觉', category: 'random', priority: 10, tags: ['random', 'rest'] },
   { id: 'sad', label: '难过', category: 'trigger', priority: 45, tags: ['trigger', 'mood'] },
   { id: 'overheat', label: '过热', category: 'trigger', priority: 40, tags: ['trigger', 'state'] },
   { id: 'read', label: '看书', category: 'trigger', priority: 20, tags: ['trigger', 'routine'] },
@@ -149,7 +156,7 @@ const behavior = {
   version: 1,
   states: {
     normal: { label: '正常', defaultAnimation: 'idle', pools: ['normal-random'] },
-    'docked-bottom': { label: '下方收起', defaultAnimation: 'lie', pools: ['docked-bottom-random'] },
+    'docked-bottom': { label: '下方收起', defaultAnimation: 'sleep', pools: ['docked-bottom-random'] },
     'docked-right': { label: '右侧收起', defaultAnimation: 'watch', pools: ['docked-right-random'] },
     hidden: { label: '隐藏', defaultAnimation: null, pools: [] },
   },
@@ -165,11 +172,13 @@ const behavior = {
       onlyWhenIdle: true,
     },
     'docked-bottom-random': {
-      label: '收起时打个盹',
-      animations: ['sleep'],
+      // 下方收起的随机动画是 **lie**（用户要求与 sleep 对调角色）
+      label: '收起时趴一会儿',
+      animations: ['lie'],
       intervalMs: [180000, 480000],
       initialDelayMs: 60000,
       cooldownMs: 30000,
+      persistentLoopCountRange: [1, 2],
       onlyWhenIdle: true,
     },
     'docked-right-random': {

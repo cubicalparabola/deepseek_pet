@@ -957,9 +957,9 @@ app.whenReady().then(async () => {
   record(
     '动画四分类（状态/随机/触发/点击）与需求清单一致',
     animCatalog.total === 27 &&
-      JSON.stringify(animCatalog.byCategory.state) === JSON.stringify(['idle', 'lie', 'watch']) &&
+      JSON.stringify(animCatalog.byCategory.state) === JSON.stringify(['idle', 'sleep', 'watch']) &&
       JSON.stringify(animCatalog.byCategory.random) ===
-        JSON.stringify(['bomb', 'hot', 'peek', 'play', 'roll', 'shake', 'sing', 'sleep', 'spin', 'swim']) &&
+        JSON.stringify(['bomb', 'hot', 'lie', 'peek', 'play', 'roll', 'shake', 'sing', 'spin', 'swim']) &&
       JSON.stringify(animCatalog.byCategory.trigger) ===
         JSON.stringify(['catch_down', 'catch_right', 'hungry', 'offline', 'overheat', 'read', 'remind', 'sad', 'shy', 'talk', 'work']) &&
       JSON.stringify(animCatalog.byCategory.click) === JSON.stringify(['cute', 'fawning', 'stroke']),
@@ -1202,15 +1202,15 @@ app.whenReady().then(async () => {
     };
   })()`);
   record(
-    '显示状态 -> 默认动画（idle/lie/watch/无）与随机池（正常 9 个 25~60s；收起 1 个 3~8min）',
+    '显示状态 -> 默认动画（idle/sleep/watch/无）与随机池（正常 9 个 25~60s；收起 1 个 3~8min）',
     poolModel.normalDefault === 'idle' &&
-      poolModel.bottomDefault === 'lie' &&
+      poolModel.bottomDefault === 'sleep' &&
       poolModel.rightDefault === 'watch' &&
       poolModel.hiddenDefault === null &&
       poolModel.normalPools.length === 1 &&
       poolModel.normalPools[0].animations.length === 9 &&
       JSON.stringify(poolModel.normalPools[0].interval) === JSON.stringify([25000, 60000]) &&
-      poolModel.bottomPools[0].animations.join() === 'sleep' &&
+      poolModel.bottomPools[0].animations.join() === 'lie' &&
       poolModel.rightPools[0].animations.join() === 'peek' &&
       JSON.stringify(poolModel.bottomPools[0].interval) === JSON.stringify([180000, 480000]) &&
       poolModel.hiddenPools.length === 0 &&

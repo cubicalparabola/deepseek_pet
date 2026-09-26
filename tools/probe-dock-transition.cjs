@@ -156,8 +156,8 @@ app.whenReady().then(async () => {
     dragPlaysEndBeforeIdle:
       countEnd(result.dragUndock) === 1 &&
       result.dragUndock.some((s) => s.frame.startsWith('idle|')),
-    // 下方收起：lie 没有 end 段（当前实现 = 交叉淡化直接回 idle）
-    bottomSteadyIsLie: result.steadyBottom.some((s) => s.frame.includes('lie.webm')),
+    // 下方收起的默认姿势现在是 **sleep**（躺下睡觉）：稳态应看到 sleep-loop
+    bottomSteadyIsSleep: result.steadyBottom.some((s) => s.frame.includes('sleep-loop.webm')),
     bottomPlaysEnd: countEnd(result.clickUndockBottom) > 0,
     // 真实拖拽到右边缘后：稳态不该反复播 end
     realDragSteadyNoEnd: countEnd(result.realDragSteady) === 0,

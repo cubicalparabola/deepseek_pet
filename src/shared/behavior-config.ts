@@ -10,7 +10,7 @@
  * {
  *   "states": {
  *     "normal": { "defaultAnimation": "idle", "pools": ["normal-random"] },
- *     "docked-bottom": { "defaultAnimation": "lie", "pools": ["docked-bottom-random"] },
+ *     "docked-bottom": { "defaultAnimation": "sleep", "pools": ["docked-bottom-random"] },
  *     ...
  *   },
  *   "pools": {
@@ -32,7 +32,7 @@ import type { AnimationCategory } from './animation-types';
  * 显示状态 id。
  *
  * - `normal`        正常：站在桌面上，兜底动画是 idle
- * - `docked-bottom` 下方收起：贴屏幕下边缘，兜底坐/趴（lie）
+ * - `docked-bottom` 下方收起：贴屏幕下边缘，兜底躺下睡觉（sleep）
  * - `docked-right`  右侧收起：贴屏幕右边缘，兜底偷看（watch）
  * - `hidden`        隐藏：完全不显示
  *
@@ -89,7 +89,7 @@ export interface BehaviorPool {
    * 池里的**三段式**动画每次播几轮（一/两轮就收尾）。
    *
    * 为什么池要管这件事：同一个三段式动画在别处可能有别的用法 ——
-   * `lie` 作为"下方收起"的默认姿势要永远循环，而作为正常状态的随机动画
+   * `sleep` 作为"下方收起"的默认姿势要永远循环，而 `lie` 作为随机动画
    * 只该趴一会儿就自己爬起来。定义里写不下两种意图，所以由**播放参数**决定
    * （见 `PlayOptions.loopCountRange`）。一次性动画忽略这个字段。
    */
@@ -131,7 +131,8 @@ export const DEFAULT_BEHAVIOR_CONFIG: BehaviorConfig = {
   version: 1,
   states: {
     normal: { id: 'normal', defaultAnimation: 'idle', pools: ['normal-random'], label: '正常' },
-    'docked-bottom': { id: 'docked-bottom', defaultAnimation: 'lie', pools: ['docked-bottom-random'], label: '下方收起' },
+    // 下方收起的默认姿势是 sleep（躺下睡觉），随机动画是 lie（趴一会儿）
+    'docked-bottom': { id: 'docked-bottom', defaultAnimation: 'sleep', pools: ['docked-bottom-random'], label: '下方收起' },
     'docked-right': { id: 'docked-right', defaultAnimation: 'watch', pools: ['docked-right-random'], label: '右侧收起' },
     hidden: { id: 'hidden', defaultAnimation: null, pools: [], label: '隐藏' },
   },
@@ -149,12 +150,14 @@ export const DEFAULT_BEHAVIOR_CONFIG: BehaviorConfig = {
     },
     'docked-bottom-random': {
       id: 'docked-bottom-random',
-      animations: ['sleep'],
+      // 下方收起的随机动画是 **lie**（与默认姿势 sleep 对调）
+      animations: ['lie'],
       intervalMs: DOCKED_RANDOM_INTERVAL_MS,
       initialDelayMs: 60_000,
       cooldownMs: 30_000,
+      persistentLoopCountRange: [1, 2],
       onlyWhenIdle: true,
-      label: '收起时打个盹',
+      label: '收起时趴一会儿',
     },
     'docked-right-random': {
       id: 'docked-right-random',

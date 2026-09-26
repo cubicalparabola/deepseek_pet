@@ -10,7 +10,7 @@
     },
     "docked-bottom": {
       "label": "下方收起",
-      "defaultAnimation": "lie",
+      "defaultAnimation": "sleep",
       "pools": [
         "docked-bottom-random"
       ]
@@ -55,9 +55,9 @@
       "onlyWhenIdle": true
     },
     "docked-bottom-random": {
-      "label": "收起时打个盹",
+      "label": "收起时趴一会儿",
       "animations": [
-        "sleep"
+        "lie"
       ],
       "intervalMs": [
         180000,
@@ -65,6 +65,10 @@
       ],
       "initialDelayMs": 60000,
       "cooldownMs": 30000,
+      "persistentLoopCountRange": [
+        1,
+        2
+      ],
       "onlyWhenIdle": true
     },
     "docked-right-random": {
