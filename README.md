@@ -27,7 +27,7 @@ npm run verify:alpha    # 逐条核验素材是否真的带 alpha（在 Chromium
 npm run verify:visual   # 验证运行时画面边缘是否真正透明
 npm run verify:console  # 核验日志字节层（UTF-8 合法且可逐字还原）
 npm run logs           # 实时查看日志（推荐；中文必定正常，见 §17）
-npm run acceptance      # 端到端验收（241 项检查）
+npm run acceptance      # 端到端验收（274 项检查）
 npm run pack            # electron-builder 打包成未安装目录（快速验证）
 npm run dist            # electron-builder 生成 Windows NSIS 安装包
 ```
@@ -891,7 +891,7 @@ npm run build
 npm run acceptance          # 等价于 electron tools/acceptance.cjs
 ```
 
-结果写入 `build/acceptance.json`，当前覆盖 **241 项检查，全部通过**：
+结果写入 `build/acceptance.json`，当前覆盖 **274 项检查，全部通过**：
 
 | 分组 | 覆盖内容 |
 | --- | --- |
@@ -944,6 +944,21 @@ npm run acceptance          # 等价于 electron tools/acceptance.cjs
 | `generate-assets.mjs` | 生成**兜底占位**图标（真实图标存在时自动跳过） |
 | `smoke.cjs` | Electron 最小启动冒烟测试 |
 | `acceptance.cjs` | 端到端验收 |
+
+**行为 / 触发的真机探针**（都真启动桌宠，把结论写进 `build/*.json`，可重跑）：
+
+| 脚本 | 验证什么 |
+| --- | --- |
+| `probe-dock-range.cjs` | 收起的触发范围：必须推到最边上（8px 内）才收；离边 20px 松手不再收起 |
+| `probe-dock-transition.cjs` | 收起稳态与离开收起的过渡（不反复播 end、点击/拖离都先播 end 再回 idle） |
+| `probe-end-loop.cjs` | 「end 一直循环回不到 idle」的回归：自愈路径不会把 end 播成循环 |
+| `probe-end-and-offset.cjs` | 播 end 期间窗口不动 + watch 渲染偏移（并出对照图 `build/watch-offset-*.png`） |
+| `probe-catch-cooldown.cjs` | 鼠标靠近的冷却：真光标（`SetCursorPos`）四次靠近只接住一次，60 秒后才有第二次 |
+| `probe-offline-overheat.cjs` | 断网与 GPU 过热：真 `nvidia-smi` 温度 + 真连不上的地址 -> `offline:network` |
+| `probe-sad-hungry.cjs` | 心情低与饿：真情绪状态（mood 18 / 预算用光）-> 真的演 sad 与 hungry |
+| `probe-triggers.cjs` | 没配密钥时启动就该演一次 offline，且正常心情/饿不会误触发 |
+| `diag-anim-system.cjs` | 动画系统 10 步诊断（分类、随机轮数、池、贴边、点击锁） |
+| `diag-perception-ui.cjs` | 感知面板 11 步诊断（开关、授权、日志、过热阈值、保留期落盘） |
 
 `verify-visual.cjs` 会在**真实运行中的桌宠**里检查 alpha 分布并把结果写到 `build/visual.json`
 （示例输出见第 4.5 节），是「桌宠真的透明、没有黑方块」的硬证据。
