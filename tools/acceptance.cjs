@@ -728,7 +728,14 @@ app.whenReady().then(async () => {
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
     anim.resetCooldowns();
-    // watch 是无限循环（loopCount 未配），正好用来测"只能被打断结束"
+    /*
+     * 先 stop 一次再 play：同一动画的 play() 现在受"same-animation 硬规则"约束
+     * （force 也不重启），如果上一条用例把它留在了 end 阶段，这里的 play 会是空操作，
+     * 后面就完全抓不到 end 阶段了（实测偶发：atEnd.phase 变成 null）。
+     * watch 是无限循环（loopCount 未配），正好用来测"只能被打断结束"
+     */
+    anim.stop('acceptance-interrupt-reset');
+    await wait(150);
     await anim.play('watch', { interrupt: 'force', reason: 'persistent-interrupt-test' });
     for (let i = 0; i < 40 && anim.getPersistentPhase() !== 'loop'; i++) await wait(100);
     const phaseBefore = anim.getPersistentPhase();
@@ -779,6 +786,9 @@ app.whenReady().then(async () => {
     anim.resetCooldowns();
     const endEvents = [];
     const sub = bus.on('animation:end', (p) => endEvents.push({ id: p.animationId, completed: p.completed, reason: p.reason }));
+    // 同上：先 stop 清干净，免得同动画的 play() 被 same-animation 硬规则变成空操作
+    anim.stop('end-interrupt-reset');
+    await wait(150);
     await anim.play('watch', { interrupt: 'force', reason: 'end-interrupt-setup' });
     for (let i = 0; i < 40 && anim.getPersistentPhase() !== 'loop'; i++) await wait(100);
     anim.endPersistent('end-interrupt-step1');           // 立刻进 end
@@ -2740,7 +2750,13 @@ app.whenReady().then(async () => {
     anim.stop('test-reset');
     await new Promise((r) => setTimeout(r, 150));
     const before = sm.get();
-    await anim.play('read', { priority: 30, interrupt: 'force', reason: 'ended-test' });
+    /*
+     * read 是三段式，轮数本来是随机的 [2,5]：start 1.63s + loop 1.75s×N + end 4.38s，
+     * 最坏情况 ≈14.8s —— 和下面 15s 的超时只差一点点，实测偶发超时（后面两条
+     * 断言跟着一起红）。这里显式钉成 1 轮，把"到底几轮"这个随机因素去掉：
+     * 本用例要验的是"非循环动画会发 animation:end"，与轮数无关。
+     */
+    await anim.play('read', { priority: 30, interrupt: 'force', reason: 'ended-test', loopCountRange: [1, 1] });
     const during = sm.get();
     // 只等 read 自己的结束事件：
     // 被抢占的旧动画（idle）也会发出 completed:false 的 animation:end，
