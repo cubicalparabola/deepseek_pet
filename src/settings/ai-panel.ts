@@ -28,6 +28,8 @@ import type {
   PetPresence,
 } from '../shared/ai-types';
 import { hungerLabel, moodLabel } from '../shared/emotion';
+import { formatBalance } from '../shared/balance';
+
 import type { AIAPI } from '../shared/ipc';
 
 /* -------------------------------------------------------------------------- */
@@ -398,6 +400,47 @@ export function mountAIPanel(root: HTMLElement, api: AIAPI, initial: AIStatusVie
   const budgetReset = makeButton('ai-budget-reset', '重置用量', 'ghost');
   budgetSection.appendChild(actionRow(budgetSave, budgetReset));
 
+  /*
+   * 余额（DeepSeek 官方唯一的"额度"接口：`GET /user/balance`）。
+   *
+   * 为什么要它：本地累计 token 只统计这台机器上我们发出去的请求，
+   * 而"账号还剩多少钱"才是真正的额度。需求要求**余额优先于本地预算**决定"饿"，
+   * 余额不足 / key 无效还会让她演 offline —— 所以这块既是展示也是配置。
+   */
+  const balanceSection = makeSection('余额（DeepSeek）');
+  const balanceEnabled = makeCheckbox('ai-balance-enabled', '定期查询余额');
+  const balanceEnabledRow = checkRow('定期查询余额（仅 DeepSeek 官方地址可用）', balanceEnabled);
+  const balanceIntervalInput = makeInput('number', 'ai-balance-interval-min', '查询间隔（分钟）');
+  balanceIntervalInput.min = '1';
+  balanceIntervalInput.max = '1440';
+  balanceIntervalInput.step = '5';
+  const balanceLowInput = makeInput('number', 'ai-balance-low', '见底阈值');
+  balanceLowInput.min = '0';
+  balanceLowInput.step = '1';
+  const balanceFullInput = makeInput('number', 'ai-balance-full', '充足阈值');
+  balanceFullInput.min = '0';
+  balanceFullInput.step = '1';
+
+  balanceSection.append(
+    balanceEnabledRow,
+    fieldRow('ai-balance-interval-min', '查询间隔（分钟）', balanceIntervalInput, '默认 30 分钟；启动时会先查一次。'),
+    fieldRow('ai-balance-low', '余额见底（元）', balanceLowInput, '余额低于这个数 = 很饿（hunger 100）。'),
+    fieldRow('ai-balance-full', '余额充足（元）', balanceFullInput, '余额高于这个数 = 不饿（hunger 0）；中间线性过渡。'),
+  );
+
+  const balanceReadout = makeReadout('余额');
+  const balanceFetchedReadout = makeReadout('上次查询');
+  const balanceSourceReadout = makeReadout('"饿"的来源');
+  // 给读数加 id：自动化诊断要能直接读到"查到了什么/错误是什么"（与 ai-mood-value 同一个理由）
+  balanceReadout.value.id = 'ai-balance-readout';
+  balanceFetchedReadout.value.id = 'ai-balance-fetched';
+  balanceSourceReadout.value.id = 'ai-balance-source';
+  balanceSection.append(balanceReadout.row, balanceFetchedReadout.row, balanceSourceReadout.row);
+
+  const balanceSave = makeButton('ai-balance-save', '保存余额设置', 'primary');
+  const balanceRefresh = makeButton('ai-balance-refresh', '立即查询余额', 'ghost');
+  balanceSection.appendChild(actionRow(balanceSave, balanceRefresh));
+
   /* ------------------------------------------------------------------------ */
   /* 六、情绪（2.3）                                                            */
   /* ------------------------------------------------------------------------ */
@@ -472,7 +515,7 @@ export function mountAIPanel(root: HTMLElement, api: AIAPI, initial: AIStatusVie
     memoryChat,
   );
 
-  panel.append(overview, switches, providerSection, personaSection, budgetSection, emotionSection, diarySection, memorySection);
+  panel.append(overview, switches, providerSection, personaSection, budgetSection, balanceSection, emotionSection, diarySection, memorySection);
 
   /* ------------------------------------------------------------------------ */
   /* 面板级提示                                                                 */
@@ -648,6 +691,7 @@ export function mountAIPanel(root: HTMLElement, api: AIAPI, initial: AIStatusVie
     dataDirReadout.value.textContent = status.dataDir === '' ? '（未知）' : status.dataDir;
 
     renderEmotion(status);
+    renderBalance(status);
     renderBudget(status);
   }
 
@@ -655,7 +699,7 @@ export function mountAIPanel(root: HTMLElement, api: AIAPI, initial: AIStatusVie
   /* 输入框回填                                                                 */
   /* ------------------------------------------------------------------------ */
 
-  type SyncScope = 'switches' | 'provider' | 'persona' | 'budget';
+  type SyncScope = 'switches' | 'provider' | 'persona' | 'budget' | 'balance';
 
   /**
    * 把主进程回传的值写回输入框。
@@ -710,7 +754,39 @@ export function mountAIPanel(root: HTMLElement, api: AIAPI, initial: AIStatusVie
       return;
     }
 
+    if (scope === 'balance') {
+      setChecked(balanceEnabled, settings.balance.enabled);
+      // 面板用"分钟"，配置存毫秒（用户填 30 比填 1800000 自然）
+      setValue(balanceIntervalInput, String(Math.round(settings.balance.intervalMs / 60000)));
+      setValue(balanceLowInput, String(settings.balance.lowBalance));
+      setValue(balanceFullInput, String(settings.balance.fullBalance));
+      return;
+    }
+
     setValue(budgetInput, String(settings.budget.budget));
+  }
+
+  /**
+   * 渲染余额读数。
+   *
+   * 三行分别回答：还剩多少、什么时候查的、现在的"饿"是从哪来的 ——
+   * 最后一行是关键：余额查不到时会退回本地累计 token，
+   * 不说清楚的话用户会奇怪"为什么余额显示不出来却还说自己饿"。
+   */
+  function renderBalance(status: AIStatusView): void {
+    const balance = status.balance;
+    if (balance === null) {
+      balanceReadout.value.textContent = status.balanceError === ''
+        ? '还没查询过（点下面的「立即查询余额」）'
+        : `查不到：${status.balanceError}`;
+      balanceFetchedReadout.value.textContent = '—';
+    } else {
+      balanceReadout.value.textContent = formatBalance(balance);
+      balanceFetchedReadout.value.textContent = formatTime(balance.fetchedAt);
+    }
+    balanceSourceReadout.value.textContent = balance === null
+      ? '本地累计 token（余额不可用时的兜底）'
+      : `余额（${balance.currency}）优先`;
   }
 
   /* ------------------------------------------------------------------------ */
@@ -980,6 +1056,43 @@ export function mountAIPanel(root: HTMLElement, api: AIAPI, initial: AIStatusVie
     withBusy(emotionReset, async () => {
       renderStatus(await api.resetEmotion());
       flashNote('情绪已重置');
+    });
+  });
+
+  /* 余额设置：分钟 -> 毫秒；两个阈值必须满足 见底 <= 充足 */
+  balanceSave.addEventListener('click', () => {
+    savePatch(balanceSave, 'balance', () => {
+      const minutes = numberValue(balanceIntervalInput);
+      const low = numberValue(balanceLowInput);
+      const full = numberValue(balanceFullInput);
+      if (minutes === null || minutes < 1) {
+        setPanelError('查询间隔必须是不小于 1 的数字（分钟）。');
+        return null;
+      }
+      if (low === null || full === null || low < 0 || full < 0) {
+        setPanelError('两个余额阈值都必须是不小于 0 的数字。');
+        return null;
+      }
+      if (low > full) {
+        setPanelError('「余额见底」不能大于「余额充足」—— 否则会变成越有钱越饿。');
+        return null;
+      }
+      return {
+        balance: {
+          enabled: balanceEnabled.checked,
+          intervalMs: Math.round(minutes * 60000),
+          lowBalance: low,
+          fullBalance: full,
+        },
+      };
+    });
+  });
+
+  balanceRefresh.addEventListener('click', () => {
+    withBusy(balanceRefresh, async () => {
+      const status = await api.refreshBalance();
+      renderStatus(status);
+      flashNote(status.balance === null ? '没查到余额（原因见上方）' : '余额已更新');
     });
   });
 

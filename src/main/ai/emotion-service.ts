@@ -56,6 +56,14 @@ export class EmotionService {
   private timer: NodeJS.Timeout | null = null;
   /** 上次心情采样时间（节流用）。 */
   private lastSampleAt = 0;
+  /**
+   * 余额推出的饥饿度（0~100）；`null` = 没有余额信息，退回本地累计 token。
+   *
+   * 为什么要这个覆盖：需求明确"余额优先于本地预算" ——
+   * 本地累计 token 只统计这台机器上我们发出去的请求，
+   * 而余额才是"账号还剩多少额度"的真相（换机器、别的程序也在用）。
+   */
+  private balanceHunger: number | null = null;
 
   public constructor(options: EmotionServiceOptions) {
     this.options = options;
@@ -102,7 +110,7 @@ export class EmotionService {
 
   /** token 用量变化后刷新"饿"。 */
   public refreshTokens(now: number = Date.now()): EmotionState {
-    const ratio = tokensRemainingRatio(this.options.getBudget());
+    const ratio = this.remainingRatio();
     const next = applyTokens(this.state, ratio, now);
     if (next.hunger !== this.state.hunger) {
       this.state = next;
@@ -110,6 +118,29 @@ export class EmotionService {
       this.emit();
     }
     return this.state;
+  }
+
+  /**
+   * 设置"余额推出的饥饿度"（`null` = 没有余额信息，退回本地预算）。
+   *
+   * 立刻结算一次：余额查回来就该马上反映在 hunger 上，
+   * 而不是等下一次心跳（否则"没钱了"这件事要一分钟才生效）。
+   */
+  public setBalanceHunger(hunger: number | null, now: number = Date.now()): EmotionState {
+    this.balanceHunger = hunger === null || !Number.isFinite(hunger)
+      ? null
+      : Math.min(100, Math.max(0, Math.round(hunger)));
+    return this.refreshTokens(now);
+  }
+
+  public hasBalanceHunger(): boolean {
+    return this.balanceHunger !== null;
+  }
+
+  /** 当前用于推导"饿"的剩余比例：余额优先，其次本地累计 token。 */
+  private remainingRatio(): number {
+    if (this.balanceHunger !== null) return 1 - this.balanceHunger / 100;
+    return tokensRemainingRatio(this.options.getBudget());
   }
 
   /**
@@ -123,7 +154,7 @@ export class EmotionService {
       this.state = { ...this.state, lastUpdateAt: now };
       return this.state;
     }
-    const ratio = tokensRemainingRatio(this.options.getBudget());
+    const ratio = this.remainingRatio();
     const before = this.state.mood;
     this.state = decayEmotion(this.state, { presence: this.currentPresence, now, tokensRemainingRatio: ratio });
     if (this.state.mood !== before) this.save();

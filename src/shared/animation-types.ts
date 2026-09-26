@@ -13,6 +13,22 @@
 export type AnimationType = 'video' | 'image';
 
 /**
+ * 动画**用途分类**（需求 6.2 的四类）。
+ *
+ * 分类只描述"这条动画由谁来播"，播放机制完全一样 ——
+ * 具体行为（默认动画 / 随机池 / 间隔）在 `assets/config/behavior.json` 里配置。
+ *
+ * - `state`   状态动画：某个显示状态下的默认循环（idle / lie / watch）
+ * - `random`  随机动画：无人打扰时自己随机播
+ * - `trigger` 触发动画：由某个事件触发（心情低 / 私密内容 / 没网 / 感知到工作…）
+ * - `click`   点击动画：用户点击的反应，**不可打断**（必须播完才能再点）
+ */
+export type AnimationCategory = 'state' | 'random' | 'trigger' | 'click';
+
+/** 合法分类清单（校验与面板共用；新增分类只改这一处 + 类型）。 */
+export const ANIMATION_CATEGORIES: readonly AnimationCategory[] = ['state', 'random', 'trigger', 'click'];
+
+/**
  * 未来扩展类型占位（当前未实现，仅用于类型层预留，避免未来破坏 API）。
  * 运行时遇到未实现类型会抛出 ANIMATION_UNSUPPORTED_TYPE 并降级到 idle。
  */
@@ -33,7 +49,14 @@ export interface AnimationDefinition {
   readonly loop?: boolean;
   /** 优先级，越大越优先。默认 10。 */
   readonly priority?: number;
-  /** 播放中是否允许被“更高优先级”动画打断。默认 true。 */
+  /**
+   * 播放中是否允许被打断。默认 true。
+   *
+   * ⚠️ `false` 是**硬锁**：不仅自动来源（行为 / 插件 / AI）抢不动它，
+   * 连 `interrupt: 'force'` 也不行（`force` 只绕过优先级比较，不绕过这条）。
+   * 点击动画（cute / fawning / stroke）用的就是它 —— 需求明确要求
+   * "点击动画不可被打断，必须等待播放结束后才能继续点击"。
+   */
   readonly interruptible?: boolean;
   /** 冷却时间（毫秒），防止同一个动画被高频重复触发。默认 0。 */
   readonly cooldown?: number;
@@ -41,6 +64,13 @@ export interface AnimationDefinition {
   readonly tags?: readonly string[];
   /** 人类可读名称（未来设置界面 / 调试面板使用）。 */
   readonly label?: string;
+  /**
+   * 用途分类（状态 / 随机 / 触发 / 点击）。
+   *
+   * 省略时按 tags 推断（`tags` 里有 state/random/click 就用它），
+   * 推断不出来算 `trigger` —— 保证旧清单不加字段也能跑。
+   */
+  readonly category?: AnimationCategory;
   /** 可选的逐动画表现参数（渲染层可读，核心不解释其业务含义）。 */
   readonly render?: AnimationRenderOptions;
   /** 是否为该状态机状态下的默认兜底动画（通常只有 idle 为 true）。 */
@@ -99,10 +129,46 @@ export interface PersistentSegments {
    * - `0` 或省略：**无限循环**，只在中途被打断时才播收尾。
    */
   readonly loopCount?: number;
+  /**
+   * 循环段播放**随机次数**（每次播放时在 `[min, max]` 里随机取一个整数）。
+   *
+   * 需求："loop 需要循环随机次" —— 固定 `loopCount` 每次看到的一模一样，
+   * 随机次数让"她又开始发呆了"这件事不显得像定时器。
+   *
+   * 与 `loopCount` 同时存在时以本字段为准（校验会给出 warn 提醒）；
+   * 省略则退化成 `loopCount`（省略 = 无限循环）的旧行为。
+   */
+  readonly loopCountRange?: readonly [number, number];
 }
 
 /** 持续动画当前处于哪一段（供调试与自动化验收查询）。 */
 export type PersistentPhase = 'start' | 'loop' | 'end';
+
+/**
+ * 这次播放实际要循环几轮（纯函数，可单测）。
+ *
+ * - 配了 `loopCountRange`：在 `[min, max]` 内随机取整数（含两端）；
+ * - 否则用固定 `loopCount`；
+ * - `0` / 缺省 / 非法 = **无限循环**（只在中途被打断时才进收尾段）。
+ *
+ * @param random 注入随机源，便于验收断言"范围真的被用到了"
+ */
+export function resolveLoopCount(
+  segments: PersistentSegments | undefined,
+  random: () => number = Math.random,
+): number {
+  if (!segments) return 0;
+
+  const range = segments.loopCountRange;
+  if (range && Number.isFinite(range[0]) && Number.isFinite(range[1])) {
+    const min = Math.max(1, Math.floor(Math.min(range[0], range[1])));
+    const max = Math.max(min, Math.floor(Math.max(range[0], range[1])));
+    return min + Math.floor(random() * (max - min + 1));
+  }
+
+  const count = segments.loopCount;
+  return typeof count === 'number' && Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+}
 
 /**
  * 动画的渲染微调。
@@ -140,11 +206,30 @@ export const AnimationPriority = {
   CRITICAL: 100,
 } as const;
 
+/**
+ * 推断动画分类（清单没写 `category` 时的兜底，兼容旧清单与插件临时注册）。
+ *
+ * 规则：显式合法值优先 -> tags 里 click/touch、random、state/idle -> 否则 `trigger`。
+ */
+export function inferAnimationCategory(entry: {
+  readonly category?: unknown;
+  readonly tags?: readonly string[];
+}): AnimationCategory {
+  if (ANIMATION_CATEGORIES.includes(entry.category as AnimationCategory)) {
+    return entry.category as AnimationCategory;
+  }
+  const tags = entry.tags ?? [];
+  if (tags.includes('click') || tags.includes('touch')) return 'click';
+  if (tags.includes('random')) return 'random';
+  if (tags.includes('state') || tags.includes('idle')) return 'state';
+  return 'trigger';
+}
+
 /** 归一化后的动画定义（所有可选字段都已填好默认值）。 */
 export type ResolvedAnimation = Required<
-  Pick<AnimationDefinition, 'id' | 'type' | 'source' | 'loop' | 'priority' | 'interruptible' | 'cooldown' | 'kind'>
+  Pick<AnimationDefinition, 'id' | 'type' | 'source' | 'loop' | 'priority' | 'interruptible' | 'cooldown' | 'kind' | 'category'>
 > &
-  Omit<AnimationDefinition, 'loop' | 'priority' | 'interruptible' | 'cooldown' | 'kind'>;
+  Omit<AnimationDefinition, 'loop' | 'priority' | 'interruptible' | 'cooldown' | 'kind' | 'category'>;
 
 /** play() 的选项。 */
 export interface PlayOptions {
@@ -163,6 +248,15 @@ export interface PlayOptions {
   readonly source?: string;
   /** 播完后是否回到 fallback 动画（默认 true）。 */
   readonly returnToFallback?: boolean;
+  /**
+   * 覆盖定义里的 `loop`（默认不覆盖）。
+   *
+   * 用途：**状态的默认动画**要把一条一次性素材循环起来。例如 `lie`（趴下）
+   * 在"下方收起"状态下是默认姿势，需要一直循环；而它同时又在正常状态的
+   * 随机池里，那时只该播一遍。用定义区分就得复制两个 id，
+   * 用播放参数区分则一条素材两种用法都成立。
+   */
+  readonly loop?: boolean;
   /**
    * 是否忽略该动画的 `cooldown`（默认 false）。
    *

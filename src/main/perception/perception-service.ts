@@ -38,6 +38,7 @@ import type {
   SceneKind,
   ScreenObservation,
 } from '../../shared/perception-types';
+import { evaluateSceneTrigger } from '../../shared/pet-triggers';
 import {
   buildBehaviorSnapshot,
   capturePermission,
@@ -85,6 +86,13 @@ export interface PerceptionServiceOptions {
   readonly getAvailableAnimations: () => readonly string[];
   /** 决策落地：说话 + 动画 + （敏感内容）躲起来。 */
   readonly onIntervene: (plan: InterventionPlan, reason: string) => void;
+  /**
+   * 只演动画、不开口（"感知到在工作/在阅读"这类**触发动画**）。
+   *
+   * 与 `onIntervene` 分开是刻意的：它不占"每小时打扰上限"，
+   * 也不该在气泡里说话 —— 用户在工作时不想每分钟收到一条消息。
+   */
+  readonly onTriggerAnimation?: (animationId: string, reason: string) => void;
   readonly onStatus?: (status: PerceptionStatus) => void;
   /** 向渲染层要一帧摄像头画面（由渲染层 getUserMedia 采集后回传）。 */
   readonly requestCameraFrame?: () => void;
@@ -127,6 +135,10 @@ export class PerceptionService {
   private habits: HabitProfile = emptyHabitProfile();
   private sessionStartedAt = Date.now();
   private lastIntervention: PerceptionStatus['lastIntervention'] = null;
+  /** 场景触发（work / read）用的状态：当前场景、它从何时开始、上次触发时间。 */
+  private triggerScene: SceneKind | null = null;
+  private triggerSceneSince = Date.now();
+  private lastSceneTriggerAt = 0;
   private interventionTimes: number[] = [];
   private lastError = '';
   /** 上次按保留期清理明细的日子（每天只做一次；手动采样会强制做一次）。 */
@@ -888,8 +900,58 @@ export class PerceptionService {
   /* 内部                                                                */
   /* ------------------------------------------------------------------ */
 
+  /**
+   * 感知到"在工作 / 在阅读"时演一次 work / read（触发动画）。
+   *
+   * 三个门槛（都在纯函数 `evaluateSceneTrigger` 里，便于验收钉死）：
+   *   1. 场景要**连续稳定** 90 秒 —— `coding <-> browser` 来回切是常态，
+   *      一有观察结果就演会变成"每隔 30 秒突然开始工作"；
+   *   2. 不是"频繁切换"状态（感知层已经在算这个信号，直接复用）；
+   *   3. 同一个动作 20 分钟内只演一次（复用动画清单里的冷却之外再加一层）。
+   *
+   * 只在屏幕感知开着时生效（`screen` 是这一路的归属开关）。
+   */
+  private maybeWorkReadTrigger(observation: ScreenObservation | null, now: number): void {
+    if (!this.settings.screen || this.settings.privacyMode) return;
+    if (!observation) return;
+
+    if (observation.scene !== this.triggerScene) {
+      this.triggerScene = observation.scene;
+      this.triggerSceneSince = now;
+      return;
+    }
+
+    const animationId = evaluateSceneTrigger({
+      scene: observation.scene,
+      stableMs: now - this.triggerSceneSince,
+      /*
+       * "频繁切换"用行为快照里的窗口切换次数判定（一小时超过 8 次）。
+       * 阈值与 `inferUserState` 的 `shallow` 档完全一致，避免出现
+       * "状态说她在专心工作、这里却认为她在乱切"的矛盾。
+       */
+      switching: this.behavior.switchesLastHour >= 8,
+      sinceLastTriggerMs: now - this.lastSceneTriggerAt,
+    });
+    if (animationId === null) return;
+
+    this.lastSceneTriggerAt = now;
+    this.store.log('observation', `场景稳定 -> 演「${animationId}」`);
+    this.logger.info('scene trigger fired', {
+      data: { scene: observation.scene, animationId, stableMs: now - this.triggerSceneSince },
+    });
+    this.options.onTriggerAnimation?.(animationId, `scene:${observation.scene}`);
+  }
+
   /** 干预的统一出口：**开关归属检查** + 频率闸门 + 记录 + 回调。 */
   private decide(observation: ScreenObservation | null, now: number): void {
+    /*
+     * "感知到在工作 / 在阅读" -> work / read（需求 6.2 的触发动画）。
+     *
+     * 走**独立于干预**的一条路：它不开口说话、不占"每小时打扰上限"，
+     * 只是换个姿势陪着 —— 否则用户一工作就会被算成"她今天打扰了我 12 次"。
+     */
+    this.maybeWorkReadTrigger(observation, now);
+
     if (!this.settings.behavior && !this.settings.habits) return;
     const plan = planIntervention({
       observation,

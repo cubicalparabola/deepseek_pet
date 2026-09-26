@@ -24,11 +24,58 @@ import {
   applyInteraction,
   applyTokens,
   decayEmotion,
+  hungerFromBalance,
   hungerFromTokens,
   initialEmotion,
   moodLabel,
 } from '../shared/emotion';
 import type { AIChatReply, AIStatusView, InteractionKind } from '../shared/ai-types';
+import {
+  DEFAULT_BEHAVIOR_CONFIG,
+  DEFAULT_DISPLAY_STATE,
+  DOCKED_RANDOM_INTERVAL_MS,
+  NORMAL_RANDOM_INTERVAL_MS,
+  defaultAnimationFor,
+  parseBehaviorConfig,
+  pickPoolAnimation,
+  poolsFor,
+  resolveDisplayState,
+  type BehaviorConfig,
+  type PetDisplayState,
+} from '../shared/behavior-config';
+import {
+  DOCK_EDGE_THRESHOLD_PX,
+  UNDOCK_DISTANCE_PX,
+  dockTargetPosition,
+  evaluateDock,
+  nudgeInward,
+  petRectIn,
+  shouldUndock,
+} from '../shared/dock';
+import {
+  ANIMATION_CATEGORIES,
+  inferAnimationCategory,
+  resolveLoopCount,
+} from '../shared/animation-types';
+import {
+  APPROACH_RADIUS_PX,
+  HUNGRY_THRESHOLD,
+  OVERHEAT_TEMP_C,
+  SAD_MOOD_THRESHOLD,
+  classifyApproach,
+  evaluateHungry,
+  evaluateOffline,
+  evaluateOverheat,
+  evaluateSad,
+  evaluateSceneTrigger,
+  sceneTriggerAnimation,
+} from '../shared/pet-triggers';
+import {
+  balanceEndpoint,
+  formatBalance,
+  parseBalance,
+  supportsBalanceQuery,
+} from '../shared/balance';
 import type { PerceptionStatus } from '../shared/perception-types';
 import { DEFAULT_PERCEPTION_SETTINGS } from '../shared/perception-types';
 import type { GrowthStatus } from '../shared/growth-types';
@@ -144,6 +191,8 @@ interface BootstrapPayload {
   readonly size?: PetSizeInfo;
   /** 当前对话气泡状态与布局（可能在 Renderer 就绪前就已打开）。 */
   readonly bubble?: BubblePayload;
+  /** 当前显示状态（收起方向 / 隐藏），可能在 Renderer 就绪前就已确定。 */
+  readonly display?: PetDisplayState;
 }
 
 function readBootstrap(): BootstrapPayload | null {
@@ -177,6 +226,15 @@ class PetApplication {
   private plugins: readonly DiscoveredPlugin[] = [];
   private currentRegion: PetRegion = 'outside';
   private currentSize: PetSizeInfo | null = null;
+  /**
+   * 显示状态（正常 / 下方收起 / 右侧收起 / 隐藏）。
+   *
+   * 事实来源是**主进程**（贴边判定要用工作区），这里只持有镜像并据此
+   * 切换默认动画与随机池。初值取自 bootstrap，避免"启动时已收起却先播了 idle"。
+   */
+  private displayState: PetDisplayState = { ...DEFAULT_DISPLAY_STATE };
+  /** 随机池与间隔配置（来自 `behavior.json`）。 */
+  private behaviorConfig: BehaviorConfig = DEFAULT_BEHAVIOR_CONFIG;
   /** 拖拽令牌：每次拖拽 +1，用于作废竞态中的异步结果。 */
   private dragToken = 0;
   private dragOriginReady = false;
@@ -249,6 +307,10 @@ class PetApplication {
         void this.execute(action);
       },
       getState: () => this.stateMachine.get(),
+      // 随机动画按"当前显示状态"取池：正常 25–60 秒，收起 3–8 分钟且只有一个候选
+      getDisplayState: () => resolveDisplayState(this.displayState),
+      getKnownAnimations: () => new Set(this.animationManager.list()),
+      config: this.behaviorConfig,
     });
 
     this.interactionManager = new InteractionManager({
@@ -261,7 +323,7 @@ class PetApplication {
         void this.beginDrag(x, y);
       },
       onDragMove: (x, y) => this.moveDrag(x, y),
-      onDragEnd: () => this.endDrag(),
+      onDragEnd: (x, y) => this.endDrag(x, y),
       /*
        * 互动上报给主进程（2.3 情绪系统）：
        * 情绪状态住在 Main（要持久化、要随窗口显隐变化衰减），
@@ -329,6 +391,16 @@ class PetApplication {
     const registered = this.animationManager.registerAll([...manifest.animations.values()]);
     if (manifest.fallbackId) this.animationManager.setFallbackId(manifest.fallbackId);
 
+    /*
+     * 随机池配置与显示状态：bootstrap 里带着，避免"先按默认状态播了 idle，
+     * 再被一条 IPC 纠正成 lie/watch"的可见跳变。
+     */
+    if (bootstrap?.runtime.behaviorConfig) {
+      this.behaviorConfig = bootstrap.runtime.behaviorConfig;
+      this.behaviorManager.setConfig(this.behaviorConfig);
+    }
+    if (bootstrap?.display) this.displayState = { ...bootstrap.display };
+
     if (bootstrap === null) {
       this.logger.error('bootstrap unavailable (preload missing or IPC failed); animations may not load');
     }
@@ -381,8 +453,11 @@ class PetApplication {
       mode: String(bootstrap?.runtime.mode ?? 'unknown'),
     });
 
-    // 先播放兜底动画（idle 循环），让桌宠“活起来”
-    await this.animationManager.playFallback({ reason: 'startup', source: 'system' });
+    /*
+     * 播放"当前状态的默认动画"：正常是 idle，下方收起是 lie，右侧收起是 watch。
+     * 不能一律 `playFallback`（那永远是 idle）—— 否则启动时就已收起时她会站在边上发呆。
+     */
+    await this.playDisplayDefault('startup');
 
     this.behaviorManager.start();
     // 画面看门狗：保证任何播放层故障都能在几秒内自愈
@@ -425,12 +500,16 @@ class PetApplication {
     // 动画结束 -> 回到 IDLE（“WebM 播放结束自动回到 IDLE”就实现在这里）
     this.eventBus.onFrom('App', PetEvents.AnimationEnd, (payload) => {
       /*
-       * 优先接上"延后执行的点击反应"（点击持续动画时记下的那条）。
-       * 必须在这里、且在状态迁 IDLE 之前处理：状态一变 IDLE 就会触发
-       * `resumeFallbackLoop` 去接兜底 idle，反应会被它顶掉。
-       * 此时状态仍是 PLAYING，接上反应后状态自然保持 PLAYING，不必再迁 IDLE。
+       * 收尾段结束时可能**已经**接上了打断它的那条动画
+       * （AnimationManager 的 `pendingAfterEnd`，见 requestAnimation 第 5 步）。
+       * 那种情况下不能再去迁 IDLE —— 一迁就会触发 resumeFallbackLoop，
+       * 而 `playFallback` 带 `interrupt: 'force'`，会把刚接上的动画顶掉。
+       * 判据用"现在有没有动画在播"，而不是"谁接上了"，两条挂起路径（排队 / 收尾）都覆盖。
        */
-      if (this.playPendingReactionAfterEnd()) {
+      if (this.animationManager.getCurrentAnimation() !== null) {
+        this.logger.info('animation end but a new animation already took over; keeping it', {
+          data: { finished: payload.animationId, current: this.animationManager.getCurrentAnimation() },
+        });
         this.pushTrayState();
         return;
       }
@@ -488,6 +567,26 @@ class PetApplication {
     });
     this.runtime.onSetAnimation((animationId) => {
       this.handleMenuAnimation(animationId);
+    });
+    /*
+     * 触发动画（感知 / AI / 系统）：走普通优先级仲裁与冷却。
+     * 和 `onSetAnimation`（托盘"播放动画（测试）"）严格区分 ——
+     * 那条是用户显式挑选，允许 force + 绕过冷却。
+     */
+    this.runtime.onTriggerAnimation((payload) => {
+      this.logger.info('trigger animation requested', {
+        data: { animationId: payload.animationId, reason: payload.reason, source: payload.source ?? 'system' },
+      });
+      void this.execute({
+        type: 'animation',
+        animationId: payload.animationId,
+        ...(payload.priority !== undefined ? { priority: payload.priority } : {}),
+        source: payload.source ?? 'system',
+        reason: payload.reason,
+      });
+    });
+    this.runtime.onDisplayState((payload) => {
+      void this.applyDisplayState(payload, 'main-process');
     });
     this.runtime.onShutdown(() => this.shutdown());
     this.runtime.onSizeChanged((size) => {
@@ -567,21 +666,25 @@ class PetApplication {
   }
 
   /**
-   * 恢复兜底（idle）循环。
+   * 恢复"当前显示状态的默认动画"。
    *
    * 场景：点击 -> 播放反应动画 -> 动画结束 -> 状态回到 IDLE。
    * 这时如果什么都不做，`<video>` 会停在反应动画的最后一帧，
    * 表现为「点击之后就不循环了」。
    *
+   * ⚠️ 默认动画**不等于** idle：下方收起时是 lie、右侧收起时是 watch。
+   * 早期实现一律接回 `playFallback()`（idle），收起状态下她就会站起来 ——
+   * 这正是"收起 = 默认动画 lie/watch"这条需求最容易漏掉的地方。
+   *
    * 注意必须以**动画本身**为准来判断，而不是只看状态：
    * 打断旧动画时也会触发状态变化，此时新动画已经在播，不能再去抢一次。
    *
    * 另外加了一层 **自愈保险**：
-   * 「动画结束 -> 回 IDLE -> 接回兜底」这条链路上存在异步竞态
+   * 「动画结束 -> 回 IDLE -> 接回默认」这条链路上存在异步竞态
    * （例如 `end` 事件恰好在新的 play 请求之后到达，把 playback 置空），
    * 一旦丢失就会永久卡在"没有动画在播"的状态。
    * 因此这里延迟一小段时间再确认一次：只要已经回到 IDLE 却没有任何动画在播，
-   * 就无条件接回兜底循环。正常情况下第一个 await 已经让动画在播，这里不会触发。
+   * 就无条件接回默认循环。正常情况下第一个 await 已经让动画在播，这里不会触发。
    */
   private async resumeFallbackLoop(reason: string): Promise<void> {
     const fallbackId = this.animationManager.getFallbackId();
@@ -593,12 +696,10 @@ class PetApplication {
       this.recoveryTimer = null;
     }
 
-    if (this.animationManager.getCurrentAnimation() !== fallbackId) {
-      this.logger.info('resuming fallback loop', { data: { fallbackId, reason } });
-      await this.animationManager.playFallback({
-        reason: `resume-after:${reason}`,
-        source: 'system',
-      });
+    const wanted = this.defaultAnimationId() ?? fallbackId;
+    if (this.animationManager.getCurrentAnimation() !== wanted) {
+      this.logger.info('resuming default loop', { data: { animationId: wanted, reason } });
+      await this.playDisplayDefault(`resume-after:${reason}`);
     }
 
     // 自愈保险：等异步链路走完后再确认一次。
@@ -613,18 +714,63 @@ class PetApplication {
     }, 600);
   }
 
+  /** 当前显示状态该播的默认动画 id（没有 = null，例如隐藏状态）。 */
+  private defaultAnimationId(): string | null {
+    const state = resolveDisplayState(this.displayState);
+    const configured = defaultAnimationFor(this.behaviorConfig, state);
+    if (configured === null) return null;
+    // 配置里写了但清单里没有（清单被改过）时退回兜底，避免"她突然不动了"
+    if (!this.animationManager.getDefinition(configured)) return this.animationManager.getFallbackId();
+    return configured;
+  }
+
+  /**
+   * 播放当前显示状态的默认动画。
+   *
+   * `loop: true` 是关键：这些默认动画要**一直循环**（idle 本来就是循环素材；
+   * lie 是"一次性"素材，靠播放参数循环起来，这样它在随机池里仍然只播一遍）。
+   */
+  private async playDisplayDefault(reason: string): Promise<void> {
+    const animationId = this.defaultAnimationId();
+    if (!animationId) return;
+    const isFallback = animationId === this.animationManager.getFallbackId();
+    await this.animationManager.play(animationId, {
+      interrupt: 'force',
+      loop: true,
+      reason,
+      source: 'system',
+      ...(isFallback ? {} : { priority: 5 }),
+    });
+  }
+
+  /**
+   * 应用显示状态（主进程判定后广播过来）。
+   *
+   * 三件事必须一起做，缺一个就会出现"收起了她还站着"这类不一致：
+   *   1. 记住新状态；
+   *   2. 切换到该状态的默认动画（idle / lie / watch）；
+   *   3. 让 BehaviorManager 换池并重新排期（收起后立刻蹦一下会很怪）。
+   */
+  private async applyDisplayState(next: PetDisplayState, reason: string): Promise<void> {
+    const before = resolveDisplayState(this.displayState);
+    const after = resolveDisplayState(next);
+    this.displayState = { ...next };
+    if (before === after) return;
+
+    this.logger.info('display state applied', { data: { from: before, to: after, reason } });
+
+    // 状态切换时旧的"等收尾段"意图不再适用（她已经在另一个姿势上了）
+    this.animationManager.clearPendingAfterEnd();
+    this.behaviorManager.onDisplayStateChanged();
+
+    if (after === 'hidden') return; // 窗口都藏了，不必再播动画
+    await this.playDisplayDefault(`display:${after}`);
+  }
+
   private recoveryTimer: number | null = null;
   private watchdogTimer: number | null = null;
   private recoveryAttempts = 0;
   private recovering = false;
-
-  /**
-   * 待播的点击反应（"先播持续动画的收尾段，再播这个"）。
-   *
-   * 由 `deferReactionUntilPersistentEnd` 写入，收尾段的 `AnimationEnd`
-   * 里由 `playPendingReactionAfterEnd` 消费。只存一条：用户连点只保留最后一次意图。
-   */
-  private pendingReaction: { animationId: string; priority: number; metadata: Record<string, unknown> } | null = null;
 
   /**
    * 画面健康检查 + 自愈。
@@ -680,12 +826,12 @@ class PetApplication {
    * 注意"停在片尾"只是其中一种，不能只判片尾。
    *
    * 误报风险很低：正常交接窗口里动画管理器**已经有** active（新动画进入
-   * 加载中），而这里的第一个条件就是"没有 active"；延后执行的点击反应
-   * 那段刻意留白由 `pendingReaction` 排除。
+   * 加载中），而这里的第一个条件就是"没有 active"；"等收尾段播完再播"的
+   * 那段刻意留白由动画管理器的 `pendingAfterEnd` 排除。
    */
   private isVisuallyStuck(): boolean {
     if (this.recovering) return false;
-    if (this.pendingReaction !== null) return false;
+    if (this.animationManager.hasPendingAfterEnd()) return false;
     if (this.animationManager.getCurrentAnimation() !== null) return false;
 
     const visible = this.layers.allVideos.filter(
@@ -768,7 +914,8 @@ class PetApplication {
       animation: this.animationManager.getCurrentAnimation(),
       recovering: this.recovering,
       recoveryAttempts: this.recoveryAttempts,
-      hasPendingReaction: this.pendingReaction !== null,
+      hasPendingReaction: this.animationManager.hasPendingAfterEnd(),
+      displayState: this.displayState,
       visuallyStuck: this.isVisuallyStuck(),
       renderable: this.layers.isVideoRenderable(),
       videos,
@@ -863,11 +1010,23 @@ class PetApplication {
     this.currentRegion = intent.region;
     if (intent.kind === 'region-enter') return;
 
+    /*
+     * 收起状态下点一下 = 展开（需求："点击宠物展开"）。
+     * 展开与点击反应**同时**发生：只展开不反应会像"点了个寂寞"，
+     * 而被点的时候她本来就该有反应（cute/fawning/stroke）。
+     * 位置回退由主进程负责（回到收起前的位置）。
+     */
+    if (this.displayState.dock !== 'free') {
+      this.logger.info('click while docked: expanding', { data: { dock: this.displayState.dock } });
+      void this.runtime.requestUndock().then((display) => {
+        if (display) void this.applyDisplayState(display, 'click-undock');
+      });
+    }
+
     const payload: PetClickPayload = intent.payload;
 
     if (intent.kind === 'double-click') {
       this.logger.info('double click', { data: { region: intent.region } });
-      if (this.deferReactionUntilPersistentEnd('play', 60, { region: intent.region })) return;
       void this.execute({
         type: 'animation',
         animationId: 'play',
@@ -883,19 +1042,12 @@ class PetApplication {
       data: { region: intent.region, nx: payload.nx.toFixed(2), ny: payload.ny.toFixed(2), animationId },
     });
     /*
-     * 点击是**瞬时反应**：如果当前是一只低优先级的持续动画（发呆/看书/看着你…），
-     * 先让它把收尾段播完，再把反应动画接上 —— 而不是硬切掉它。
-     * 高优先级的持续动画（如 bomb 100）不受影响，仍然立刻让位。
+     * 点击反应不再需要渲染层自己"等收尾段"：
+     * AnimationManager 现在统一实现需求里的三段式打断语义
+     * （loop/start 阶段被打断 -> 先播 end 再播这次请求；end 阶段被打断 -> 立刻让位）。
+     * 放在动画管理器里，插件/AI/感知触发也能享受同一套语义，
+     * 渲染层只负责提交意图（这也正是 Action Pipeline 的设计约定）。
      */
-    if (
-      this.deferReactionUntilPersistentEnd(animationId, 50, {
-        region: intent.region,
-        nx: payload.nx,
-        ny: payload.ny,
-      })
-    ) {
-      return;
-    }
     void this.execute({
       type: 'animation',
       animationId,
@@ -904,69 +1056,6 @@ class PetApplication {
       reason: `user-click:${intent.region}`,
       metadata: { region: intent.region, nx: payload.nx, ny: payload.ny },
     });
-  }
-
-  /**
-   * 点击反应遇到持续动画时：**先播它的收尾段，再把反应接上**。
-   *
-   * 为什么要这样（用户明确要求）：持续动画在 loop 阶段被点击时，原先是硬切 ——
-   * 收尾段完全被跳过，动作"断"得很突兀。现在改成两步：
-   *   1. `endPersistent()` 让它**立刻**进收尾段（不等本轮循环播完）；
-   *   2. 把点击反应记在 `pendingReaction`，等收尾段结束的 `AnimationEnd`
-   *      里直接接上（见 `wireManagers`），而不是接回 idle。
-   *
-   * 为什么不用动画管理器的 `interrupt: 'queue'`：那条路径要和"动画结束后接回
-   * 兜底 idle"抢同一时刻 —— `playFallback` 带 `interrupt: 'force'`，会把
-   * 排队项顶掉。而"结束后谁接上"本来就是 renderer 这一层的职责，放这里更直白，
-   * 也避免两个机制在同一 tick 里互相清空。
-   *
-   * 只对"优先级不高于 `maxPriority`"的持续动画生效：
-   * 瞬时反应不该让位于高优先级的动画（例如 `bomb` priority 100），
-   * 那种情况仍然走原来的立刻抢占。
-   *
-   * @returns true = 已改为"等收尾段播完再播"，调用方不要再提交抢占动作
-   */
-  private deferReactionUntilPersistentEnd(
-    animationId: string,
-    maxPriority: number,
-    metadata: Record<string, unknown>,
-  ): boolean {
-    if (!this.animationManager.isPersistentPlayingWithin(maxPriority)) return false;
-
-    const persisting = this.animationManager.getCurrentAnimation();
-    if (!this.animationManager.endPersistent('interaction-defer')) return false;
-
-    this.pendingReaction = { animationId, priority: maxPriority, metadata };
-    this.logger.info('click deferred until persistent end segment finishes', {
-      data: {
-        reaction: animationId,
-        persisting,
-        phase: this.animationManager.getPersistentPhase(),
-      },
-    });
-    return true;
-  }
-
-  /**
-   * 收尾段结束后接上待播的点击反应。
-   *
-   * @returns true = 已经接上（调用方不要再接回兜底 idle）
-   */
-  private playPendingReactionAfterEnd(): boolean {
-    const pending = this.pendingReaction;
-    if (!pending) return false;
-    this.pendingReaction = null;
-
-    this.logger.info('playing deferred click reaction', { data: { animationId: pending.animationId } });
-    void this.execute({
-      type: 'animation',
-      animationId: pending.animationId,
-      priority: pending.priority,
-      source: 'user',
-      reason: 'user-click:after-persistent-end',
-      metadata: pending.metadata,
-    });
-    return true;
   }
 
   /** 所有行为来源统一入口。 */
@@ -1018,10 +1107,18 @@ class PetApplication {
     void this.runtime.setWindowPosition(Math.round(targetX), Math.round(targetY)).catch(() => undefined);
   }
 
-  private endDrag(): void {
+  private endDrag(screenX: number, screenY: number): void {
     // 作废本次拖拽的原点，避免下一次拖拽误用（配合 moveDrag 的就绪判断）
     this.dragToken += 1;
     this.dragOriginReady = false;
+    /*
+     * 拖完了 -> 交给主进程判定"要不要收起"。
+     * 判定必须发生在主进程：只有它知道工作区（`screen.workArea`）与宠物在
+     * 窗口里的实际位置（气泡会把窗口撑大，宠物并不贴着窗口边缘）。
+     */
+    void this.runtime.endDrag(screenX, screenY).then((display) => {
+      if (display) void this.applyDisplayState(display, 'drag-end');
+    });
     this.logger.debug('drag end');
   }
 
@@ -1104,6 +1201,60 @@ class PetApplication {
     readonly interactions: InteractionManager;
     readonly plugins: PluginHost;
     readonly events: EventBus;
+    /**
+     * 走**真实点击路径**模拟一次点击（命中区域 -> 映射动画 -> 提交动作）。
+     *
+     * 与 `handleIntent` 完全同一条实现（它本来就是 InteractionManager 的回调），
+     * 所以"收起状态下点一下就展开"这类行为能被真实验证，而不是在测试里复刻一遍。
+     */
+    readonly click: (region: PetRegion, nx?: number, ny?: number) => void;
+    /** 显示状态（收起方向 / 隐藏）。 */
+    readonly display: () => PetDisplayState;
+    /**
+     * 动画与行为的**纯模型**（这一次大改的核心规则）。
+     *
+     * 为什么全暴露：分类、随机循环次数、随机池挑选、贴边几何、触发阈值
+     * 都是纯函数，验收需要逐条钉死它们（真机跑一遍只能证明"这一条路径没坏"）。
+     */
+    readonly animationModel: {
+      readonly resolveLoopCount: typeof resolveLoopCount;
+      readonly inferAnimationCategory: typeof inferAnimationCategory;
+      readonly ANIMATION_CATEGORIES: typeof ANIMATION_CATEGORIES;
+      readonly parseBehaviorConfig: typeof parseBehaviorConfig;
+      readonly pickPoolAnimation: typeof pickPoolAnimation;
+      readonly poolsFor: typeof poolsFor;
+      readonly defaultAnimationFor: typeof defaultAnimationFor;
+      readonly resolveDisplayState: typeof resolveDisplayState;
+      readonly DEFAULT_BEHAVIOR_CONFIG: typeof DEFAULT_BEHAVIOR_CONFIG;
+      readonly NORMAL_RANDOM_INTERVAL_MS: typeof NORMAL_RANDOM_INTERVAL_MS;
+      readonly DOCKED_RANDOM_INTERVAL_MS: typeof DOCKED_RANDOM_INTERVAL_MS;
+      readonly evaluateDock: typeof evaluateDock;
+      readonly dockTargetPosition: typeof dockTargetPosition;
+      readonly shouldUndock: typeof shouldUndock;
+      readonly nudgeInward: typeof nudgeInward;
+      readonly petRectIn: typeof petRectIn;
+      readonly DOCK_EDGE_THRESHOLD_PX: typeof DOCK_EDGE_THRESHOLD_PX;
+      readonly UNDOCK_DISTANCE_PX: typeof UNDOCK_DISTANCE_PX;
+      readonly classifyApproach: typeof classifyApproach;
+      readonly evaluateOverheat: typeof evaluateOverheat;
+      readonly evaluateSad: typeof evaluateSad;
+      readonly evaluateHungry: typeof evaluateHungry;
+      readonly evaluateOffline: typeof evaluateOffline;
+      readonly evaluateSceneTrigger: typeof evaluateSceneTrigger;
+      readonly sceneTriggerAnimation: typeof sceneTriggerAnimation;
+      readonly hungerFromBalance: typeof hungerFromBalance;
+      readonly APPROACH_RADIUS_PX: typeof APPROACH_RADIUS_PX;
+      readonly OVERHEAT_TEMP_C: typeof OVERHEAT_TEMP_C;
+      readonly SAD_MOOD_THRESHOLD: typeof SAD_MOOD_THRESHOLD;
+      readonly HUNGRY_THRESHOLD: typeof HUNGRY_THRESHOLD;
+    };
+    /** DeepSeek 余额接口的纯解析（Money 是字符串、地址收敛、非官方域名跳过）。 */
+    readonly balance: {
+      readonly balanceEndpoint: typeof balanceEndpoint;
+      readonly supportsBalanceQuery: typeof supportsBalanceQuery;
+      readonly parseBalance: typeof parseBalance;
+      readonly formatBalance: typeof formatBalance;
+    };
     /**
      * 情绪模型（2.3）与 AI 状态。
      *
@@ -1244,6 +1395,52 @@ class PetApplication {
       interactions: this.interactionManager,
       plugins: this.pluginHost,
       events: this.eventBus,
+      click: (region, nx = 0.5, ny = 0.5) => {
+        this.handleIntent({
+          kind: 'click',
+          region,
+          payload: { button: 'left', x: 0, y: 0, nx, ny, region, detail: 1 },
+        });
+      },
+      display: () => this.displayState,
+      animationModel: {
+        resolveLoopCount,
+        inferAnimationCategory,
+        ANIMATION_CATEGORIES,
+        parseBehaviorConfig,
+        pickPoolAnimation,
+        poolsFor,
+        defaultAnimationFor,
+        resolveDisplayState,
+        DEFAULT_BEHAVIOR_CONFIG,
+        NORMAL_RANDOM_INTERVAL_MS,
+        DOCKED_RANDOM_INTERVAL_MS,
+        evaluateDock,
+        dockTargetPosition,
+        shouldUndock,
+        nudgeInward,
+        petRectIn,
+        DOCK_EDGE_THRESHOLD_PX,
+        UNDOCK_DISTANCE_PX,
+        classifyApproach,
+        evaluateOverheat,
+        evaluateSad,
+        evaluateHungry,
+        evaluateOffline,
+        evaluateSceneTrigger,
+        sceneTriggerAnimation,
+        hungerFromBalance,
+        APPROACH_RADIUS_PX,
+        OVERHEAT_TEMP_C,
+        SAD_MOOD_THRESHOLD,
+        HUNGRY_THRESHOLD,
+      },
+      balance: {
+        balanceEndpoint,
+        supportsBalanceQuery,
+        parseBalance,
+        formatBalance,
+      },
       emotion: {
         applyInteraction,
         decayEmotion,

@@ -20,6 +20,7 @@
  */
 
 import type {
+  AIBalanceState,
   AIChatReply,
   MemoryEventKind,
   AISettings,
@@ -37,6 +38,7 @@ import {
   applyInteraction,
   describeEmotionForPrompt,
   formatEmotion,
+  hungerFromBalance,
   moodLabel,
   preferredAnimation,
   tokensRemainingRatio,
@@ -49,6 +51,7 @@ import { buildRollingSummaryMessages, fallbackRollingSummary, sanitizeSummary } 
 import { EmotionService } from './emotion-service';
 import { extractFactsFromModelOutput, extractFactsHeuristic } from './fact-extract';
 import { LLMClient, LLMError, type LLMMessage } from './llm-client';
+import { supportsBalanceQuery } from '../../shared/balance';
 import { localDiary, localReply } from './local-replies';
 import { MemoryStore } from './memory-store';
 
@@ -95,6 +98,10 @@ export class AIService {
   private calls = 0;
   /** 自上次记忆整理以来新增的对话轮数。 */
   private turnsSinceConsolidate = 0;
+  /** 余额快照（DeepSeek 官方 `GET /user/balance`）；没查过时为 null。 */
+  private balance: AIBalanceState | null = null;
+  private balanceError = '';
+  private balanceTimer: NodeJS.Timeout | null = null;
 
   public constructor(options: AIServiceOptions) {
     this.options = options;
@@ -156,6 +163,7 @@ export class AIService {
     }
     this.emotion.startHeartbeat();
     this.diary.startScheduler();
+    this.startBalanceScheduler();
     // 启动时补一次"昨天没写的日记"（程序不是 24 小时开着的）
     void this.diary.dueCheck().catch((error: unknown) => {
       this.logger.warn('diary catch-up failed', { error: describeError(error) });
@@ -166,6 +174,7 @@ export class AIService {
   public dispose(): void {
     this.emotion.stopHeartbeat();
     this.diary.stopScheduler();
+    this.stopBalanceScheduler();
   }
 
   public get settings(): AISettings {
@@ -212,7 +221,127 @@ export class AIService {
       dataDir: this.options.dataDir,
       emotion: this.emotion.get(),
       presence: this.emotion.presence,
+      balance: this.balance,
+      balanceError: this.balanceError,
     };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 余额（DeepSeek 官方唯一的额度接口）                                   */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * 查询余额（`GET /user/balance`）。
+   *
+   * 只在 DeepSeek 官方域名下发请求：one-api / Ollama 这类兼容网关没有这个接口，
+   * 对它们请求只会得到 404 噪音，反而把"最近错误"刷成红的。
+   *
+   * 结果同时驱动两件事：
+   *   1. **饿**：余额优先于本地累计 token（用户要求）；
+   *   2. **掉线（offline）**：key 无效 / 余额不足 -> 主进程据此演 offline 动画。
+   */
+  public async refreshBalance(): Promise<AIBalanceState | null> {
+    const settings = this.settings;
+    if (!settings.enabled || !settings.balance.enabled) return this.balance;
+    if (settings.provider.apiKey.trim() === '') {
+      this.balanceError = '未配置 API Key';
+      this.balance = null;
+      this.applyBalanceHunger();
+      this.emitStatus();
+      return null;
+    }
+    if (!supportsBalanceQuery(settings.provider.baseUrl)) {
+      /*
+       * 不是 DeepSeek 官方地址：不查询、保留上一次结果（可能是空的）。
+       * 记一条**说明性**的错误而不是网络错误 —— 让用户知道"这不是坏了，是这家没有这个接口"。
+       */
+      this.balanceError = '当前服务商不提供余额查询（余额只在 DeepSeek 官方地址下可用）';
+      this.balance = null;
+      this.applyBalanceHunger();
+      this.emitStatus();
+      return null;
+    }
+
+    try {
+      const result = await this.llm.fetchBalance();
+      this.balance = {
+        isAvailable: result.isAvailable,
+        currency: result.currency,
+        totalBalance: result.totalBalance,
+        grantedBalance: result.grantedBalance,
+        toppedUpBalance: result.toppedUpBalance,
+        fetchedAt: result.fetchedAt,
+        drivesHunger: true,
+      };
+      this.balanceError = '';
+      this.applyBalanceHunger();
+      this.logger.info('balance refreshed', {
+        data: {
+          currency: result.currency,
+          total: result.totalBalance,
+          available: result.isAvailable,
+        },
+      });
+      this.emitStatus();
+      return this.balance;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : describeError(error);
+      this.balanceError = message;
+      this.logger.warn('balance query failed', { data: { message } });
+      // 查失败不改动上一次的余额（网络抖一下不该让她立刻变"饿"）
+      this.emitStatus();
+      return this.balance;
+    }
+  }
+
+  /** 把余额映射成饥饿度并交给情绪服务（余额优先于本地 token 预算）。 */
+  private applyBalanceHunger(): void {
+    const settings = this.settings;
+    const hunger = this.balance === null
+      ? null
+      : hungerFromBalance(this.balance.totalBalance, {
+          low: settings.balance.lowBalance,
+          full: settings.balance.fullBalance,
+        });
+    this.emotion.setBalanceHunger(hunger);
+    // 余额不足（官方 `is_available=false`）等价于"没额度了"：直接拉满饥饿
+    if (this.balance !== null && !this.balance.isAvailable) this.emotion.setBalanceHunger(100);
+  }
+
+  /**
+   * 余额查询是否表明"用不了"（用于 offline 动画）。
+   *
+   * 三种情况：没配 key、key/接口返回错误、官方明确 `is_available=false`。
+   */
+  public offlineReason(): { readonly offline: boolean; readonly reason: string } {
+    const settings = this.settings;
+    if (!settings.enabled) return { offline: false, reason: '' };
+    if (settings.provider.apiKey.trim() === '') return { offline: true, reason: 'no-key' };
+    if (this.balance !== null && !this.balance.isAvailable) return { offline: true, reason: 'no-balance' };
+    if (this.balanceError !== '' && /HTTP 401|HTTP 403|API Key 无效/.test(this.balanceError)) {
+      return { offline: true, reason: 'invalid-key' };
+    }
+    if (/HTTP 401|HTTP 403|API Key 无效/.test(this.lastError)) {
+      return { offline: true, reason: 'invalid-key' };
+    }
+    return { offline: false, reason: '' };
+  }
+
+  public startBalanceScheduler(): void {
+    if (this.balanceTimer !== null) return;
+    const interval = Math.max(60_000, this.settings.balance.intervalMs);
+    this.balanceTimer = setInterval(() => {
+      void this.refreshBalance().catch(() => undefined);
+    }, interval);
+    this.balanceTimer.unref?.();
+    // 启动时查一次（余额决定了"饿"和"掉线"，等 30 分钟太久）
+    void this.refreshBalance().catch(() => undefined);
+  }
+
+  public stopBalanceScheduler(): void {
+    if (this.balanceTimer === null) return;
+    clearInterval(this.balanceTimer);
+    this.balanceTimer = null;
   }
 
   public setSettings(patch: AISettingsPatch): AIStatusView {

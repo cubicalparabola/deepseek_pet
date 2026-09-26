@@ -11,6 +11,7 @@ import type { PetAction, ActionResult } from './action-types';
 import type { PetState } from './state-types';
 import type { DiscoveredPlugin, PluginRecord } from './plugin-types';
 import type { AnimationManifest } from './animation-types';
+import type { BehaviorConfig, PetDisplayState } from './behavior-config';
 import type { PetSettingsState, PetSizeInfo } from './pet-size';
 import type { BubblePayload, BubbleState } from './bubble';
 import type {
@@ -58,6 +59,21 @@ export const IpcChannels = {
   WindowSetSize: 'pet:window-set-size',
   WindowSetIgnoreMouse: 'pet:window-set-ignore-mouse',
   WindowSetAlwaysOnTop: 'pet:window-set-always-on-top',
+  /**
+   * Renderer -> Main：拖拽结束（松开鼠标）。
+   *
+   * 谁来判定"该不该收起"：只有主进程知道工作区（`screen.workArea`）与宠物在窗口里的
+   * 实际位置，所以渲染层只上报"拖完了"，由主进程按最终位置决定
+   * 贴下边缘 / 贴右边缘 / 不贴边，并广播显示状态。
+   */
+  WindowDragEnd: 'pet:window-drag-end',
+  /**
+   * Renderer -> Main：请求展开（用户点了一下收起状态的宠物）。
+   *
+   * 收起状态仍然接收点击（需求：点击宠物即可展开），这条只是把"被点了"
+   * 转成一次展开动作，位置回退到收起前的位置。
+   */
+  WindowUndock: 'pet:window-undock',
 
   /* 尺寸 / 设置 */
   SettingsGet: 'pet:settings-get',
@@ -150,6 +166,8 @@ export const IpcChannels = {
   AIDiaryOpenDir: 'pet:ai-diary-open',
   /** 连通性自检（设置界面「测试连接」）。 */
   AITestConnection: 'pet:ai-test',
+  /** 立刻查一次余额（DeepSeek `GET /user/balance`：唯一的额度接口）。 */
+  AIBalanceRefresh: 'pet:ai-balance-refresh',
   /** Renderer -> Main：发生了一次互动（点击/拖动…），用于情绪上涨。 */
   AIInteraction: 'pet:ai-interaction',
   /** 把情绪重置为初始值（调试/后悔药）。 */
@@ -241,6 +259,19 @@ export const IpcChannels = {
   CommandPerceptionCameraRequest: 'pet:command-perception-camera-request',
   /** Main -> 界面：成长/反思状态变化（记忆宫殿与策略会在反思后变）。 */
   CommandGrowthStatus: 'pet:command-growth-status',
+  /**
+   * Main -> 渲染层：**播放一条触发动画**（感知/AI/系统触发，不是用户点菜单）。
+   *
+   * 为什么不能用 `CommandSetAnimation`：那条是"用户在托盘里挑动画（测试）"的语义 ——
+   * 强制切换、绕过冷却、再点一次就结束。触发动画要的是普通优先级仲裁
+   * （被打断、冷却、礼貌让位都要成立）。
+   */
+  CommandTriggerAnimation: 'pet:command-trigger-animation',
+  /**
+   * Main -> 渲染层：显示状态变化（收起方向 / 隐藏）。
+   * 渲染层据此切换默认动画与随机池（正常 idle / 下方 lie / 右侧 watch）。
+   */
+  CommandDisplayState: 'pet:command-display-state',
   CommandShutdown: 'pet:command-shutdown',
 } as const;
 
@@ -259,6 +290,14 @@ export interface RuntimeInfo {
   readonly assetsPath: string;
   /** 已解析的动画 Manifest（Main 读取后随 bootstrap 一次性下发）。 */
   readonly animationManifest: AnimationManifest;
+  /**
+   * 显示状态与随机池配置（Main 读取 `behavior.json` 后下发）。
+   *
+   * 渲染层用它决定"这个状态下默认播什么、随机池里有哪些、多久触发一次"。
+   */
+  readonly behaviorConfig: BehaviorConfig;
+  /** 当前显示状态（收起方向 + 是否隐藏）。 */
+  readonly display: PetDisplayState;
 }
 
 export interface WindowPosition {
@@ -277,6 +316,8 @@ export interface PetBootstrap {
   readonly window: WindowSize & WindowPosition;
   /** 主进程解析出的尺寸信息（Renderer 不需要自己算宽高比与收敛）。 */
   readonly size?: PetSizeInfo;
+  /** 当前显示状态（收起 / 隐藏可能在 Renderer 就绪前就定了）。 */
+  readonly display?: PetDisplayState;
   /**
    * 当前对话气泡状态与布局。
    *
@@ -310,6 +351,21 @@ export interface AnimationChangedPayload {
   readonly reason?: string;
 }
 
+/**
+ * 触发动画指令（Main -> Renderer）。
+ *
+ * 与"用户在托盘挑动画"不同：这是**自动来源**（感知 / AI / 系统），
+ * 因此走普通优先级仲裁与冷却，并且不享受 force / bypassCooldown。
+ */
+export interface TriggerAnimationPayload {
+  readonly animationId: string;
+  /** 触发原因（写进日志，便于回答"她为什么突然难过"）。 */
+  readonly reason: string;
+  readonly source?: string;
+  /** 优先级覆盖（省略 = 用清单里的定义）。 */
+  readonly priority?: number;
+}
+
 export interface StateChangedPayload {
   readonly from: PetState;
   readonly to: PetState;
@@ -338,6 +394,8 @@ export interface TrayStatePayload {
   readonly ai?: AIStatusView;
   /** 在场状态（可见 / 收起 / 隐藏），子菜单据此显示"收起/展开"。 */
   readonly presence?: PetPresence;
+  /** 显示状态（收起方向 / 是否隐藏）：菜单据此显示"收起（右侧）/ 展开"。 */
+  readonly display?: PetDisplayState;
   /** 感知状态（仅供主进程构造「感知（环境与用户）」子菜单使用）。 */
   readonly perception?: PerceptionStatus;
   /** 成长状态（仅供主进程构造「成长与记忆」子菜单使用）。 */
@@ -379,6 +437,13 @@ export interface WindowAPI {
    * 透明区域应当点得到下面的窗口。
    */
   reportPointer(nx: number, ny: number): void;
+  /**
+   * 上报"拖拽结束"，由主进程判定是否贴边收起（并广播新的显示状态）。
+   * @param screenX/screenY 松开鼠标时的屏幕坐标（主进程用它兜底判定贴边）
+   */
+  dragEnd(screenX?: number, screenY?: number): Promise<PetDisplayState>;
+  /** 请求展开（收起状态下点了宠物）：回到收起前的位置。 */
+  undock(): Promise<PetDisplayState>;
   /** 打开设置窗口（滚动条调尺寸）。与托盘「设置…」是同一条路径。 */
   showSettingsWindow(): Promise<boolean>;
 }
@@ -436,6 +501,10 @@ export interface CommandAPI {
   onAction(handler: (action: PetAction) => void): () => void;
   onSetBehaviorPaused(handler: (paused: boolean) => void): () => void;
   onSetAnimation(handler: (animationId: string) => void): () => void;
+  /** 自动来源的触发动画（感知 / AI / 系统）：走普通优先级仲裁，不是强制切换。 */
+  onTriggerAnimation(handler: (payload: TriggerAnimationPayload) => void): () => void;
+  /** 显示状态变化（收起方向 / 隐藏）：渲染层据此切换默认动画与随机池。 */
+  onDisplayState(handler: (payload: PetDisplayState) => void): () => void;
   /** 尺寸变化（托盘/右键菜单/设置界面调整）时通知 Renderer。 */
   onSizeChanged(handler: (size: PetSizeInfo) => void): () => void;
   /** 对话气泡状态/布局变化（含由它引起的窗口尺寸变化）。 */
@@ -485,6 +554,13 @@ export interface AIAPI {
   openDiaryDir(): Promise<boolean>;
   /** 连通性自检（设置界面「测试连接」）。 */
   testConnection(): Promise<AITestResult>;
+  /**
+   * 立刻查一次余额（DeepSeek `GET /user/balance`）。
+   *
+   * 余额不只用于展示：它**优先于本地累计 token** 决定"饿"，
+   * 余额不足 / key 无效还会让她演 offline。
+   */
+  refreshBalance(): Promise<AIStatusView>;
   /** 上报一次互动（点击/拖动/双击），用于情绪上涨。 */
   notifyInteraction(kind: InteractionKind): void;
   /** 把情绪重置回初始值。 */

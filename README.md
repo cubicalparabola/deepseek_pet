@@ -40,7 +40,7 @@ npm run dist            # electron-builder 生成 Windows NSIS 安装包
 - 左键点击不同部位触发不同动画（头部/耳朵/肚子/尾巴），双击玩耍；
 - 按住左键拖动可移动桌宠（超过 5px 位移才判定为拖动）；
 - 右键弹出原生上下文菜单；托盘图标提供 显示/隐藏、大小、置顶、**播放动画（测试）**、暂停/恢复行为、重载插件、设置、退出；
-- **「播放动画（测试）」菜单列出全部 18 个动画**（按优先级排序，含标签与 id），点任意一条即刻试放 —— 这是第一版最直接的动画测试入口；
+- **「播放动画（测试）」菜单列出全部 27 个动画**（按优先级排序，含标签与 id），点任意一条即刻试放 —— 这是第一版最直接的动画测试入口；
 - 关闭窗口不会退出程序，桌宠继续驻留托盘。
 
 ---
@@ -65,7 +65,7 @@ Renderer Process（桌宠窗口）
   ├── StateMachine      状态机（只决定状态，不播放动画）
   ├── AnimationManager  动画播放唯一入口（优先级 / 打断 / 冷却 / 排队）
   ├── ActionManager     统一 Action Pipeline（守门 + 分发）
-  ├── BehaviorManager   行为调度（当前自动动画全部关闭，见 §10）
+  ├── BehaviorManager   行为调度（随机动画池：按显示状态取池，见 §10）
   ├── InteractionManager 鼠标互动（命中区域、点击、拖拽）
   ├── PluginHost        插件沙箱宿主 + PluginContext 注入
   └── PetLayers         渲染图层（video 双缓冲 / image 静态图）
@@ -105,7 +105,7 @@ desktop-pet/
 │   │   └── settings.ts
 │   └── shared/          跨进程契约：事件、动画/状态/Action/插件类型、IPC、协议
 ├── assets/
-│   ├── animations/      18 个**带 alpha 的** VP9 WebM 动画素材
+│   ├── animations/      27 个**带 alpha 的** VP9 WebM 动画素材
 │   │   └── source-premultiplied/   原始预乘黑底素材备份（转换脚本自动生成）
 │   ├── brand/           ds.png（美术原图）+ ds.ico（原图自带的多尺寸 ICO）
 │   └── config/
@@ -155,7 +155,8 @@ getDefinition(animationId): AnimationDefinition | null
 
 ### 4.2 Manifest 驱动，不写死
 
-动画信息全部来自 `assets/config/animations.json`：
+动画信息全部来自 `assets/config/animations.json`（27 条），**行为策略**来自
+`assets/config/behavior.json`（显示状态 -> 默认动画 + 随机池 + 间隔）：
 
 ```json
 {
@@ -164,17 +165,53 @@ getDefinition(animationId): AnimationDefinition | null
     "source": "animations/cute.webm",
     "loop": false,
     "priority": 50,
-    "interruptible": true,
-    "cooldown": 8000,
+    "interruptible": false,
+    "cooldown": 3000,
+    "category": "click",
     "label": "卖萌",
-    "tags": ["reaction", "affection", "click"],
+    "tags": ["click", "touch"],
     "render": { "className": "anim-cute" }
+  },
+  "sad": {
+    "type": "video",
+    "source": "animations/sad-start.webm",
+    "kind": "persistent",
+    "segments": {
+      "start": "animations/sad-start.webm",
+      "loop": "animations/sad-loop.webm",
+      "end": "animations/sad-end.webm",
+      "loopCountRange": [2, 5]
+    },
+    "category": "trigger",
+    "label": "难过"
   }
 }
 ```
 
-新增动画 = 放入 WebM + 加一条记录，**核心代码零修改**。
-Manifest 在加载时会做校验：重复 ID、未知 `type`、非法 `source`、扩展名与类型不匹配都会被抓出来并记录日志，单条失败不会让整体失败。
+新增动画 = 放入 WebM + 加一条记录（要参与随机就再往池里加个 id），**核心代码零修改**。
+Manifest 在加载时会做校验：重复 ID、未知 `type`、非法 `source`、扩展名与类型不匹配、
+`loopCountRange` 写反、未知 `category` 都会被抓出来并记录日志，单条失败不会让整体失败。
+
+#### 4.2.1 四类动画（`category`）
+
+| 分类 | 数量 | 成员 | 谁来决定播它 |
+| --- | --- | --- | --- |
+| `state` 状态动画 | 3 | idle / lie / watch | 显示状态的**默认动画**（idle=正常、lie=下方收起、watch=右侧收起） |
+| `random` 随机动画 | 10 | roll / hot / sleep / peek / bomb / play / shake / sing / spin / swim | BehaviorManager 按池随机（正常 25–60 秒；收起只有 1 个候选且 3–8 分钟） |
+| `trigger` 触发动画 | 11 | catch_down / catch_right / hungry / remind / talk / sad / shy / offline / overheat / work / read | 事件触发（见 §4.5） |
+| `click` 点击动画 | 3 | cute / fawning / stroke | 用户点击；**不可打断** |
+
+#### 4.2.2 显示状态（收起 / 隐藏）
+
+拖到屏幕**右边缘或下边缘** -> 收起：贴平边缘、默认动画换成 `watch`（右侧）/ `lie`（下方），
+随机池缩到只剩一个候选且间隔更长。**拖动离开边缘**或**点一下她**即展开
+（点击展开会回到最近一次"好好待在桌面上"的位置）。
+托盘/右键的「收起（贴边）」与「隐藏桌宠」是两个不同的状态：
+前者仍在屏幕上、仍可交互，后者窗口直接藏起来（情绪衰减也按"看不到主人"算）。
+
+判定与几何全是纯函数（`src/shared/dock.ts`）：`petRectIn` / `evaluateDock` /
+`dockTargetPosition` / `shouldUndock` / `nudgeInward` —— 阈值 24px 触发、
+拖离 56px 展开（刻意做成两个不同的数，否则会在边缘反复抖动）。
 
 ### 4.3 优先级与打断规则（由核心统一裁决）
 
@@ -183,23 +220,26 @@ Manifest 在加载时会做校验：重复 ID、未知 `type`、非法 `source`�
 | 动画 | priority | interruptible |
 | --- | --- | --- |
 | idle（循环兜底） | 0 | true |
-| lie | 10 | true |
-| sleep | 20 | **false** |
-| work / read / sing | 30 | true |
-| talk / remind | 40 | true |
-| cute / fawning / stroke | 50 | true |
-| bomb（演出） | 100 | **false** |
+| lie / sleep | 10 | true |
+| watch | 15 | true |
+| read / work | 20 | true |
+| hot / peek / catch_down / catch_right / hungry / offline / sing | 30–40 | true |
+| sad / play / roll / shake / spin / swim | 40–45 | true |
+| cute / fawning / stroke（点击） | 50 | **false** |
+| shy | 55 | true |
+| remind | 60 | true |
+| bomb | 100 | true |
 
 裁决规则（全部在 `AnimationManager` 内，业务代码不判断）：
 
 1. 未注册 → 拒绝 `not-registered`；
 2. 同一动画正在播放 → 忽略 `same-animation`（避免重置到第一帧）；
 3. 冷却期内 → 拒绝 `cooldown`（**`force` 也不能绕过** —— 冷却防刷屏，`interrupt` 管能否抢占，两者正交）；唯一例外是用户**手动**挑的动画：托盘 / 右键菜单「播放动画（测试）」带 `bypassCooldown: true`；
-4. 当前动画 `interruptible: false` → 拒绝 `not-interruptible`（`force` 也无法抢占）；
-5. 新动画优先级 **低于** 当前 → 拒绝 `lower-priority`；
-6. 优先级 **相同** → 拒绝 `equal-priority`（先到先得，避免抖动）；
-7. 优先级更高 → 抢占，旧动画发出 `animation:end`（`completed: false`）；
-8. `interrupt: 'queue'` → 排队到当前动画结束后播放。
+4. `interrupt: 'queue'` → 排队到当前动画结束后播放（排队不算打断，所以在第 5 条之前）；
+5. 当前动画 `interruptible: false` → 拒绝 `not-interruptible`（**`force` 也无法抢占**：这是点击动画"必须播完才能再点"的硬约束）；
+6. 新动画优先级 **低于** 当前 → 拒绝 `lower-priority`；
+7. 优先级 **相同** → 拒绝 `equal-priority`（先到先得，避免抖动）；
+8. 优先级更高 → 抢占（旧动画发出 `animation:end`，`completed: false`）。
 
 > `interrupt: 'force'` 的语义是「允许抢占更高优先级 / 相同优先级」，不是「无视一切规则」。
 > 不可打断动画与冷却期对它依然生效，否则插件或 AI 可以轻易刷爆桌宠。
@@ -208,6 +248,21 @@ Manifest 在加载时会做校验：重复 ID、未知 `type`、非法 `source`�
 > 而不是"允许刷屏"：冷却本来是防自动化来源高频触发的，不该吞掉用户的主动点击
 > （例如 bomb 的 `cooldown` 是 300000ms，被冷却挡住时点第二次毫无反应，
 > 看起来就是"这个动画只能播一次"）。自动化来源（行为 / 插件 / AI）一律不带它。
+
+### 4.3.1 三段式持续动画的打断语义
+
+`start -> loop ×（随机 2~5 轮）-> end`。打断**分两种**，这是需求明确要求的：
+
+```text
+正在 loop（或 start）时被点击 / 触发 → 立刻进 end 段，end 播完再播打断它的动画
+正在 end 段时再被打断              → 立刻结束，直接播新动画（不再排一次收尾）
+```
+
+实现要点：被打断的请求挂在 `AnimationManager.pendingAfterEnd`（只留最后一条意图），
+由收尾段结束时的 `finishActive()` **先接上挂起请求、再发 `animation:end`** ——
+顺序反了会被"动画结束 -> 接回默认动画"那条链路顶掉（实测踩过）。
+`watch` 故意不配轮数（无限循环），因为它是右侧收起状态的默认动画，
+只在离开收起状态时才播收尾。
 
 ### 4.4 动画结束自动回到 IDLE
 
@@ -675,31 +730,38 @@ export default definePlugin({
 
 ---
 
-## 10. 行为系统
+## 10. 行为系统（随机动画池）
 
 `BehaviorManager` **只产生 Action Request**，绝不直接播放视频：
 
 ```ts
-{ type: 'animation', animationId: 'lie', priority: 10, reason: 'random-idle-action:idle-lie' }
+{ type: 'animation', animationId: 'roll', reason: 'random-pool:normal-random', source: 'behavior' }
 ```
 
-### 当前阶段的范围（重要）
+### 10.1 池 + 显示状态（数据驱动）
 
-按需求，**当前只做「idle 循环 + 点击反应动画」**。
-因此所有会「自动播放动画」的行为都设置为 `enabled: false`：
+随机动画不再是"一串写死的行为条目"，而是**池**（`assets/config/behavior.json`）：
+到点了就从池里随机挑一个播，挑哪个由 `pickPoolAnimation()` 决定（等概率，可配 `weights`）。
 
-| 行为 | 间隔 | 当前状态 | 说明 |
+| 显示状态 | 默认动画 | 随机池 | 间隔 |
 | --- | --- | --- | --- |
-| `idle-fidget` | 22–48s | ⏸ 关闭 | 随机小动作（`cute`） |
-| `idle-lie` | 60–150s | ⏸ 关闭 | 趴下休息（`lie`） |
-| `idle-work` | 90–200s | ⏸ 关闭 | 工作（`work`） |
-| `idle-timeout-sleep` | 5 分钟无互动 | ⏸ 关闭 | 睡觉（`sleep`） |
+| 正常 `normal` | idle | roll / hot / bomb / lie / play / shake / sing / spin / swim（9 个） | 25–60 秒 |
+| 下方收起 `docked-bottom` | lie | sleep（只有 1 个） | 3–8 分钟 |
+| 右侧收起 `docked-right` | watch | peek（只有 1 个） | 3–8 分钟 |
+| 隐藏 `hidden` | 不播 | 无 | — |
 
-结果：桌宠平时只会**循环播放 idle**，只有用户点击时才播放反应动画。
-调度、冷却、优先级抢占的实现都完整保留着 —— 想启用某个自动行为，把
-`DEFAULT_BEHAVIORS` 里对应条目的 `enabled` 改成 `true` 即可，不需要改其它代码。
+收起状态的间隔刻意做成正常状态的 5~10 倍（需求："收起宠物的随机动画分别只有一个，
+随机时间触发，注意触发时间要比正常状态下的时间长"）。
 
-另有全局冷却，避免多个行为同时触发互相抢占；托盘「暂停行为」会同步暂停行为系统与插件随机动作。
+三条实现约定：
+
+- **换状态就换池并重新排期**：收起时不该继承"正常状态已经等了一半"的计时
+  （否则刚收起就蹦一下，很怪）；
+- **只在 `IDLE` 状态触发**（`onlyWhenIdle`）：她正在演反应/说话时不打断；
+- **全局冷却**（池的 `cooldownMs`）避免多个池在同一秒一起触发。
+
+想加随机动画：把 id 加进池的 `animations` 即可（清单里不存在的 id 会被过滤并告警）。
+托盘「暂停行为」会同步暂停整个随机池与插件的随机动作。
 
 ### 关于「眨眼」（功能已整体移除）
 
@@ -708,7 +770,7 @@ export default definePlugin({
 
 - `src/renderer/core/blink-controller.ts` 已删除；
 - 状态机的 `BLINKING` 状态及其迁移已删除（现为 `IDLE` / `PLAYING` / `SLEEPING` / `BUSY`）；
-- `DEFAULT_BEHAVIORS` 里的 `blink` 行为、`pet:blink` 事件、`pet-overlay` 叠加层
+- 早期行为表里的 `blink` 行为、`pet:blink` 事件、`pet-overlay` 叠加层
   以及 `.blinking` 样式全部移除；
 - 占位素材 `assets/idle/open.png` / `closed.png` 与 Manifest 里的
   `blink-open` / `blink-closed` 条目一并删除。
@@ -835,7 +897,7 @@ npm run acceptance          # 等价于 electron tools/acceptance.cjs
 | --- | --- |
 | 窗口 | 创建、不可缩放、始终置顶、可见 |
 | 进程隔离 | 无 require / process / module / Buffer、未暴露 ipcRenderer 与通用 invoke、petAPI 与 bootstrap 已注入 |
-| 运行时状态 | petApp 挂载、idle 兜底在播、状态机 PLAYING、18 个动画注册、2 个插件加载 |
+| 运行时状态 | petApp 挂载、idle 兜底在播、状态机 PLAYING、27 个动画注册、2 个插件加载 |
 | 媒体与透明素材 | WebM 解码、正在播放、loop、自定义协议加载、视频层为可见主渲染层、**未使用混合模式抠图**、四角 alpha=0、**角色区域 44% 完全不透明**、存在半透明软边 |
 | 切换不闪烁 | 视频层使用双缓冲、切换动画期间 **0 个无纹理帧 / 0 个空画面帧 / 视频层不消失** |
 | idle 循环 | loop 属性、时间轴持续前进、**跨越片尾回到开头**、循环期间不触发 `animation:end` |

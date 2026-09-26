@@ -292,8 +292,7 @@ export class TrayManager {
   private buildAISubmenu(): MenuItemConstructorOptions[] {
     const callbacks = this.options.callbacks;
     const ai = this.state.ai;
-    const collapsed = this.state.presence === 'collapsed';
-    const statusLine = ai
+    const collapsed = this.state.presence === 'collapsed';    const statusLine = ai
       ? `${ai.usable ? '已接入大模型' : '本地兜底'} · 心情 ${ai.emotion.mood} · 饿 ${ai.emotion.hunger}`
       : '状态未就绪';
     const enabled = ai?.settings.enabled === true;
@@ -312,7 +311,7 @@ export class TrayManager {
       { label: '她记住了什么？', click: () => callbacks.onShowMemoryDigest('') },
       { type: 'separator' },
       {
-        label: collapsed ? '展开（恢复互动）' : '收起（不打扰）',
+        label: collapsed ? '展开（恢复互动）' : '收起（贴边，安静待着）',
         type: 'checkbox',
         checked: collapsed,
         click: () => callbacks.onToggleCollapsed(),
@@ -402,6 +401,8 @@ export class TrayManager {
     const paused = this.state.behaviorPaused ?? false;
     const alwaysOnTop = this.state.alwaysOnTop ?? true;
     const callbacks = this.options.callbacks;
+    const docked = (this.state.display?.dock ?? 'free') !== 'free';
+    const dockText = this.state.display?.dock === 'right' ? '右侧收起' : this.state.display?.dock === 'bottom' ? '下方收起' : '正常';
 
     const stateLabel = this.state.currentState ? `状态：${this.state.currentState}` : '状态：未知';
     const animationLabel = this.state.currentAnimation
@@ -415,6 +416,18 @@ export class TrayManager {
       { type: 'separator' },
       { label: '显示桌宠', enabled: !visible, click: () => callbacks.onShow() },
       { label: '隐藏桌宠', enabled: visible, click: () => callbacks.onHide() },
+      /*
+       * 收起（贴边）与隐藏是两件不同的事（用户明确要求）：
+       *   收起 = 挪到最近的边缘、换成 lie/watch 姿势待着，仍然能点、点一下就展开；
+       *   隐藏 = 完全看不见（窗口藏起来），恢复靠上面的「显示桌宠」。
+       * 这两条以前都叫"收起"，导致"点了一下她就彻底消失了"—— 现在分开。
+       */
+      {
+        label: docked ? `展开（恢复互动）· 当前${dockText}` : '收起（贴边）',
+        type: 'checkbox',
+        checked: docked,
+        click: () => callbacks.onToggleCollapsed(),
+      },
       { type: 'separator' },
       ...this.buildSizeItems(),
       {

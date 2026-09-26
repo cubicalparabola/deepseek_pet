@@ -51,6 +51,36 @@ export interface AITokenBudget {
   readonly resetAt: string;
 }
 
+/**
+ * 余额查询设置。
+ *
+ * DeepSeek 官方只有"查余额"这一个额度接口（`GET /user/balance`），
+ * 没有 token 用量接口 —— 所以"还剩多少额度"以**余额**为准，
+ * 本地累计 token 只在查不到余额时兜底。
+ */
+export interface AIBalanceSettings {
+  /** 是否定期查询（默认开；非 DeepSeek 官方域名会跳过，避免 404 噪音）。 */
+  readonly enabled: boolean;
+  /** 查询间隔（毫秒，默认 30 分钟）。 */
+  readonly intervalMs: number;
+  /** 余额低于这个金额算"快没额度了"（对应 hunger=100）。 */
+  readonly lowBalance: number;
+  /** 余额高于这个金额算"额度充足"（对应 hunger=0）。 */
+  readonly fullBalance: number;
+}
+
+/** 余额快照（设置面板展示 + 驱动"饿"/"掉线"）。 */
+export interface AIBalanceState {
+  readonly isAvailable: boolean;
+  readonly currency: string;
+  readonly totalBalance: number;
+  readonly grantedBalance: number;
+  readonly toppedUpBalance: number;
+  readonly fetchedAt: string;
+  /** true = 这次"饿"是余额算出来的；false = 用的是本地累计 token。 */
+  readonly drivesHunger: boolean;
+}
+
 /** AI 总配置（持久化到 userData/ai-settings.json）。 */
 export interface AISettings {
   /** 总开关：关掉时下面四个子系统全部不生效。 */
@@ -75,6 +105,7 @@ export interface AISettings {
   readonly consolidateEvery: number;
   readonly provider: AIProviderConfig;
   readonly budget: AITokenBudget;
+  readonly balance: AIBalanceSettings;
 }
 
 /** 默认人格设定（用户可在设置窗口里改）。 */
@@ -118,6 +149,13 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
     used: 0,
     resetAt: '',
   },
+  // 余额查询默认开，但只在 DeepSeek 官方域名下真的会发请求（见 llm-client）
+  balance: {
+    enabled: true,
+    intervalMs: 30 * 60000,
+    lowBalance: 2,
+    fullBalance: 20,
+  },
 };
 
 /** 设置窗口写入 AI 配置时的补丁（`apiKey` 省略 = 不改动已存的密钥）。 */
@@ -134,6 +172,7 @@ export interface AISettingsPatch {
   readonly consolidateEvery?: number;
   readonly provider?: Partial<AIProviderConfig>;
   readonly budget?: Partial<AITokenBudget>;
+  readonly balance?: Partial<AIBalanceSettings>;
   /** 清空密钥（设置界面「清除」按钮）。 */
   readonly clearApiKey?: boolean;
   /** 重置 token 用量（同时把 mood 的"饿"清零）。 */
@@ -172,6 +211,10 @@ export interface AIStatusView {
   readonly emotion: EmotionState;
   /** 宠物在不在场（影响情绪衰减速度）。 */
   readonly presence: PetPresence;
+  /** 余额快照（DeepSeek `GET /user/balance`）；没查过或查不到时为 null。 */
+  readonly balance: AIBalanceState | null;
+  /** 最近一次余额查询的错误（人类可读，成功时为空）。 */
+  readonly balanceError: string;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -456,6 +499,11 @@ export function sanitizeAISettings(raw: unknown, fallback: AISettings = DEFAULT_
   const budgetRaw = (typeof record.budget === 'object' && record.budget !== null
     ? record.budget
     : {}) as Record<string, unknown>;
+  const balanceRaw = (typeof record.balance === 'object' && record.balance !== null
+    ? record.balance
+    : {}) as Record<string, unknown>;
+  const full = num(balanceRaw.fullBalance, fallback.balance.fullBalance, 0, 1_000_000);
+  const low = num(balanceRaw.lowBalance, fallback.balance.lowBalance, 0, 1_000_000);
   const kind = providerRaw.kind === 'anthropic' ? 'anthropic' : providerRaw.kind === 'openai' ? 'openai' : fallback.provider.kind;
 
   return {
@@ -483,6 +531,13 @@ export function sanitizeAISettings(raw: unknown, fallback: AISettings = DEFAULT_
       used: Math.round(num(budgetRaw.used, fallback.budget.used, 0, 100_000_000)),
       resetAt: str(budgetRaw.resetAt, fallback.budget.resetAt, 40),
     },
+    balance: {
+      enabled: bool(balanceRaw.enabled, fallback.balance.enabled),
+      intervalMs: Math.round(num(balanceRaw.intervalMs, fallback.balance.intervalMs, 60_000, 24 * 3600_000)),
+      // low 必须 <= full，否则"余额映射到饥饿度"会算出反的结果（写反了自动纠正）
+      lowBalance: Math.min(low, full),
+      fullBalance: full,
+    },
   };
 }
 
@@ -501,6 +556,7 @@ export function applyAISettingsPatch(
 ): AISettings {
   const providerPatch = patch.provider ?? {};
   const budgetPatch = patch.budget ?? {};
+  const balancePatch = patch.balance ?? {};
   const nextKey =
     patch.clearApiKey === true
       ? ''
@@ -522,6 +578,20 @@ export function applyAISettingsPatch(
         ...(patch.resetUsage === true ? { used: 0, resetAt: now } : {}),
         ...budgetPatch,
         ...(patch.resetUsage === true ? { used: 0, resetAt: now } : {}),
+      },
+      balance: {
+        ...current.balance,
+        ...balancePatch,
+        // 复核一次 low<=full：补丁可能只改其中一个，导致两个字段互相矛盾
+        ...(balancePatch.lowBalance !== undefined || balancePatch.fullBalance !== undefined
+          ? {
+              lowBalance: Math.min(
+                balancePatch.lowBalance ?? current.balance.lowBalance,
+                balancePatch.fullBalance ?? current.balance.fullBalance,
+              ),
+              fullBalance: balancePatch.fullBalance ?? current.balance.fullBalance,
+            }
+          : {}),
       },
     },
     current,
@@ -548,5 +618,7 @@ export function createDefaultAIStatus(dataDir = ''): AIStatusView {
       updatedAt: '',
     },
     presence: 'visible',
+    balance: null,
+    balanceError: '',
   };
 }

@@ -18,6 +18,7 @@ import {
   type RuntimeInfo,
   type StateChangedPayload,
   type TrayStatePayload,
+  type TriggerAnimationPayload,
 } from '../shared/ipc';
 import type { PetSettingsState, PetSizeInfo } from '../shared/pet-size';
 import type { BubblePayload, BubbleState } from '../shared/bubble';
@@ -46,6 +47,7 @@ import type {
   MemoryNodeKind,
 } from '../shared/growth-types';
 import type { PetAction } from '../shared/action-types';
+import type { PetDisplayState } from '../shared/behavior-config';
 import type { DiscoveredPlugin, PluginRecord } from '../shared/plugin-types';
 import type { Logger } from '../shared/logger';
 import { IpcError, describeError, serializeError } from '../shared/errors';
@@ -57,6 +59,10 @@ export interface IpcManagerDependencies {
   setWindowPosition(x: number, y: number): { x: number; y: number };
   getWindowPosition(): { x: number; y: number };
   setWindowSize(width: number, height: number): void;
+  /** 拖拽结束：由主进程判定是否贴边收起。 */
+  dragEnd(): PetDisplayState;
+  /** 请求展开（收起状态下点了宠物）。 */
+  undock(): PetDisplayState;
   showWindow(): void;
   hideWindow(): void;
   setAlwaysOnTop(value: boolean): void;
@@ -114,6 +120,8 @@ export interface IpcManagerDependencies {
   aiWriteDiary(): Promise<DiaryEntry>;
   aiOpenDiaryDir(): boolean;
   aiTest(): Promise<AITestResult>;
+  /** 立刻查一次余额并返回最新状态。 */
+  aiRefreshBalance(): Promise<AIStatusView>;
   aiInteraction(kind: InteractionKind): void;
   aiResetEmotion(): AIStatusView;
   aiSetPresence(presence: 'visible' | 'collapsed' | 'hidden'): AIStatusView;
@@ -195,6 +203,9 @@ export class IpcManager {
     this.handle(IpcChannels.WindowSetSize, (_event, width, height) =>
       this.deps.setWindowSize(asNumber(width, 360), asNumber(height, 480)),
     );
+    // 拖拽结束：渲染层只负责说"拖完了"，贴边判定在工作区那一侧（主进程）
+    this.handle(IpcChannels.WindowDragEnd, () => this.deps.dragEnd());
+    this.handle(IpcChannels.WindowUndock, () => this.deps.undock());
     this.handle(IpcChannels.WindowStartDrag, () => {
       this.deps.logger.debug('drag requested by renderer');
       return true;
@@ -392,6 +403,7 @@ export class IpcManager {
     this.handle(IpcChannels.AIDiaryWriteNow, async () => this.deps.aiWriteDiary());
     this.handle(IpcChannels.AIDiaryOpenDir, () => this.deps.aiOpenDiaryDir());
     this.handle(IpcChannels.AITestConnection, async () => this.deps.aiTest());
+    this.handle(IpcChannels.AIBalanceRefresh, async () => this.deps.aiRefreshBalance());
     this.handle(IpcChannels.AIInteraction, (_event, kind) => {
       const allowed: readonly InteractionKind[] = ['click', 'doubleclick', 'drag', 'chat', 'diary', 'gift'];
       const value = asString(kind, 'click') as InteractionKind;
@@ -578,6 +590,21 @@ export class IpcManager {
 
   public setAnimation(animationId: string): void {
     this.broadcast(IpcChannels.CommandSetAnimation, animationId);
+  }
+
+  /**
+   * 通知 Renderer：播放一条**触发动画**（感知 / AI / 系统来源）。
+   *
+   * 与 `setAnimation` 分开是刻意的：那条是"用户在托盘挑动画测试"（强制切换），
+   * 这条要走普通优先级仲裁与冷却 —— 否则感知到的 work/read 会硬切掉用户正在看的点击反应。
+   */
+  public triggerAnimation(payload: TriggerAnimationPayload): void {
+    this.broadcast(IpcChannels.CommandTriggerAnimation, payload);
+  }
+
+  /** 通知 Renderer：显示状态（收起方向 / 隐藏）变了。 */
+  public notifyDisplayState(display: PetDisplayState): void {
+    this.broadcast(IpcChannels.CommandDisplayState, display);
   }
 
   /** 通知 Renderer：尺寸发生变化。 */

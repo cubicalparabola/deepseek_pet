@@ -25,8 +25,11 @@ import type {
   RuntimeInfo,
   StateChangedPayload,
   TrayStatePayload,
+  TriggerAnimationPayload,
   WindowPosition,
 } from '../shared/ipc';
+import type { PetDisplayState } from '../shared/behavior-config';
+import { DEFAULT_BEHAVIOR_CONFIG, DEFAULT_DISPLAY_STATE } from '../shared/behavior-config';
 import type { PetAction, ActionResult } from '../shared/action-types';
 import type { PetSettingsState, PetSizeInfo } from '../shared/pet-size';
 import type { BubblePayload, BubbleState } from '../shared/bubble';
@@ -103,6 +106,10 @@ const fallbackRuntime: RuntimeInfo = {
   mode: 'production',
   assetsPath: '',
   animationManifest: {},
+  // bootstrap 拿不到时（preload 早于主进程注入）也要有一份自洽的默认：
+  // 正常状态 + 内置随机池，保证"随机动画没了"这种静默失败不会发生。
+  behaviorConfig: DEFAULT_BEHAVIOR_CONFIG,
+  display: DEFAULT_DISPLAY_STATE,
 };
 
 const runtime: RuntimeInfo = bootstrap?.runtime ?? fallbackRuntime;
@@ -182,6 +189,8 @@ function buildAIAPI(): AIAPI {
     writeDiary: (): Promise<DiaryEntry> => ipcRenderer.invoke(IpcChannels.AIDiaryWriteNow) as Promise<DiaryEntry>,
     openDiaryDir: (): Promise<boolean> => ipcRenderer.invoke(IpcChannels.AIDiaryOpenDir) as Promise<boolean>,
     testConnection: (): Promise<AITestResult> => ipcRenderer.invoke(IpcChannels.AITestConnection) as Promise<AITestResult>,
+    refreshBalance: (): Promise<AIStatusView> =>
+      ipcRenderer.invoke(IpcChannels.AIBalanceRefresh) as Promise<AIStatusView>,
     notifyInteraction: (kind: InteractionKind): void => send(IpcChannels.AIInteraction, kind),
     resetEmotion: (): Promise<AIStatusView> => ipcRenderer.invoke(IpcChannels.AIResetEmotion) as Promise<AIStatusView>,
     setPresence: (presence: PetPresence): Promise<AIStatusView> =>
@@ -398,6 +407,10 @@ function buildPetBridge(): PetBridge {
       setIgnoreMouseEvents: (ignore: boolean, forward = true): void =>
         send(IpcChannels.WindowSetIgnoreMouse, ignore, forward),
       reportPointer: (nx: number, ny: number): void => send(IpcChannels.PointerPosition, { nx, ny }),
+      dragEnd: (screenX?: number, screenY?: number): Promise<PetDisplayState> =>
+        ipcRenderer.invoke(IpcChannels.WindowDragEnd, { screenX, screenY }) as Promise<PetDisplayState>,
+      undock: (): Promise<PetDisplayState> =>
+        ipcRenderer.invoke(IpcChannels.WindowUndock) as Promise<PetDisplayState>,
       showSettingsWindow: (): Promise<boolean> =>
         ipcRenderer.invoke(IpcChannels.SettingsWindowShow) as Promise<boolean>,
     },
@@ -440,6 +453,10 @@ function buildPetBridge(): PetBridge {
         subscribe<boolean>(IpcChannels.CommandSetBehaviorPaused, handler),
       onSetAnimation: (handler: (animationId: string) => void): Unsubscribe =>
         subscribe<string>(IpcChannels.CommandSetAnimation, handler),
+      onTriggerAnimation: (handler: (payload: TriggerAnimationPayload) => void): Unsubscribe =>
+        subscribe<TriggerAnimationPayload>(IpcChannels.CommandTriggerAnimation, handler),
+      onDisplayState: (handler: (payload: PetDisplayState) => void): Unsubscribe =>
+        subscribe<PetDisplayState>(IpcChannels.CommandDisplayState, handler),
       onSizeChanged: (handler: (size: PetSizeInfo) => void): Unsubscribe =>
         subscribe<PetSizeInfo>(IpcChannels.CommandSizeChanged, handler),
       onBubble: (handler: (payload: BubblePayload) => void): Unsubscribe =>

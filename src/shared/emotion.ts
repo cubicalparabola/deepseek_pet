@@ -100,6 +100,38 @@ export function tokensRemainingRatio(budget: { readonly budget: number; readonly
   return clamp((budget.budget - used) / budget.budget, 0, 1);
 }
 
+/** 余额 -> 饥饿度的默认口径：<= 2 元算见底，>= 20 元算充足。 */
+export const BALANCE_LOW_DEFAULT = 2;
+export const BALANCE_FULL_DEFAULT = 20;
+
+/**
+ * 把**账号余额**映射成饥饿度（0~100）；`null` = 没有余额信息，调用方退回本地预算。
+ *
+ * 为什么需要它（用户明确要求"余额优先于本地预算"）：
+ * 本地累计 token 只统计这台机器上我们自己发出去的请求，而余额才是
+ * "账号还剩多少额度"的真相（换台机器、别的程序也在用同一个 key）。
+ *
+ * 口径（线性，两端夹住）：
+ *   total <= low   -> 100（很饿）
+ *   total >= full  -> 0（不饿）
+ *   中间           -> 从 100 线性降到 0
+ *
+ * 两个数写反（`low > full`）时不做"余额越多越饿"这种反直觉计算，直接给 0。
+ */
+export function hungerFromBalance(
+  total: number | null,
+  options: { readonly low?: number; readonly full?: number } = {},
+): number | null {
+  if (total === null || !Number.isFinite(total)) return null;
+  const low = Number.isFinite(options.low) ? (options.low as number) : BALANCE_LOW_DEFAULT;
+  const full = Number.isFinite(options.full) ? (options.full as number) : BALANCE_FULL_DEFAULT;
+  // 两个数写反：配置笔误不该让她"越有钱越饿"，保守地当作"不饿"
+  if (full <= low) return 0;
+  if (total <= low) return 100;
+  if (total >= full) return 0;
+  return clampMood(Math.round(((full - total) / (full - low)) * 100));
+}
+
 /* -------------------------------------------------------------------------- */
 /* 状态转移                                                                    */
 /* -------------------------------------------------------------------------- */

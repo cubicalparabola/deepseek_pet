@@ -742,13 +742,15 @@ export function planIntervention(input: {
 }): InterventionPlan | null {
   const { observation, behavior, settings } = input;
 
-  // 1) 敏感内容：立刻捂眼睛躲起来（这是唯一"躲"的行为）
+  // 1) 敏感内容：立刻害羞地捂眼睛
+  //    （"躲起来"换成 `shy` 动画：需求把"发现私密内容"明确归给了 shy，
+  //     它本身就是捂眼睛的动作，比整只藏起来更贴切、也不会让她凭空消失 20 秒。）
   if (observation?.sensitive === true) {
     return {
       kind: 'sensitive',
       text: '唔……这个我不看，捂住眼睛。',
-      animation: 'peek',
-      hide: true,
+      animation: 'shy',
+      hide: false,
     };
   }
 

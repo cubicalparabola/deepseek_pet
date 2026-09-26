@@ -63,6 +63,13 @@
     "fps": 24,
     "alpha": true
   },
+  "offline.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 6.04,
+    "fps": 24,
+    "alpha": true
+  },
   "overheat-end.webm": {
     "width": 834,
     "height": 1112,
@@ -133,7 +140,35 @@
     "fps": 24,
     "alpha": true
   },
+  "sad-end.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 5.17,
+    "fps": 24,
+    "alpha": true
+  },
+  "sad-loop.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 4.46,
+    "fps": 24,
+    "alpha": true
+  },
+  "sad-start.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 2,
+    "fps": 24,
+    "alpha": true
+  },
   "shake.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 6.04,
+    "fps": 24,
+    "alpha": true
+  },
+  "shy.webm": {
     "width": 834,
     "height": 1112,
     "duration": 6.04,

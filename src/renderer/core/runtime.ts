@@ -8,7 +8,8 @@
  * 注意：本文件不 import 任何 electron / node 模块，能力全部来自 preload 的 contextBridge。
  */
 
-import type { PetBridge, TrayStatePayload } from '../../shared/ipc';
+import type { PetBridge, TrayStatePayload, TriggerAnimationPayload } from '../../shared/ipc';
+import type { PetDisplayState } from '../../shared/behavior-config';
 import type { PetAction } from '../../shared/action-types';
 import type { PluginRecord } from '../../shared/plugin-types';
 import type { PetSettingsState, PetSizeInfo } from '../../shared/pet-size';
@@ -81,6 +82,45 @@ export class RuntimeCapabilities {
   public onSetAnimation(handler: (animationId: string) => void): () => void {
     if (!this.bridge) return () => undefined;
     return this.bridge.commands.onSetAnimation(handler);
+  }
+
+  /**
+   * 自动来源的触发动画（感知 / AI / 系统）。
+   *
+   * 与 `onSetAnimation`（用户在托盘挑动画测试）严格分开：那条是"强制切换"，
+   * 这条走普通优先级仲裁，所以感知触发的 work/read/sad 不该抢掉正在播的提醒。
+   */
+  public onTriggerAnimation(handler: (payload: TriggerAnimationPayload) => void): () => void {
+    if (!this.bridge) return () => undefined;
+    return this.bridge.commands.onTriggerAnimation(handler);
+  }
+
+  /** 显示状态（收起方向 / 隐藏）变化。 */
+  public onDisplayState(handler: (payload: PetDisplayState) => void): () => void {
+    if (!this.bridge) return () => undefined;
+    return this.bridge.commands.onDisplayState(handler);
+  }
+
+  /** 上报拖拽结束，由主进程判定贴边收起；返回新的显示状态。 */
+  public async endDrag(screenX?: number, screenY?: number): Promise<PetDisplayState | null> {
+    if (!this.bridge) return null;
+    try {
+      return await this.bridge.window.dragEnd(screenX, screenY);
+    } catch (error) {
+      this.logger.warn('reporting drag end failed', { error });
+      return null;
+    }
+  }
+
+  /** 请求展开（收起状态下点了宠物）。 */
+  public async requestUndock(): Promise<PetDisplayState | null> {
+    if (!this.bridge) return null;
+    try {
+      return await this.bridge.window.undock();
+    } catch (error) {
+      this.logger.warn('requesting undock failed', { error });
+      return null;
+    }
   }
 
   /** 尺寸变化（托盘/右键菜单/设置界面调整）时通知。 */

@@ -9,7 +9,10 @@
  */
 
 import {
+  ANIMATION_CATEGORIES,
   ANIMATION_DEFAULTS,
+  inferAnimationCategory,
+  type AnimationCategory,
   type AnimationDefinition,
   type AnimationKind,
   type AnimationManifest,
@@ -102,11 +105,36 @@ function normalizeSegments(
       ? Math.floor(raw.loopCount)
       : undefined;
 
-  if (loop && !end && loopCount !== undefined) {
+  /*
+   * 随机循环次数（`[min, max]`）。两个数都必须是正的有限数，且顺序无所谓
+   * （写反了自动纠正并在 range 归一化时排好）—— 手改清单很容易写反。
+   */
+  let loopCountRange: readonly [number, number] | undefined;
+  if (raw.loopCountRange !== undefined) {
+    const value = raw.loopCountRange;
+    if (Array.isArray(value) && value.length === 2) {
+      const a = value[0];
+      const b = value[1];
+      if (typeof a === 'number' && typeof b === 'number' && Number.isFinite(a) && Number.isFinite(b)) {
+        const min = Math.max(1, Math.floor(Math.min(a, b)));
+        const max = Math.max(min, Math.floor(Math.max(a, b)));
+        loopCountRange = [min, max];
+      } else {
+        issues.push({ id, level: 'warn', message: 'loopCountRange 必须是两个数字，已忽略' });
+      }
+    } else {
+      issues.push({ id, level: 'warn', message: 'loopCountRange 必须是 [min, max] 数组，已忽略' });
+    }
+    if (loopCountRange && loopCount !== undefined) {
+      issues.push({ id, level: 'warn', message: '同时配置了 loopCount 与 loopCountRange，以 loopCountRange 为准' });
+    }
+  }
+
+  if (loop && !end && (loopCount !== undefined || loopCountRange !== undefined)) {
     issues.push({
       id,
       level: 'warn',
-      message: `持续动画配置了 loopCount=${loopCount} 但没有 end 段，循环结束后将直接结束（没有收尾动作）`,
+      message: '持续动画配置了循环次数但没有 end 段，循环结束后将直接结束（没有收尾动作）',
     });
   }
 
@@ -116,6 +144,7 @@ function normalizeSegments(
       ...(loop ? { loop } : {}),
       ...(end ? { end } : {}),
       ...(loopCount !== undefined ? { loopCount } : {}),
+      ...(loopCountRange !== undefined ? { loopCountRange } : {}),
     },
   };
 }
@@ -166,6 +195,19 @@ export function normalizeAnimation(
     ? entry.tags.filter((tag): tag is string => typeof tag === 'string')
     : undefined;
 
+  /*
+   * 用途分类：显式 `category` 优先；否则按 tags 推断（兼容旧清单）；
+   * 再推断不出来算 `trigger`。非法值只 warn，不丢弃整条动画。
+   * 推断规则与渲染层注册插件动画时共用 `inferAnimationCategory`，避免两套规则漂移。
+   */
+  if (entry.category !== undefined && !ANIMATION_CATEGORIES.includes(entry.category as AnimationCategory)) {
+    issues.push({ id, level: 'warn', message: `未知的 category "${String(entry.category)}"，已按 tags 推断` });
+  }
+  const category: AnimationCategory = inferAnimationCategory({
+    ...(entry.category !== undefined ? { category: entry.category } : {}),
+    ...(tags !== undefined ? { tags } : {}),
+  });
+
   const extension = source.slice(source.lastIndexOf('.')).toLowerCase();
   const extensionOk = type === 'video'
     ? (VIDEO_EXTENSIONS as readonly string[]).includes(extension)
@@ -209,6 +251,7 @@ export function normalizeAnimation(
     interruptible,
     cooldown,
     kind,
+    category,
     ...(segments ? { segments } : {}),
     ...(tags ? { tags } : {}),
     ...(typeof entry.label === 'string' ? { label: entry.label } : {}),

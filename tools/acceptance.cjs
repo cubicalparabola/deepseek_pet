@@ -107,6 +107,46 @@ app.on('web-contents-created', (_e, contents) => {
 });
 
 app.whenReady().then(async () => {
+  /*
+   * 抢在"触发服务"启动之前把"她会自己动"的路径静音。
+   *
+   * 时序：触发服务在窗口 `did-finish-load` 之后 1.5 秒启动
+   * （见 main.createWindow 的注释），而下面还要等 6 秒才做正式断言 ——
+   * 不在这里抢跑的话，启动时"没配密钥 -> 演 offline"的指令会先到，
+   * 于是 `兜底动画 idle 正在播放` 看到的是 `offline`（实测）。
+   *
+   * 为什么不是产品 bug：没配密钥时演 offline 正是需求要的行为
+   * （`tools/probe-triggers.cjs` 专门断言它）；这里只是测试要隔离。
+   */
+  for (let i = 0; i < 240; i += 1) {
+    const candidate = BrowserWindow.getAllWindows()[0];
+    if (candidate && !candidate.isDestroyed()) {
+      try {
+        /*
+         * 必须等到 `petDebug.behaviors` 存在才停手：`petAPI` 在 preload 阶段就有了，
+         * 而行为管理器要等渲染层的 start() 才挂上 —— 只判 petAPI 会在
+         * "预加载已就绪、渲染层还没起来"时误判成功，然后把主进程的暂停标记
+         * 交给渲染层的托盘状态同步（它会报 false）覆盖掉（实测踩到）。
+         */
+        const ok = await candidate.webContents.executeJavaScript(
+          `(() => {
+            try {
+              if (!window.petDebug || !window.petDebug.behaviors) return false;
+              window.petAPI.notifyBehaviorPaused(true);
+              window.petDebug.behaviors.pause();
+              return window.petDebug.behaviors.isPaused() === true;
+            } catch (error) { return false; }
+          })()`,
+          true,
+        );
+        if (ok === true) break;
+      } catch (error) {
+        /* 渲染层/预加载还没就绪：下一轮再试 */
+      }
+    }
+    await wait(100);
+  }
+
   await wait(6000);
 
   const wins = BrowserWindow.getAllWindows();
@@ -129,9 +169,20 @@ app.whenReady().then(async () => {
    * 这是**测试没隔离好**，不是产品 bug —— 产品里"她会主动说话"本来就是设计行为。
    *
    * 两个模块自己的断言段开始前会重新打开（并在那里断言"默认全开"）。
+   *
+   * ⚠️ **随机池与触发动画同样要静音**（这一次新增的两条"她会自己动"的路径）：
+   *   - 随机池 25~60 秒就会挑一个随机动画播 —— 验收跑几分钟必然撞上；
+   *   - 鼠标靠近（catch_down/catch_right）看的是**真实光标位置**，
+   *     光标恰好停在宠物附近时会插进来演一次（实测：`反应动画结束后自动恢复 idle`
+   *     看到的是 `catch_right`）。
+   * 两条都属于"产品里本来就该发生"，测试要主动隔离：
+   * `behaviors.pause()` 停渲染层随机池，`notifyBehaviorPaused(true)` 让主进程的
+   * 触发服务也安静（「暂停行为」的语义就是"别自己动"）。
+   * 感知/AI 段开始前会恢复（见下面的 resume）。
    */
   await run(`window.petAPI.perception.setSettings({ screen: false, behavior: false, habits: false, camera: false })`);
   await run(`window.petAPI.ai.setSettings({ enabled: false, chat: false, memory: false, emotion: false, diary: false })`);
+  await run(`(() => { window.petDebug.behaviors.pause(); window.petAPI.notifyBehaviorPaused(true); return true; })()`);
   await wait(300);
 
   /*
@@ -181,6 +232,20 @@ app.whenReady().then(async () => {
   record('无 Node 模块泄漏到 window', isolation.nodeLeaks.length === 0, JSON.stringify(isolation.nodeLeaks));
 
   /* --------------------------- 应用状态 --------------------------- */
+  /*
+   * 先等回 idle 再断言"兜底动画是 idle"。
+   *
+   * 为什么需要等：没配密钥时启动会演一次 `offline`（需求要求的行为，
+   * `tools/probe-triggers.cjs` 专门验证它）。正常情况下上面那段"抢跑静音"
+   * 已经把它拦住了；但"能不能拦住"取决于渲染层就绪与触发服务 1.5 秒延迟的先后，
+   * 不该让断言依赖这种竞态。这里最多等 8 秒，等不到就照常断言失败。
+   */
+  for (let i = 0; i < 80; i += 1) {
+    const current = await run(`window.petDebug.anim.getCurrentAnimation()`);
+    if (current === 'idle') break;
+    await wait(100);
+  }
+
   const state = await run(`(() => {
     const app = window.petApp;
     if (!app) return { error: 'petApp 未挂载' };
@@ -189,7 +254,7 @@ app.whenReady().then(async () => {
   record('petApp 已挂载', !state.error, JSON.stringify(state));
   record('兜底动画 idle 正在播放', state.animation === 'idle', `animation=${state.animation}`);
   record('状态机初始 PLAYING', state.state === 'PLAYING', `state=${state.state}`);
-  record('Manifest 注册了 24 个动画', state.animations === 24, `animations=${state.animations}`);
+  record('Manifest 注册了 27 个动画（四类：状态/随机/触发/点击）', state.animations === 27, `animations=${state.animations}`);
   record('两个示例插件已加载', state.plugins === 2, `plugins=${state.plugins}`);
 
   /* ------------------------- 媒体与透明素材 ------------------------- */
@@ -468,23 +533,32 @@ app.whenReady().then(async () => {
       return {
         id,
         kind: d ? d.kind : null,
-        seg: d && d.segments ? { start: Boolean(d.segments.start), loop: Boolean(d.segments.loop), end: Boolean(d.segments.end), loopCount: d.segments.loopCount ?? null } : null,
+        category: d ? d.category : null,
+        seg: d && d.segments ? { start: Boolean(d.segments.start), loop: Boolean(d.segments.loop), end: Boolean(d.segments.end), loopCount: d.segments.loopCount ?? null, range: d.segments.loopCountRange ?? null } : null,
       };
     });
     return rows;
   })()`);
-  const persistentIds = ['overheat', 'read', 'sleep', 'watch', 'work'];
+  // 6 条三段式：watch（右侧收起默认，无限循环）与 5 条会自己结束的
+  const persistentIds = ['overheat', 'read', 'sad', 'sleep', 'watch', 'work'];
   const persistRows = persistentManifest.filter((r) => persistentIds.includes(r.id));
   const oneShotRows = persistentManifest.filter((r) => !persistentIds.includes(r.id));
   record(
-    '5 条持续动画均带 start/loop/end 三段',
-    persistRows.length === 5 && persistRows.every((r) => r.kind === 'persistent' && r.seg && r.seg.start && r.seg.loop && r.seg.end),
-    JSON.stringify(persistRows.map((r) => `${r.id}:${r.kind}:${r.seg ? `${r.seg.start ? 'S' : '-'}${r.seg.loop ? 'L' : '-'}${r.seg.end ? 'E' : '-'}${r.seg.loopCount === null ? '(inf)' : '(' + r.seg.loopCount + ')'}` : 'none'}`)),
+    '6 条持续动画均带 start/loop/end 三段',
+    persistRows.length === 6 && persistRows.every((r) => r.kind === 'persistent' && r.seg && r.seg.start && r.seg.loop && r.seg.end),
+    JSON.stringify(persistRows.map((r) => `${r.id}:${r.kind}:${r.seg ? `${r.seg.start ? 'S' : '-'}${r.seg.loop ? 'L' : '-'}${r.seg.end ? 'E' : '-'}${r.seg.range ? `[${r.seg.range.join('-')}]` : r.seg.loopCount === null ? '(inf)' : `(${r.seg.loopCount})`}` : 'none'}`)),
   );
   record(
-    '其余 19 条为一次性动画（无 segments）',
-    oneShotRows.length === 19 && oneShotRows.every((r) => r.kind === 'one-shot' && r.seg === null),
+    '其余 21 条为一次性动画（无 segments）',
+    oneShotRows.length === 21 && oneShotRows.every((r) => r.kind === 'one-shot' && r.seg === null),
     JSON.stringify({ count: oneShotRows.length, kinds: [...new Set(oneShotRows.map((r) => r.kind))] }),
+  );
+  record(
+    '三段式动画都配了随机循环次数（watch 除外：收起状态的默认动画要无限循环）',
+    persistRows.every((r) =>
+      r.id === 'watch' ? r.seg.range === null && r.seg.loopCount === null : Array.isArray(r.seg.range) && r.seg.range.length === 2 && r.seg.loopCount === null,
+    ),
+    JSON.stringify(persistRows.map((r) => `${r.id}:${r.seg.range ? r.seg.range.join('-') : 'inf'}`)),
   );
 
   // 完整走一遍：start -> loop -> 循环到次数 -> end -> 结束
@@ -515,8 +589,11 @@ app.whenReady().then(async () => {
       if (anim.getPersistentPhase() === 'loop') { phaseLoop = 'loop'; srcLoop = anim.getActiveSource(); }
     }
 
-    // 等它自己循环到次数（read loopCount=4，loop 段 1.75s → 约 7s）
-    const target = (anim.getDefinition('read').segments || {}).loopCount;
+    // 等它自己循环到次数（read 的随机范围 2~5，loop 段 1.75s → 最多约 9s）
+    const readSegments = anim.getDefinition('read').segments || {};
+    const target = readSegments.loopCount ?? null;
+    // 本次播放实际要循环几轮（随机值在进入 loop 段时定下，见 getLoopTarget）
+    const effectiveTarget = anim.getLoopTarget();
     let sawEndSrc = false;
     const t0 = Date.now();
     while (Date.now() - t0 < 30000 && !endEvent) {
@@ -528,14 +605,18 @@ app.whenReady().then(async () => {
     // 每轮之间的平均间隔（回归用：曾经 4 轮在同帧内计完，间隔≈0）
     const totalMs = cycleTimes.length > 1 ? cycleTimes[cycleTimes.length - 1] - cycleTimes[0] : 0;
     const cycleSpanMs = cycleTimes.length > 1 ? totalMs / (cycleTimes.length - 1) : 0;
-    return { phaseStart, srcStart, phaseLoop, srcLoop, target, cycles, cycleTimes, totalMs, cycleSpanMs, sawEndSrc, endEvent, phaseAfter: anim.getPersistentPhase(), current: anim.getCurrentAnimation() };
+    return { phaseStart, srcStart, phaseLoop, srcLoop, target, effectiveTarget, range: readSegments.loopCountRange ?? null, cycles, cycleTimes, totalMs, cycleSpanMs, sawEndSrc, endEvent, phaseAfter: anim.getPersistentPhase(), current: anim.getCurrentAnimation() };
   })()`);
   record('持续动画起始阶段为 start', cycleRun.phaseStart === 'start' && String(cycleRun.srcStart).includes('-start'), JSON.stringify({ phase: cycleRun.phaseStart, src: cycleRun.srcStart }));
   record('开场播完自动进入 loop 阶段', cycleRun.phaseLoop === 'loop' && String(cycleRun.srcLoop).includes('-loop'), JSON.stringify({ phase: cycleRun.phaseLoop, src: cycleRun.srcLoop }));
   record(
-    '循环段按 loopCount 精确计数',
-    Array.isArray(cycleRun.cycles) && cycleRun.cycles.length === cycleRun.target && cycleRun.cycles[cycleRun.cycles.length - 1] === cycleRun.target,
-    JSON.stringify({ target: cycleRun.target, cycles: cycleRun.cycles }),
+    '循环段按"本次随机轮数"精确计数（数到的轮数 = 进入 loop 时定下的目标）',
+    Array.isArray(cycleRun.cycles) &&
+      cycleRun.effectiveTarget >= 2 &&
+      cycleRun.effectiveTarget <= 5 &&
+      cycleRun.cycles.length === cycleRun.effectiveTarget &&
+      cycleRun.cycles[cycleRun.cycles.length - 1] === cycleRun.effectiveTarget,
+    JSON.stringify({ target: cycleRun.effectiveTarget, range: cycleRun.range, cycles: cycleRun.cycles }),
   );
   /*
    * 回归断言（真实 bug）：循环计数曾经在同一帧内连加 ——
@@ -758,6 +839,422 @@ app.whenReady().then(async () => {
       clickNoDeferRun.after === 'bomb' &&
       (clickNoDeferRun.rejections ?? []).some((r) => r.rejection === 'lower-priority'),
     JSON.stringify(clickNoDeferRun),
+  );
+
+  /* ==================================================================== */
+  /* 动画系统（6.2）：分类 / 随机循环次数 / 三段式打断 / 点击锁 / 收起隐藏    */
+  /* ==================================================================== */
+
+  /*
+   * 清单与分类：27 条动画分四类，且**每一类里都有该有的那些 id**。
+   * 只数总数是不够的 —— "lie 被划进 trigger 就不会当默认动画了" 这种错
+   * 只有逐类核对才抓得到。
+   */
+  const animCatalog = await run(`(() => {
+    const anim = window.petDebug.anim;
+    const byCategory = {};
+    for (const id of anim.list()) {
+      const category = anim.getDefinition(id).category ?? '?';
+      (byCategory[category] ??= []).push(id);
+    }
+    const sorted = Object.fromEntries(
+      Object.entries(byCategory).map(([k, v]) => [k, v.slice().sort()]),
+    );
+    // 点击动画必须标成不可打断（硬锁由 AnimationManager 执行，这里只核对清单）
+    const clickLocked = anim.list().every((id) => {
+      const definition = anim.getDefinition(id);
+      return definition.category !== 'click' || definition.interruptible === false;
+    });
+    return { total: anim.list().length, byCategory: sorted, clickLocked };
+  })()`);
+  record(
+    '动画四分类（状态/随机/触发/点击）与需求清单一致',
+    animCatalog.total === 27 &&
+      JSON.stringify(animCatalog.byCategory.state) === JSON.stringify(['idle', 'lie', 'watch']) &&
+      JSON.stringify(animCatalog.byCategory.random) ===
+        JSON.stringify(['bomb', 'hot', 'peek', 'play', 'roll', 'shake', 'sing', 'sleep', 'spin', 'swim']) &&
+      JSON.stringify(animCatalog.byCategory.trigger) ===
+        JSON.stringify(['catch_down', 'catch_right', 'hungry', 'offline', 'overheat', 'read', 'remind', 'sad', 'shy', 'talk', 'work']) &&
+      JSON.stringify(animCatalog.byCategory.click) === JSON.stringify(['cute', 'fawning', 'stroke']),
+    JSON.stringify(animCatalog.byCategory),
+  );
+  record(
+    '点击动画在清单里标记为不可打断（interruptible: false）',
+    animCatalog.clickLocked === true,
+    `clickLocked=${animCatalog.clickLocked}`,
+  );
+
+  /* 三段式：loop 次数随机（纯函数钉死边界 + 真机跑一遍看范围） */
+  const loopModel = await run(`(() => {
+    const model = window.petDebug.animationModel;
+    const fixed = model.resolveLoopCount({ loop: 'x.webm', loopCount: 3 }, () => 0);
+    const ranged = [0, 0.2, 0.5, 0.99].map((r) =>
+      model.resolveLoopCount({ loop: 'x.webm', loopCountRange: [2, 5] }, () => r));
+    const infinite = model.resolveLoopCount({ loop: 'x.webm' }, () => 0.5);
+    const reversed = model.resolveLoopCount({ loop: 'x.webm', loopCountRange: [5, 2] }, () => 0);
+    return { fixed, ranged, infinite, reversed };
+  })()`);
+  record(
+    'loop 次数：固定值 / 随机范围（含两端、写反也纠正）/ 省略即无限循环',
+    loopModel.fixed === 3 &&
+      // 2 + floor(r * 4)：r=0 -> 2；r=0.5 -> 4；r=0.99 -> 5（两端都能取到）
+      JSON.stringify(loopModel.ranged) === JSON.stringify([2, 2, 4, 5]) &&
+      loopModel.infinite === 0 &&
+      loopModel.reversed === 2,
+    JSON.stringify(loopModel),
+  );
+
+  const loopReal = await run(`(async () => {
+    const anim = window.petDebug.anim;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const seen = [];
+    for (let i = 0; i < 5; i += 1) {
+      anim.stop('loop-probe');
+      anim.resetCooldowns();
+      await anim.play('sad', { reason: 'loop-probe', source: 'system', interrupt: 'force' });
+      for (let k = 0; k < 40 && anim.getPersistentPhase() !== 'loop'; k += 1) await wait(100);
+      seen.push(anim.getLoopTarget());
+    }
+    anim.stop('loop-probe');
+    return seen;
+  })()`);
+  record(
+    '真机：每次播放的 loop 轮数都在 2~5 之间且不是常数',
+    Array.isArray(loopReal) &&
+      loopReal.every((value) => value >= 2 && value <= 5) &&
+      new Set(loopReal).size >= 2,
+    JSON.stringify(loopReal),
+  );
+
+  /*
+   * 三段式打断语义（需求原文）：
+   *   loop 中被打断 -> **先播 end**，再播打断它的动画；
+   *   end  中被打断 -> 立刻结束，直接播新动画。
+   */
+  const persistentInterrupt = await run(`(async () => {
+    const anim = window.petDebug.anim;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    anim.stop('interrupt-probe');
+    anim.resetCooldowns();
+    await anim.play('read', { reason: 'interrupt-probe', source: 'system', interrupt: 'force' });
+    for (let i = 0; i < 40 && anim.getPersistentPhase() !== 'loop'; i += 1) await wait(100);
+    const phaseBefore = anim.getPersistentPhase();
+    const accepted = await anim.play('talk', { reason: 'interrupt-next', source: 'system', interrupt: 'force' });
+    const phaseAfter = anim.getPersistentPhase();
+    const duringEnd = anim.getCurrentAnimation();
+    const pending = anim.hasPendingAfterEnd();
+    let settled = null;
+    for (let i = 0; i < 80; i += 1) {
+      await wait(100);
+      if (anim.getCurrentAnimation() === 'talk') { settled = 'talk'; break; }
+      if (anim.getCurrentAnimation() === null) { settled = '(none)'; break; }
+    }
+    return { phaseBefore, phaseAfter, duringEnd, pending, accepted: accepted.accepted, settled };
+  })()`);
+  record(
+    'loop 中被打断：先播 end（不硬切），收尾结束后自动接上新动画',
+    persistentInterrupt.phaseBefore === 'loop' &&
+      persistentInterrupt.phaseAfter === 'end' &&
+      persistentInterrupt.duringEnd === 'read' &&
+      persistentInterrupt.pending === true &&
+      persistentInterrupt.settled === 'talk',
+    JSON.stringify(persistentInterrupt),
+  );
+
+  const endInterrupt = await run(`(async () => {
+    const anim = window.petDebug.anim;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    anim.stop('end-probe');
+    anim.resetCooldowns();
+    await anim.play('work', { reason: 'end-probe', source: 'system', interrupt: 'force' });
+    for (let i = 0; i < 40 && anim.getPersistentPhase() !== 'loop'; i += 1) await wait(100);
+    anim.endPersistent('end-probe-request');
+    for (let i = 0; i < 30 && anim.getPersistentPhase() !== 'end'; i += 1) await wait(100);
+    const phaseBefore = anim.getPersistentPhase();
+    await anim.play('sing', { reason: 'end-probe-next', source: 'system', interrupt: 'force' });
+    return {
+      phaseBefore,
+      current: anim.getCurrentAnimation(),
+      pending: anim.hasPendingAfterEnd(),
+      phaseAfter: anim.getPersistentPhase(),
+    };
+  })()`);
+  record(
+    'end 中被打断：立刻结束并直接播新动画（不再排一次收尾）',
+    endInterrupt.phaseBefore === 'end' &&
+      endInterrupt.current === 'sing' &&
+      endInterrupt.pending === false &&
+      endInterrupt.phaseAfter === null,
+    JSON.stringify(endInterrupt),
+  );
+
+  /*
+   * 点击动画的硬锁：**连 force 也不行**，而且必须等她播完才解锁。
+   * 这是需求里"点击动画不可被打断，必须等待播放结束后才能继续点击"的完整含义。
+   */
+  const clickLock = await run(`(async () => {
+    const anim = window.petDebug.anim;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    anim.stop('lock-probe');
+    anim.resetCooldowns();
+    await anim.play('cute', { reason: 'lock-probe', source: 'user', interrupt: 'force' });
+    const locked = anim.isLocked();
+    const forced = await anim.play('bomb', { reason: 'lock-probe-force', source: 'system', interrupt: 'force', bypassCooldown: true });
+    const queued = await anim.play('stroke', { reason: 'lock-probe-queue', source: 'user', interrupt: 'queue' });
+    const current = anim.getCurrentAnimation();
+    // 等她自己播完（cute 约 6s），排队的 stroke 会接上；
+    // 注意**不能**用 isLocked() 判断"解锁" —— stroke 也是点击动画，接上后照样是锁着的
+    let sawStroke = null;
+    for (let i = 0; i < 120; i += 1) {
+      await wait(100);
+      if (anim.getCurrentAnimation() === 'stroke') { sawStroke = 'stroke'; break; }
+    }
+    return {
+      locked,
+      forcedAccepted: forced.accepted,
+      forcedReason: forced.reason ?? '',
+      queuedAccepted: queued.accepted,
+      current,
+      sawStroke,
+      after: anim.getCurrentAnimation(),
+    };
+  })()`);
+  record(
+    '点击动画不可打断：force 被拒、只能排队，播完后排队的那条才接上',
+    clickLock.locked === true &&
+      clickLock.forcedAccepted === false &&
+      clickLock.forcedReason === 'not-interruptible' &&
+      clickLock.queuedAccepted === true &&
+      clickLock.current === 'cute' &&
+      clickLock.sawStroke === 'stroke' &&
+      clickLock.after === 'stroke',
+    JSON.stringify(clickLock),
+  );
+
+  /* 贴边收起的几何（纯函数：用户拖到边缘的判定与"贴平"目标位置） */
+  const dockModel = await run(`(() => {
+    const model = window.petDebug.animationModel;
+    const area = { x: 0, y: 0, width: 1920, height: 1040 };
+    const petSize = { width: 288, height: 384 };
+    const winSize = { width: 288, height: 384 };
+    // 宠物右边缘距工作区右边缘 10px -> 收起
+    const nearRight = model.petRectIn({ x: 1612, y: 600, width: 288, height: 384 }, petSize);
+    const rightVerdict = model.evaluateDock(nearRight, area);
+    // 贴下边缘
+    const nearBottom = model.petRectIn({ x: 700, y: 1040 - 384 - 6, width: 288, height: 384 }, petSize);
+    const bottomVerdict = model.evaluateDock(nearBottom, area);
+    // 中间 -> 不收起
+    const middle = model.petRectIn({ x: 700, y: 300, width: 288, height: 384 }, petSize);
+    const freeVerdict = model.evaluateDock(middle, area);
+    // 贴平目标：宠物右边缘应该正好落在工作区右边缘
+    const target = model.dockTargetPosition({
+      dock: 'right', petSize, windowSize: winSize, workArea: area, current: { x: 1476, y: 528 },
+    });
+    const targetRect = model.petRectIn({ ...target, width: winSize.width, height: winSize.height }, petSize);
+    // 拖离：向右 40px 还不算离开，向右 200px 才算
+    const moved40 = model.petRectIn({ x: target.x - 40, y: 528, width: 288, height: 384 }, petSize);
+    const moved200 = model.petRectIn({ x: target.x - 200, y: 528, width: 288, height: 384 }, petSize);
+    return {
+      rightDock: rightVerdict.dock,
+      bottomDock: bottomVerdict.dock,
+      freeDock: freeVerdict.dock,
+      targetRightGap: area.width - (targetRect.x + targetRect.width),
+      stillDocked: model.shouldUndock('right', moved40, area),
+      undocked: model.shouldUndock('right', moved200, area),
+      nudged: model.nudgeInward('bottom', { x: 700, y: 656 }),
+    };
+  })()`);
+  record(
+    '贴边收起几何：边缘判定、贴平到边缘、拖离阈值、无记录时的内移兜底',
+    dockModel.rightDock === 'right' &&
+      dockModel.bottomDock === 'bottom' &&
+      dockModel.freeDock === 'free' &&
+      dockModel.targetRightGap === 0 &&
+      dockModel.stillDocked === false &&
+      dockModel.undocked === true &&
+      dockModel.nudged.y === 656 - 80,
+    JSON.stringify(dockModel),
+  );
+
+  /* 显示状态 -> 默认动画 / 随机池（纯函数 + 真机 app 的当前显示状态） */
+  const poolModel = await run(`(() => {
+    const model = window.petDebug.animationModel;
+    const config = model.DEFAULT_BEHAVIOR_CONFIG;
+    const known = new Set(window.petDebug.anim.list());
+    const pools = (state) => model.poolsFor(config, state)
+      .map((pool) => ({ id: pool.id, animations: pool.animations, interval: pool.intervalMs }));
+    // 池内挑选：注入随机源，验证等概率取到两端
+    const pool = config.pools['normal-random'];
+    const picks = [0, 0.999].map((r) => model.pickPoolAnimation(pool, () => r));
+    return {
+      normalDefault: model.defaultAnimationFor(config, 'normal'),
+      bottomDefault: model.defaultAnimationFor(config, 'docked-bottom'),
+      rightDefault: model.defaultAnimationFor(config, 'docked-right'),
+      hiddenDefault: model.defaultAnimationFor(config, 'hidden'),
+      normalPools: pools('normal'),
+      bottomPools: pools('docked-bottom'),
+      rightPools: pools('docked-right'),
+      hiddenPools: pools('hidden'),
+      resolveBottom: model.resolveDisplayState({ dock: 'bottom', hidden: false }),
+      resolveHidden: model.resolveDisplayState({ dock: 'right', hidden: true }),
+      picks,
+      allPoolAnimationsRegistered: model.poolsFor(config, 'normal')
+        .every((item) => item.animations.every((id) => known.has(id))),
+    };
+  })()`);
+  record(
+    '显示状态 -> 默认动画（idle/lie/watch/无）与随机池（正常 9 个 25~60s；收起 1 个 3~8min）',
+    poolModel.normalDefault === 'idle' &&
+      poolModel.bottomDefault === 'lie' &&
+      poolModel.rightDefault === 'watch' &&
+      poolModel.hiddenDefault === null &&
+      poolModel.normalPools.length === 1 &&
+      poolModel.normalPools[0].animations.length === 9 &&
+      JSON.stringify(poolModel.normalPools[0].interval) === JSON.stringify([25000, 60000]) &&
+      poolModel.bottomPools[0].animations.join() === 'sleep' &&
+      poolModel.rightPools[0].animations.join() === 'peek' &&
+      JSON.stringify(poolModel.bottomPools[0].interval) === JSON.stringify([180000, 480000]) &&
+      poolModel.hiddenPools.length === 0 &&
+      poolModel.resolveBottom === 'docked-bottom' &&
+      poolModel.resolveHidden === 'hidden' &&
+      poolModel.allPoolAnimationsRegistered === true,
+    JSON.stringify(poolModel),
+  );
+
+  record(
+    '随机池挑选：等概率时能取到第一个和最后一个（不是永远同一个）',
+    poolModel.picks[0] === 'roll' && poolModel.picks[1] === 'swim',
+    JSON.stringify(poolModel.picks),
+  );
+
+  /* 触发动画的阈值规则（"演一次"而不是"一直演"） */
+  const triggerRules = await run(`(() => {
+    const model = window.petDebug.animationModel;
+    const steps = (fn, values, armed0 = true) => {
+      let armed = armed0;
+      const fired = [];
+      for (const value of values) {
+        const decision = fn(value, armed);
+        armed = decision.armed;
+        if (decision.animationId) fired.push(decision.animationId);
+      }
+      return { fired, armed };
+    };
+    return {
+      // 心情持续很低：只演一次（不会每 30 秒演一次）
+      sadStuck: steps((mood, armed) => model.evaluateSad(mood, armed), [20, 18, 22, 20, 19]),
+      // 心情恢复后再次变低：重新演一次
+      sadRearm: steps((mood, armed) => model.evaluateSad(mood, armed), [20, 60, 20]),
+      // 饿
+      hungry: steps((hunger, armed) => model.evaluateHungry(hunger, armed), [70, 75, 20, 80]),
+      // 掉线：持续掉线只演一次，恢复后再掉线再演
+      offline: steps((reason, armed) => model.evaluateOffline(reason, armed), ['no-key', 'no-key', '', 'invalid-key']),
+      // 过热：阈值附近有回差
+      overheat: steps((temp, armed) => model.evaluateOverheat(temp, armed), [85, 84, 76, 70, 82]),
+      overheatUnknown: steps((temp, armed) => model.evaluateOverheat(temp, armed), [null, null, null]),
+      // 鼠标靠近：只有下方/右侧会触发，上方不演；离开后重新武装
+      approach: [
+        model.classifyApproach({ dx: 10, dy: 90 }, true),
+        model.classifyApproach({ dx: 90, dy: 10 }, true),
+        model.classifyApproach({ dx: 10, dy: -90 }, true),
+        model.classifyApproach({ dx: -90, dy: 10 }, true),
+        model.classifyApproach({ dx: 0, dy: 400 }, false),
+      ].map((item) => ({ id: item.animationId, armed: item.armed })),
+      // 场景触发：稳定 90 秒 + 不频繁切换 + 冷却（默认冷却 20 分钟）
+      sceneCoding: model.evaluateSceneTrigger({ scene: 'coding', stableMs: 120000, switching: false, sinceLastTriggerMs: 9999999 }),
+      sceneCodingTooEarly: model.evaluateSceneTrigger({ scene: 'coding', stableMs: 30000, switching: false, sinceLastTriggerMs: 9999999 }),
+      sceneCodingSwitching: model.evaluateSceneTrigger({ scene: 'coding', stableMs: 120000, switching: true, sinceLastTriggerMs: 9999999 }),
+      sceneCodingCooldown: model.evaluateSceneTrigger({ scene: 'coding', stableMs: 120000, switching: false, sinceLastTriggerMs: 60000 }),
+      sceneReading: model.evaluateSceneTrigger({ scene: 'reading', stableMs: 120000, switching: false, sinceLastTriggerMs: 9999999 }),
+      sceneGaming: model.sceneTriggerAnimation('gaming'),
+    };
+  })()`);
+  record(
+    '触发规则：持续越界只演一次（心情/饿/掉线），恢复后才重新武装',
+    triggerRules.sadStuck.fired.length === 1 &&
+      triggerRules.sadStuck.fired[0] === 'sad' &&
+      triggerRules.sadRearm.fired.length === 2 &&
+      triggerRules.hungry.fired.length === 2 &&
+      triggerRules.offline.fired.length === 2 &&
+      JSON.stringify(triggerRules.offline.fired) === JSON.stringify(['offline', 'offline']),
+    JSON.stringify(triggerRules),
+  );
+  record(
+    '触发规则：GPU 过热有回差、读不到温度一律不演',
+    JSON.stringify(triggerRules.overheat.fired) === JSON.stringify(['overheat', 'overheat']) &&
+      triggerRules.overheatUnknown.fired.length === 0,
+    JSON.stringify({ hot: triggerRules.overheat, unknown: triggerRules.overheatUnknown }),
+  );
+  record(
+    '触发规则：鼠标只有从下方/右侧**占主导**地靠近才演 catch_down / catch_right',
+    triggerRules.approach[0].id === 'catch_down' &&
+      triggerRules.approach[1].id === 'catch_right' &&
+      // 从上方偏右：dx 虽然为正，但她其实在低头看你 -> 不该演 catch_right
+      triggerRules.approach[2].id === null &&
+      triggerRules.approach[3].id === null &&
+      triggerRules.approach[4].armed === true,
+    JSON.stringify(triggerRules.approach),
+  );
+  record(
+    '触发规则：work/read 只在场景稳定 90 秒、不频繁切换、过了冷却时才演',
+    triggerRules.sceneCoding === 'work' &&
+      triggerRules.sceneCodingTooEarly === null &&
+      triggerRules.sceneCodingSwitching === null &&
+      triggerRules.sceneCodingCooldown === null &&
+      triggerRules.sceneReading === 'read' &&
+      triggerRules.sceneGaming === null,
+    JSON.stringify(triggerRules).slice(0, 300),
+  );
+
+  /* 余额：接口地址收敛、金额是字符串、非官方域名不查、余额 -> 饿 */
+  const balanceModel = await run(`(() => {
+    const model = window.petDebug.animationModel;
+    const balance = window.petDebug.balance;
+    const parsed = balance.parseBalance({
+      is_available: true,
+      balance_infos: [{ currency: 'CNY', total_balance: '110.00', granted_balance: '10.00', topped_up_balance: '100.00' }],
+    }, '2026-01-01T00:00:00.000Z');
+    return {
+      endpointRoot: balance.balanceEndpoint('https://api.deepseek.com'),
+      endpointV1: balance.balanceEndpoint('https://api.deepseek.com/v1'),
+      endpointChat: balance.balanceEndpoint('https://api.deepseek.com/v1/chat/completions'),
+      official: balance.supportsBalanceQuery('https://api.deepseek.com/v1'),
+      thirdParty: balance.supportsBalanceQuery('https://one-api.example.com/v1'),
+      parsed,
+      empty: balance.parseBalance({}, 'now').totalBalance,
+      unavailable: balance.parseBalance({ is_available: false, balance_infos: [{ total_balance: '0.00' }] }, 'now').isAvailable,
+      formatted: balance.formatBalance(parsed),
+      hungerRich: model.hungerFromBalance(50, { low: 2, full: 20 }),
+      hungerEmpty: model.hungerFromBalance(0, { low: 2, full: 20 }),
+      hungerMid: model.hungerFromBalance(11, { low: 2, full: 20 }),
+      hungerUnknown: model.hungerFromBalance(null, { low: 2, full: 20 }),
+      hungerReversed: model.hungerFromBalance(11, { low: 20, full: 2 }),
+    };
+  })()`);
+  record(
+    'DeepSeek 余额：/user/balance 地址收敛 + 字符串金额解析 + 只有官方域名才查',
+    balanceModel.endpointRoot === 'https://api.deepseek.com/user/balance' &&
+      balanceModel.endpointV1 === 'https://api.deepseek.com/user/balance' &&
+      balanceModel.endpointChat === 'https://api.deepseek.com/user/balance' &&
+      balanceModel.official === true &&
+      balanceModel.thirdParty === false &&
+      balanceModel.parsed.totalBalance === 110 &&
+      balanceModel.parsed.grantedBalance === 10 &&
+      balanceModel.parsed.toppedUpBalance === 100 &&
+      balanceModel.parsed.currency === 'CNY' &&
+      balanceModel.empty === 0 &&
+      balanceModel.unavailable === false &&
+      balanceModel.formatted.includes('110.00 CNY'),
+    JSON.stringify(balanceModel),
+  );
+  record(
+    '余额 -> 饿：见底 100、充足 0、中间线性；查不到时返回 null（交给本地预算兜底）',
+    balanceModel.hungerRich === 0 &&
+      balanceModel.hungerEmpty === 100 &&
+      balanceModel.hungerMid === 50 &&
+      balanceModel.hungerUnknown === null &&
+      balanceModel.hungerReversed === 0,
+    JSON.stringify(balanceModel),
   );
 
   /*
@@ -1374,13 +1871,18 @@ app.whenReady().then(async () => {
   );
 
   /*
-   * 用户交互抢占：点击带来的反应动画必须**立刻**接管，
-   * 不能等持续动画把收尾段播完（watch-end 有 4.5 秒，等完就像"点不动"）。
+   * 用户交互抢占（需求 6.2 的三段式语义）：
+   * 持续动画正在 loop 时被点击 -> **先立刻进 end 段**，收尾播完再播点击反应。
+   *
+   * 注意与"硬切"的区别：进 end 段是**立刻**发生的（不等本轮循环播完），
+   * 但反应动画要等收尾播完 —— 这是需求明确要求的顺序，
+   * 所以这里断言的是"立刻进 end"而不是"立刻看到 stroke"。
    */
   const stealRun = await run(`(async () => {
     const anim = window.petDebug.anim;
-    const bus = window.petDebug.bus;
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    anim.stop('steal-reset');
+    await wait(150);
     anim.resetCooldowns();
     await anim.play('watch', { interrupt: 'force', reason: 'user-click:body-steal-test' });
     for (let i = 0; i < 40 && anim.getPersistentPhase() !== 'loop'; i++) await wait(100);
@@ -1389,12 +1891,25 @@ app.whenReady().then(async () => {
     const t0 = Date.now();
     const result = await anim.play('stroke', { priority: 50, interrupt: 'auto', reason: 'user-click:body', source: 'user' });
     const elapsedMs = Date.now() - t0;
-    await wait(300);
-    return { before, accepted: result.accepted, elapsedMs, after: anim.getCurrentAnimation(), phaseAfter: anim.getPersistentPhase() };
+    const phaseAfter = anim.getPersistentPhase();
+    const duringEnd = anim.getCurrentAnimation();
+    let reaction = null;
+    const t1 = Date.now();
+    while (Date.now() - t1 < 20000 && reaction === null) {
+      await wait(100);
+      const current = anim.getCurrentAnimation();
+      if (current !== null && current !== 'watch') reaction = current;
+    }
+    return { before, accepted: result.accepted, elapsedMs, phaseAfter, duringEnd, reaction, after: anim.getCurrentAnimation() };
   })()`);
   record(
-    '用户点击可立刻打断持续动画（不等收尾段）',
-    stealRun.accepted === true && stealRun.after === 'stroke' && stealRun.elapsedMs < 1500,
+    '点击持续动画：立刻进 end 段（不硬切、不等本轮循环），收尾播完再接上反应',
+    stealRun.accepted === true &&
+      stealRun.before.phase === 'loop' &&
+      stealRun.elapsedMs < 1500 &&
+      stealRun.phaseAfter === 'end' &&
+      stealRun.duringEnd === 'watch' &&
+      stealRun.reaction === 'stroke',
     JSON.stringify(stealRun),
   );
 
@@ -1406,8 +1921,12 @@ app.whenReady().then(async () => {
    */
   const toggleRun = await run(`(async () => {
     const anim = window.petDebug.anim;
-    const runtime = window.petDebug; // 直接走 renderer 的 onSetAnimation 等价路径
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    // 先彻底停下来：上一条用例可能留着收尾段/挂起请求，否则起点就不是 watch
+    anim.stop('toggle-reset');
+    anim.clearPendingAfterEnd();
+    anim.clearQueue();
+    await wait(400);
     anim.resetCooldowns();
     await anim.play('watch', { interrupt: 'force', priority: 60, reason: 'tray-menu', source: 'system' });
     for (let i = 0; i < 60 && anim.getPersistentPhase() !== 'loop'; i++) await wait(100);
@@ -1455,22 +1974,39 @@ app.whenReady().then(async () => {
 
     const results = [];
     for (const target of ['talk', 'cute', 'idle']) {
-      anim.resetCooldowns();
+      // 每条都从干净状态开始：清掉收尾段与挂起请求，否则起点可能不是 watch
       anim.stop('menu-switch-reset');
-      await wait(150);
+      anim.clearPendingAfterEnd();
+      anim.clearQueue();
+      await wait(400);
+      anim.resetCooldowns();
       // 每次起点都一样：用菜单路径起 watch（priority 70，与真实菜单一致）
       await menuPlay('watch');
       for (let i = 0; i < 60 && anim.getPersistentPhase() !== 'loop'; i++) await wait(100);
       const before = anim.getCurrentAnimation();
       const r = await menuPlay(target);
-      await wait(500);
-      results.push({ target, before, accepted: r.accepted, rejection: r.rejection ?? null, after: anim.getCurrentAnimation() });
+      const phaseAfterRequest = anim.getPersistentPhase();
+      // 收尾段播完后应该接上目标动画（三段式打断语义）
+      let settled = null;
+      const t0 = Date.now();
+      while (Date.now() - t0 < 20000 && settled === null) {
+        await wait(100);
+        const current = anim.getCurrentAnimation();
+        if (current !== 'watch') settled = current;
+      }
+      results.push({
+        target, before, accepted: r.accepted, rejection: r.rejection ?? null,
+        phaseAfterRequest, settled,
+      });
     }
     return results;
   })()`);
   record(
-    '菜单选择其它动画可打断正在播放的持续动画（回归：equal-priority）',
-    menuSwitch.every((r) => r.before === 'watch' && r.accepted === true && r.after === r.target),
+    '菜单选择其它动画：受理并在 watch 的收尾段播完后接上（回归：equal-priority 被拒）',
+    menuSwitch.every((r) =>
+      r.before === 'watch' && r.accepted === true && r.rejection === null &&
+      r.phaseAfterRequest === 'end' && r.settled === r.target,
+    ),
     JSON.stringify(menuSwitch),
   );
 
@@ -1641,6 +2177,18 @@ app.whenReady().then(async () => {
     // 因此这里每次都重新查询，绝不能提前把元素抓成常量（会读到已经废弃的缓冲）。
     const video = () => document.querySelector('video.layer-active') || document.getElementById('pet-video') || document.querySelector('video');
 
+    /*
+     * 起点必须是干净的 idle：上面几条用例可能把持续动画留在 loop 阶段，
+     * 那样点击会（按三段式语义）先播收尾段，4 秒内看不到反应动画。
+     */
+    anim.stop('resume-loop-reset');
+    anim.clearPendingAfterEnd();
+    anim.clearQueue();
+    await new Promise((r) => setTimeout(r, 500));
+    anim.resetCooldowns();
+    await anim.play('idle', { interrupt: 'force', loop: true, reason: 'resume-loop-setup', source: 'system' });
+    await new Promise((r) => setTimeout(r, 700));
+
     // 触发一次真实点击
     const sr = stage.getBoundingClientRect();
     const mk = (type) => {
@@ -1727,8 +2275,20 @@ app.whenReady().then(async () => {
     const r1 = await anim.play('cute', { priority: 50, reason: 'test' });
     out.interruptAccepted = r1.accepted;
     out.after = anim.getCurrentAnimation();
-    // 同优先级应被拒绝
-    const r2 = await anim.play('fawning', { priority: 50, reason: 'test' });
+    /*
+     * 同优先级应被拒绝 (equal-priority)。
+     *
+     * ⚠️ 这里**不能**用两条点击动画来测（原来用 cute -> fawning）：
+     * 点击动画现在是 **interruptible: false 的硬锁**，fawning 会先被
+     * not-interruptible 拒掉，测的就不是"同优先级"了。
+     * 所以用两条同优先级(45)的非点击动画：roll -> shake。
+     */
+    anim.stop('equal-priority-reset');
+    await new Promise((r) => setTimeout(r, 300));
+    anim.resetCooldowns();
+    await anim.play('roll', { priority: 45, interrupt: 'force', reason: 'test' });
+    out.equalPlaying = anim.getCurrentAnimation();
+    const r2 = await anim.play('shake', { priority: 45, reason: 'test' });
     out.equalReason = r2.accepted ? null : r2.reason;
     /*
      * 不可打断 + 冷却：这里**契约注册**一条专用动画，而不是依赖 Manifest 里
@@ -1754,7 +2314,7 @@ app.whenReady().then(async () => {
   })()`);
   record('低优先级动画可正常播放', priority.low === 'lie', JSON.stringify(priority));
   record('高优先级可抢占低优先级', priority.interruptAccepted === true && priority.after === 'cute', `after=${priority.after}`);
-  record('同优先级被拒绝 (equal-priority)', priority.equalReason === 'equal-priority', `reason=${priority.equalReason}`);
+  record('同优先级被拒绝 (equal-priority)', priority.equalPlaying === 'roll' && priority.equalReason === 'equal-priority', `playing=${priority.equalPlaying} reason=${priority.equalReason}`);
   record('interruptible=false 拒绝更高优先级抢占', priority.nonInterruptibleReason === 'not-interruptible', `reason=${priority.nonInterruptibleReason}, playing=${priority.guardedPlaying}`);
   record('动画冷却生效 (cooldown)', priority.cooldownReason === 'cooldown', `reason=${priority.cooldownReason}`);
 
@@ -2771,6 +3331,16 @@ app.whenReady().then(async () => {
    * 感知自己这一段开始前把开关**重新打开**（前面为了让动画断言不受干扰而关掉了它们），
    * 下面的"默认全开"断言读的就是打开后的状态。
    */
+  /* ------------------------------------------------------------------------- */
+  /* 感知（3.1~3.6）：先把它打开（上面动画段为了确定性把它关了）                    */
+  /* ------------------------------------------------------------------------- */
+  /*
+   * 注意：随机池与触发服务**整轮都保持暂停**。
+   * 理由：验收里有大量"现在应该播的是谁"的断言，而随机池 25~60 秒就会挑一个动画、
+   * 触发服务还会看真实光标位置 —— 它们都属于产品里该有的行为，但在验收里只会制造
+   * 偶发红。暂停只影响"她主动演"，所有断言都不依赖它真的触发
+   * （随机池与触发规则都通过 `describePools()` / 纯函数直接断言）。
+   */
   await run(`window.petAPI.perception.setSettings({ screen: true, behavior: true, habits: true, camera: true })`);
   await wait(500);
 
@@ -2946,12 +3516,18 @@ app.whenReady().then(async () => {
     JSON.stringify(perceptionModel.gateUrgent),
   );
   record(
-    '感知：干预规划正确（久坐提醒 / 敏感捂眼睛躲起来 / 深夜劝睡 / 场景变化打招呼）',
+    '感知：干预规划正确（久坐提醒 / 敏感内容演 shy / 深夜劝睡 / 场景变化打招呼）',
     perceptionModel.planLong !== null &&
       perceptionModel.planLong.kind === 'long-session' &&
       perceptionModel.planSensitive !== null &&
       perceptionModel.planSensitive.kind === 'sensitive' &&
-      perceptionModel.planSensitive.hide === true &&
+      /*
+       * 敏感内容 -> `shy`（害羞捂眼睛），而且**不再整只藏起来**：
+       * 需求把"发现私密内容"明确归给了 shy 这条触发动画，
+       * 它本身就是捂眼睛的动作，比"消失 20 秒"更贴切。
+       */
+      perceptionModel.planSensitive.animation === 'shy' &&
+      perceptionModel.planSensitive.hide === false &&
       perceptionModel.planLate !== null &&
       perceptionModel.planLate.kind === 'late-night' &&
       perceptionModel.planScene !== null &&

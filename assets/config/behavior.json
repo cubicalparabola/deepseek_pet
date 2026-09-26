@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "states": {
+    "normal": {
+      "label": "正常",
+      "defaultAnimation": "idle",
+      "pools": [
+        "normal-random"
+      ]
+    },
+    "docked-bottom": {
+      "label": "下方收起",
+      "defaultAnimation": "lie",
+      "pools": [
+        "docked-bottom-random"
+      ]
+    },
+    "docked-right": {
+      "label": "右侧收起",
+      "defaultAnimation": "watch",
+      "pools": [
+        "docked-right-random"
+      ]
+    },
+    "hidden": {
+      "label": "隐藏",
+      "defaultAnimation": null,
+      "pools": []
+    }
+  },
+  "pools": {
+    "normal-random": {
+      "label": "随机小动作",
+      "animations": [
+        "roll",
+        "hot",
+        "bomb",
+        "lie",
+        "play",
+        "shake",
+        "sing",
+        "spin",
+        "swim"
+      ],
+      "intervalMs": [
+        25000,
+        60000
+      ],
+      "initialDelayMs": 15000,
+      "cooldownMs": 8000,
+      "onlyWhenIdle": true
+    },
+    "docked-bottom-random": {
+      "label": "收起时打个盹",
+      "animations": [
+        "sleep"
+      ],
+      "intervalMs": [
+        180000,
+        480000
+      ],
+      "initialDelayMs": 60000,
+      "cooldownMs": 30000,
+      "onlyWhenIdle": true
+    },
+    "docked-right-random": {
+      "label": "收起时偷看",
+      "animations": [
+        "peek"
+      ],
+      "intervalMs": [
+        180000,
+        480000
+      ],
+      "initialDelayMs": 60000,
+      "cooldownMs": 30000,
+      "onlyWhenIdle": true
+    }
+  }
+}

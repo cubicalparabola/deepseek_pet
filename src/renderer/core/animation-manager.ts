@@ -18,6 +18,8 @@
 
 import {
   ANIMATION_DEFAULTS,
+  inferAnimationCategory,
+  resolveLoopCount,
   type AnimationDefinition,
   type AnimationRenderOptions,
   type InterruptPolicy,
@@ -53,6 +55,18 @@ interface ActivePlayback {
   persistentPhase: PersistentPhase | null;
   /** 循环段已经播完几轮。 */
   loopCycles: number;
+  /**
+   * 这次播放实际要循环几轮（进入 loop 段时随机定下，之后不再变）。
+   * `0` = 无限循环（只在中途被打断或外部请求结束时才进收尾段）。
+   */
+  loopTarget: number;
+  /**
+   * 这次播放用的 loop 标志（`PlayOptions.loop` 覆盖优先）。
+   *
+   * 用途：状态的**默认动画**要把一条"一次性"素材循环起来（例如"下方收起"的 lie），
+   * 而同一个 id 在随机池里又只该播一遍 —— 循环与否由播放参数决定，不由定义决定。
+   */
+  loop: boolean;
   /** 已经请求结束（等本轮循环播完就转收尾），避免重复触发。 */
   endingRequested: boolean;
 }
@@ -60,6 +74,18 @@ interface ActivePlayback {
 interface QueuedRequest {
   readonly animationId: string;
   readonly options: PlayOptions;
+}
+
+/**
+ * "等持续动画收尾段播完再播"的挂起请求。
+ *
+ * 需求："播放 loop 时被点击或者触发其它动画时播放 end，再播放其它动画。"
+ * 只存一条（连点/连续触发只保留最后一次意图），由 `finishActive` 在收尾段结束时接上。
+ */
+interface PendingRequest {
+  readonly animationId: string;
+  readonly options: PlayOptions;
+  readonly priority: number;
 }
 
 /**
@@ -81,6 +107,8 @@ export class AnimationManager {
   private active: ActivePlayback | null = null;
   private readonly lastPlayedAt = new Map<string, number>();
   private queue: QueuedRequest | null = null;
+  /** "等持续动画收尾段播完再播"的挂起请求（见 requestAnimation 第 5 步）。 */
+  private pendingAfterEnd: PendingRequest | null = null;
 
   private tokenCounter = 0;
   /** 非循环动画的结束看门狗（ended 事件丢失时兜底）。 */
@@ -168,6 +196,7 @@ export class AnimationManager {
     return {
       ...animation,
       kind,
+      category: inferAnimationCategory(animation),
       loop: animation.loop ?? (animation.type === 'video' ? ANIMATION_DEFAULTS.videoLoop : ANIMATION_DEFAULTS.imageLoop),
       priority: animation.priority ?? ANIMATION_DEFAULTS.priority,
       interruptible: animation.interruptible ?? ANIMATION_DEFAULTS.interruptible,
@@ -243,19 +272,34 @@ export class AnimationManager {
       return { accepted: false, animationId, reason: 'same-animation' };
     }
 
-    // 3) 排队策略
+    // 3) 排队策略（排队不算"打断"，所以在硬锁判定之前）
     if (current && interrupt === 'queue') {
       this.queue = { animationId, options: { ...options, priority } };
       this.logger.info('animation queued', { data: { animationId, after: current.animation.id } });
       return { accepted: true, animationId, queued: true };
     }
 
+    /*
+     * 3.5) **不可打断的硬锁**（需求："点击动画不可被打断，必须等待播放结束后才能继续点击"）。
+     *
+     * 这一条必须在优先级仲裁之前、并且对 `force` 一样生效：
+     * `force` 的语义只是"绕过优先级比较"，不是"无视硬约束"。
+     * 原来的写法把这条判定放在了 `interrupt !== 'force'` 分支里，
+     * 于是 `force` 能切开 `interruptible: false` 的动画 —— 与注释承诺相反
+     * （点击动画会因此被托盘菜单/AI 打断，"必须播完"形同虚设）。
+     */
+    if (current && !current.animation.interruptible) {
+      this.reject(
+        animationId,
+        'not-interruptible',
+        options,
+        `当前动画 ${current.animation.id} 不可打断（点击动画必须播完）`,
+      );
+      return { accepted: false, animationId, reason: 'not-interruptible' };
+    }
+
     // 4) 优先级仲裁
     if (current && interrupt !== 'force') {
-      if (!current.animation.interruptible) {
-        this.reject(animationId, 'not-interruptible', options, `当前动画 ${current.animation.id} 不可打断`);
-        return { accepted: false, animationId, reason: 'not-interruptible' };
-      }
       if (priority < current.priority) {
         this.reject(animationId, 'lower-priority', options, `优先级不足（${priority} < ${current.priority}）`);
         return { accepted: false, animationId, reason: 'lower-priority' };
@@ -267,19 +311,40 @@ export class AnimationManager {
     }
 
     /*
-     * 5) 抢占旧动画（旧动画发布 completed=false 的 animation:end）
+     * 5) 抢占旧动画。
      *
-     * **一律立刻切断**，包括持续动画正处在收尾段（end）的情况：
-     * 用户明确要求"end 阶段被打断时立刻切回 idle 或播放打断它的动画"，
-     * 而收尾段最长可达 4.4s（watch-end），等它播完才让位会被判定为"点不动"。
-     * 持续动画主动结束的路径（endPersistent）也已经是立刻进 end 段，
-     * 因此这里不再需要按 reason 前缀区分"用户交互 / 自动化来源"。
+     * 需求把"持续动画被打断"分成两种，必须区别对待：
+     *   - 正在 **start / loop** 段：先播它的 `end` 段，**再**播这次请求的动画
+     *     （动作连贯；`end` 立刻开始，不等本轮循环播完）；
+     *   - 正在 **end** 段：直接结束播放，立刻让位。
+     *
+     * 因此这里不再"一律立刻切断"，而是把请求挂到 `pendingAfterEnd`，
+     * 由收尾段结束的 `finishActive` 接上（见 flushPendingAfterEnd）。
      */
     const interruptedId = current?.animation.id;
 
     if (current) {
+      if (current.persistentPhase === 'start' || current.persistentPhase === 'loop') {
+        this.pendingAfterEnd = {
+          animationId: definition.id,
+          options: { ...options, priority },
+          priority,
+        };
+        const phase = current.persistentPhase;
+        /*
+         * `endPersistent()` 一定会受理（start/loop 阶段返回 true）：
+         *   - 有 end 段：立刻切进 end 段，收尾播完由 finishActive 接上挂起请求；
+         *   - 没有 end 段：它当场 finishActive -> 立刻接上挂起请求。
+         * 两条路径都由 `flushPendingAfterEnd` 收口，这里不需要分支。
+         */
+        this.endPersistent(`preempted-by:${animationId}`);
+        this.logger.info('interrupt deferred until persistent end segment', {
+          data: { from: current.animation.id, to: animationId, phase, priority },
+        });
+        return { accepted: true, animationId, queued: true };
+      }
       if (current.persistentPhase !== null) {
-        this.logger.info('persistent animation cut immediately', {
+        this.logger.info('persistent animation cut in end phase', {
           data: { from: current.animation.id, to: animationId, phase: current.persistentPhase },
         });
       }
@@ -411,6 +476,25 @@ export class AnimationManager {
     return this.active?.loopCycles ?? 0;
   }
 
+  /** 这次播放实际要循环几轮（0 = 无限；非持续动画返回 0）。 */
+  public getLoopTarget(): number {
+    return this.active?.loopTarget ?? 0;
+  }
+
+  /**
+   * 当前动画是否"不可打断"（点击动画）。
+   *
+   * 供渲染层/自动化判断："现在点了也没用，必须等她播完"。
+   */
+  public isLocked(): boolean {
+    return this.active !== null && !this.active.animation.interruptible;
+  }
+
+  /** 是否有"等收尾段播完就播"的挂起请求。 */
+  public hasPendingAfterEnd(): boolean {
+    return this.pendingAfterEnd !== null;
+  }
+
   /**
    * 当前**实际生效**的素材相对路径。
    *
@@ -459,6 +543,11 @@ export class AnimationManager {
     this.queue = null;
   }
 
+  /** 清空"等收尾段播完再播"的挂起请求（隐藏/收起切换时用，避免旧意图迟到生效）。 */
+  public clearPendingAfterEnd(): void {
+    this.pendingAfterEnd = null;
+  }
+
   /* ------------------------------------------------------------------ */
   /* 内部：播放                                                          */
   /* ------------------------------------------------------------------ */
@@ -471,6 +560,8 @@ export class AnimationManager {
     const token = ++this.tokenCounter;
     const priority = options.priority ?? definition.priority;
     const source = options.source ?? 'system';
+    // loop 覆盖：状态默认动画要把一次性素材循环起来（见 PlayOptions.loop）
+    const loop = options.loop ?? definition.loop;
 
     const playback: ActivePlayback = {
       animation: definition,
@@ -481,6 +572,8 @@ export class AnimationManager {
       token,
       persistentPhase: null,
       loopCycles: 0,
+      loopTarget: 0,
+      loop,
       endingRequested: false,
     };
     this.active = playback;
@@ -495,9 +588,12 @@ export class AnimationManager {
         priority,
         source,
         reason,
-        ...(definition.segments?.loopCount !== undefined
-          ? { loopCount: definition.segments.loopCount }
-          : {}),
+        loop,
+        ...(definition.segments?.loopCountRange !== undefined
+          ? { loopCountRange: definition.segments.loopCountRange.join('-') }
+          : definition.segments?.loopCount !== undefined
+            ? { loopCount: definition.segments.loopCount }
+            : {}),
       },
     });
 
@@ -572,11 +668,18 @@ export class AnimationManager {
     playback.persistentPhase = 'loop';
     playback.endingRequested = false;
     playback.loopCycles = 0;
+    /*
+     * "loop 循环随机次"：每次进入循环段现抽一次并**定下来**（`loopTarget`），
+     * 之后每一轮都跟它比 —— 否则每一轮都重抽，收敛性就没法保证了。
+     * 0 = 无限循环。
+     */
+    playback.loopTarget = resolveLoopCount(segments);
     this.logger.info('persistent loop', {
       data: {
         id: playback.animation.id,
         source,
-        loopCount: segments?.loopCount ?? 'infinite',
+        loopCount: playback.loopTarget > 0 ? playback.loopTarget : 'infinite',
+        ...(segments?.loopCountRange !== undefined ? { range: segments.loopCountRange.join('-') } : {}),
       },
     });
 
@@ -713,16 +816,17 @@ export class AnimationManager {
         rewound = false;
         lastCycleAt = video.currentTime;
         active.loopCycles += 1;
-        const target = active.animation.segments?.loopCount;
-        const reached = typeof target === 'number' && target > 0 && active.loopCycles >= target;
+        // 目标轮数是本次播放进入 loop 段时随机定下的（0 = 无限）
+        const target = active.loopTarget;
+        const reached = target > 0 && active.loopCycles >= target;
 
         this.eventBus.emit('animation:loop-cycle', {
           animationId: active.animation.id,
           cycle: active.loopCycles,
-          ...(typeof target === 'number' && target > 0 ? { target } : {}),
+          ...(target > 0 ? { target } : {}),
         });
         this.logger.debug('persistent loop cycle', {
-          data: { id: active.animation.id, cycle: active.loopCycles, target: target ?? 'infinite' },
+          data: { id: active.animation.id, cycle: active.loopCycles, target: target > 0 ? target : 'infinite' },
         });
 
         if (reached || active.endingRequested) {
@@ -730,7 +834,7 @@ export class AnimationManager {
             data: {
               id: active.animation.id,
               cycles: active.loopCycles,
-              target: target ?? 'infinite',
+              target: target > 0 ? target : 'infinite',
               reason: reached ? 'loop-count-reached' : 'end-requested',
             },
           });
@@ -807,7 +911,7 @@ export class AnimationManager {
 
     if (sameSource) {
       // 同一个素材：不换源、不隐藏，只复位时间轴并保证在播
-      active.loop = definition.loop;
+      active.loop = playback.loop;
       active.muted = true;
       active.playsInline = true;
       try {
@@ -835,7 +939,7 @@ export class AnimationManager {
      * "animation load failed ... 视频加载超时"（实测踩到：read-start.webm）。
      */
     const generation = this.layers.beginSegmentGeneration();
-    incoming.loop = definition.loop;
+    incoming.loop = playback.loop;
     incoming.muted = true;
     incoming.playsInline = true;
     this.layers.setVideoSourceHint(url);
@@ -908,8 +1012,8 @@ export class AnimationManager {
     this.clearCompletionWatchdog();
     // 循环段不装：它的"结束"由 armLoopEdgeWatch 负责（loop=true 永不触发 ended）
     if (this.active?.persistentPhase === 'loop') return;
-    // 一次性循环动画也不装
-    if (playback.animation.loop && this.active?.persistentPhase === null) return;
+    // 一次性循环动画也不装（含"状态默认动画把一次性素材循环起来"这种情况）
+    if (playback.loop && this.active?.persistentPhase === null) return;
 
     const durationMs = Number.isFinite(video.duration) && video.duration > 0
       ? video.duration * 1000
@@ -921,7 +1025,7 @@ export class AnimationManager {
       const active = this.active;
       if (!active || active.token !== playback.token) return;
       if (active.persistentPhase === 'loop') return;
-      if (active.animation.loop && active.persistentPhase === null) return;
+      if (active.loop && active.persistentPhase === null) return;
       this.logger.warn('no ended event; finishing by duration fallback', {
         data: { id: active.animation.id, timeoutMs, phase: active.persistentPhase ?? 'one-shot' },
       });
@@ -1079,14 +1183,18 @@ export class AnimationManager {
     });
 
     /*
-     * **先回放排队项，再发 AnimationEnd**。
+     * **先接上"等收尾段播完再播"的挂起请求，再回放排队项，最后才发 AnimationEnd**。
      *
-     * renderer 在 `AnimationEnd` 上是**同步**处理，会接回兜底 idle
-     * （`playFallback` 带 `interrupt: 'force'`），那会把 `this.queue` 清掉。
-     * 若先 emit 再 flush，排队项就会被兜底 idle 顶掉、静默丢失。
-     * 先 flush 则排队项已经占住位置，renderer 看到"已有动画在播"就不会再抢。
+     * 顺序理由（和排队项那条一样）：renderer 在 `AnimationEnd` 上是同步处理，
+     * 会把状态迁回 IDLE 并接回兜底 idle（`playFallback` 带 `interrupt: 'force'`）。
+     * 若先 emit，刚接上的新动画会被兜底 idle 顶掉 —— 表现就是
+     * "点了没反应 / end 播完却回到发呆"。
+     *
+     * 两条挂起队列只放行一条：接上 pendingAfterEnd 时**保留** queue，
+     * 它会在新动画结束时由下一次 finishActive 回放（否则新动画刚起就被排队项顶掉）。
      */
-    this.flushQueue();
+    const resumed = this.flushPendingAfterEnd();
+    if (!resumed) this.flushQueue();
 
     this.eventBus.emit(PetEvents.AnimationEnd, {
       animationId: active.animation.id,
@@ -1094,6 +1202,24 @@ export class AnimationManager {
       reason,
       source: active.source,
     });
+  }
+
+  /**
+   * 接上"等收尾段播完再播"的挂起请求。
+   *
+   * @returns true = 确实接上了一条（调用方不要再回放排队项 / 接回兜底）
+   */
+  private flushPendingAfterEnd(): boolean {
+    const pending = this.pendingAfterEnd;
+    if (!pending) return false;
+    this.pendingAfterEnd = null;
+    this.logger.info('playing animation deferred until persistent end', {
+      data: { animationId: pending.animationId, priority: pending.priority },
+    });
+    window.setTimeout(() => {
+      void this.requestAnimation(pending.animationId, { ...pending.options, interrupt: 'force' });
+    }, 0);
+    return true;
   }
 
   private flushQueue(): void {
@@ -1191,6 +1317,7 @@ export class AnimationManager {
     this.lastPlayedAt.clear();
     this.active = null;
     this.queue = null;
+    this.pendingAfterEnd = null;
   }
 }
 

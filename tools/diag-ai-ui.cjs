@@ -78,7 +78,7 @@ app.whenReady().then(async () => {
       rootText: (root?.textContent ?? '').slice(0, 120),
     };
   })()`);
-  step('设置窗口的 AI 面板已挂载（8 个分区）', panel, panel.sections >= 6 && panel.hasEnabled && panel.hasKey);
+  step('设置窗口的 AI 面板已挂载（含余额分区）', panel, panel.sections >= 6 && panel.hasEnabled && panel.hasKey);
 
   /*
    * 真实点击「启用 AI」复选框，看主进程状态是否跟着变。
@@ -128,6 +128,70 @@ app.whenReady().then(async () => {
     };
   })()`);
   step('设置面板：测试连接失败时给出可读错误（按钮恢复可用）', testConn, testConn.disabledAfter === false && testConn.text.length > 0);
+
+  /*
+   * 余额查询（DeepSeek 官方唯一的额度接口）。
+   *
+   * 两条都要验，因为它们回答的是不同的问题：
+   *   1. 非官方地址（one-api / Ollama）-> **不发请求**，给一句说明性错误
+   *      （对它们请求只会得到 404 噪音，把"最近错误"刷红）；
+   *   2. 官方地址 -> 真的发请求；这里用的是假密钥，所以必然失败，
+   *      但"错误非空"正好证明请求真的走出去了（而不是被静默跳过）。
+   */
+  const balance = await settingsRun(`(async () => {
+    const set = (id, value) => { const el = document.getElementById(id); el.value = value; el.dispatchEvent(new Event('change', { bubbles: true })); };
+    set('ai-provider-base-url', 'http://127.0.0.1:9/v1');
+    await new Promise((r) => setTimeout(r, 300));
+    document.getElementById('ai-provider-save').click();
+    await new Promise((r) => setTimeout(r, 900));
+    document.getElementById('ai-balance-refresh').click();
+    await new Promise((r) => setTimeout(r, 2500));
+    const thirdParty = {
+      readout: document.getElementById('ai-balance-readout')?.textContent ?? '',
+      source: document.getElementById('ai-balance-source')?.textContent ?? '',
+      status: await window.settingsAPI.ai.status(),
+    };
+    set('ai-provider-base-url', 'https://api.deepseek.com/v1');
+    await new Promise((r) => setTimeout(r, 300));
+    document.getElementById('ai-provider-save').click();
+    await new Promise((r) => setTimeout(r, 900));
+    document.getElementById('ai-balance-refresh').click();
+    await new Promise((r) => setTimeout(r, 6000));
+    const official = {
+      readout: document.getElementById('ai-balance-readout')?.textContent ?? '',
+      status: await window.settingsAPI.ai.status(),
+    };
+    // 复原成不可达地址，避免影响后续步骤/下一次运行
+    set('ai-provider-base-url', 'http://127.0.0.1:9/v1');
+    await new Promise((r) => setTimeout(r, 300));
+    document.getElementById('ai-provider-save').click();
+    await new Promise((r) => setTimeout(r, 600));
+    return {
+      thirdPartyError: thirdParty.status.balanceError,
+      thirdPartyBalance: thirdParty.status.balance,
+      thirdPartyReadout: thirdParty.readout.slice(0, 80),
+      thirdPartySource: thirdParty.source.slice(0, 80),
+      officialError: official.status.balanceError.slice(0, 120),
+      officialBalance: official.status.balance,
+      officialReadout: official.readout.slice(0, 80),
+    };
+  })()`);
+  step(
+    'AI 面板：余额查询——非官方地址不发请求并说明原因，官方地址真的发请求（假密钥 -> 报错）',
+    balance,
+    balance.thirdPartyBalance === null &&
+      balance.thirdPartyError.includes('不提供余额查询') &&
+      balance.thirdPartySource.includes('本地累计 token') &&
+      balance.officialBalance === null &&
+      balance.officialError.length > 0,
+  );
+  // 复原 baseUrl 供后续步骤使用（后续步骤自己会设 key/地址，这里只是兜底）
+  await settingsRun(`(() => {
+    const el = document.getElementById('ai-provider-base-url');
+    el.value = 'http://127.0.0.1:9/v1';
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  })()`);
 
   /* 「立即写今天的日记」：点一下必须真的写出文件并在列表里出现 */
   const diary = await settingsRun(`(async () => {

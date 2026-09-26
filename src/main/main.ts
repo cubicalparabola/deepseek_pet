@@ -24,6 +24,23 @@ import {
 } from '../shared/config';
 import { validateManifest, manifestToRecord } from '../shared/animation-config';
 import type { AnimationDefinition, AnimationManifest } from '../shared/animation-types';
+import {
+  DEFAULT_BEHAVIOR_CONFIG,
+  DEFAULT_DISPLAY_STATE,
+  parseBehaviorConfig,
+  resolveDisplayState,
+  type BehaviorConfig,
+  type PetDock,
+  type PetDisplayState,
+} from '../shared/behavior-config';
+import {
+  dockTargetPosition,
+  evaluateDock,
+  nudgeInward,
+  petRectIn,
+  shouldUndock,
+  type Rect,
+} from '../shared/dock';
 import { describeError } from '../shared/errors';
 import type { Logger, LoggerFactory } from '../shared/logger';
 import type {
@@ -34,6 +51,7 @@ import type {
   RuntimeInfo,
   StateChangedPayload,
   TrayStatePayload,
+  WindowPosition,
 } from '../shared/ipc';
 import type { PetAction } from '../shared/action-types';
 import type { PluginRecord } from '../shared/plugin-types';
@@ -68,6 +86,7 @@ import { PluginManager } from './plugin-manager';
 import { TrayManager } from './tray-manager';
 import { WindowManager } from './window-manager';
 import { BubbleController } from './bubble-controller';
+import { TriggerService } from './pet/trigger-service';
 
 class DesktopPetApplication {
   private config!: PetConfig;
@@ -86,6 +105,12 @@ class DesktopPetApplication {
   private perception: PerceptionService | null = null;
   /** 成长、记忆与反思（4.1/4.2）：记忆宫殿、每日反思、行为策略。 */
   private growth: GrowthService | null = null;
+  /**
+   * 触发动画的信号源（鼠标靠近 / GPU 温度 / 心情 / 饿 / 掉线）。
+   *
+   * 判定规则都在 shared/pet-triggers.ts（纯函数），这里只负责取数与节流。
+   */
+  private triggers: TriggerService | null = null;
   private chatWindow: ChatWindowManager | null = null;
   /** 桌宠"在不在场"（影响情绪衰减与是否接收点击）。 */
   private presence: PetPresence = 'visible';
@@ -93,6 +118,8 @@ class DesktopPetApplication {
   private revealTimer: NodeJS.Timeout | null = null;
 
   private animationManifest: AnimationManifest = {};
+  /** 显示状态与随机池（`behavior.json`，缺失时用内置默认）。 */
+  private behaviorConfig: BehaviorConfig = DEFAULT_BEHAVIOR_CONFIG;
   private bootstrapData: PetBootstrap | null = null;
   private settingsStore: SettingsStore | null = null;
   private settings: PetSettings = { ...DEFAULT_PET_SETTINGS };
@@ -160,6 +187,7 @@ class DesktopPetApplication {
     });
 
     this.loadAnimationManifest();
+    this.loadBehaviorConfig();
 
     // 设置（尺寸 / 置顶）：存放于 assets/config/settings.json，与其它配置在一起
     this.settingsStore = new SettingsStore({
@@ -230,9 +258,16 @@ class DesktopPetApplication {
         this.settingsWindow?.open();
         return this.settingsWindow?.exists() ?? false;
       },
-      setWindowPosition: (x, y) => this.windowManager?.setPosition(x, y) ?? { x, y },
+      setWindowPosition: (x, y) => {
+        const result = this.windowManager?.setPosition(x, y) ?? { x, y };
+        // 收起状态下被拖动：拖离边缘就自动展开（跟手，不等松手）
+        this.checkUndockWhileDragging();
+        return result;
+      },
       getWindowPosition: () => this.windowManager?.getPosition() ?? { x: 0, y: 0 },
       setWindowSize: (width, height) => this.windowManager?.setSize(width, height),
+      dragEnd: () => this.handleDragEnd(),
+      undock: () => this.handleUndock(),
       showWindow: () => this.showPet(),
       hideWindow: () => this.hidePet(),
       setIgnoreMouseEvents: (ignore, forward) => this.windowManager?.setIgnoreMouseEvents(ignore, forward),
@@ -274,6 +309,15 @@ class DesktopPetApplication {
       aiOpenDiaryDir: () => this.openPath(this.aiService?.diaryService.dataDir ?? ''),
       aiTest: async () =>
         this.aiService?.testConnection() ?? { ok: false, mode: 'local', latencyMs: 0, sample: '', error: 'AI 模块未就绪', tokens: 0 },
+      /*
+       * 立刻查一次余额：返回**最新状态**（含余额快照与错误），
+       * 面板据此刷新读数 —— 用户点了按钮就该看到结果，而不是等下一次轮询。
+       */
+      aiRefreshBalance: async () => {
+        await this.aiService?.refreshBalance();
+        this.refreshAISurfaces();
+        return this.aiStatus();
+      },
       aiInteraction: (kind) => {
         this.aiService?.notifyInteraction(kind);
         // 用户碰了她 = 对刚才那次主动开口的"回应"（4.2 的反馈信号）
@@ -281,7 +325,7 @@ class DesktopPetApplication {
       },
       aiResetEmotion: () => this.aiService?.resetEmotion() ?? this.aiStatus(),
       aiSetPresence: (presence) => {
-        this.setPresence(presence);
+        this.applyPresenceFromUI(presence);
         return this.aiStatus();
       },
       aiOpenChat: () => this.openChatWindow(),
@@ -368,6 +412,18 @@ class DesktopPetApplication {
 
     const window = this.windowManager.create();
     window.once('ready-to-show', () => this.windowManager?.show());
+    /*
+     * 触发动画的信号源必须**等渲染层订阅完**再启动。
+     *
+     * 实测踩到的：触发服务原来在窗口加载前就启动，启动时的"没配 key -> 演 offline"
+     * 在渲染层订阅之前就广播出去了 —— 消息直接丢掉，而 `offlineArmed` 已经置为 false，
+     * 于是"启动即掉线"这件事**永远不会演**（只有等用户改配置触发了新的状态变化）。
+     * 与显示状态不同（它有 bootstrap 兜底），触发是纯事件，丢了就是丢了。
+     */
+    window.webContents.once('did-finish-load', () => {
+      const timer = setTimeout(() => this.createTriggerService(), 1500);
+      timer.unref?.();
+    });
     void this.windowManager.load();
   }
 
@@ -410,6 +466,13 @@ class DesktopPetApplication {
       isLLMUsable: () => this.aiService?.status().usable === true,
       getAvailableAnimations: () => this.animationSummaries().map((item) => item.id),
       onIntervene: (plan, reason) => this.handleIntervention(plan, reason),
+      // "感知到在工作 / 在阅读"只演动画不开口（不占打扰上限）
+      onTriggerAnimation: (animationId, reason) => {
+        if (this.display.hidden || this.display.dock !== 'free') return;
+        // 「暂停行为」= 不要自己动：与她主动演动画有关的一切都停下
+        if (this.behaviorPaused) return;
+        this.triggerAnimation(animationId, reason, 'perception');
+      },
       onStatus: (status) => this.ipcManager?.notifyPerceptionStatus(status),
       requestCameraFrame: () => this.ipcManager?.requestCameraFrame(),
       onSettingsChanged: (settings) => this.applyCapturePrivacy(settings),
@@ -517,7 +580,7 @@ class DesktopPetApplication {
       this.applyBubble({ visible: true, text: plan.text, ready: false });
     }
     if (plan.animation) {
-      this.ipcManager?.setAnimation(plan.animation);
+      this.triggerAnimation(plan.animation, `perception:${plan.kind}`, 'perception');
     }
     if (plan.hide) {
       /*
@@ -527,13 +590,13 @@ class DesktopPetApplication {
        * 自己去托盘点「显示桌宠」—— 用户会以为她崩了（文档评审抓到）。
        * 这里 20 秒后自动回来；期间用户手动显示过就不再干预。
        */
-      this.setPresence('hidden');
+      this.setDisplay({ hidden: true });
       if (this.revealTimer !== null) clearTimeout(this.revealTimer);
       this.revealTimer = setTimeout(() => {
         this.revealTimer = null;
         if (this.presence === 'hidden') {
           this.logger.info('pet reveals itself after hiding for sensitive content');
-          this.setPresence('visible');
+          this.setDisplay({ hidden: false });
         }
       }, SELF_HIDE_MS);
       this.revealTimer.unref?.();
@@ -628,6 +691,48 @@ class DesktopPetApplication {
     this.logger.info('growth module ready', { data: { nodes: this.growth.getNodes().length } });
   }
 
+  /**
+   * 触发动画的信号源（需求 6.2 的"触发动画"）。
+   *
+   * 五路信号全部喂给纯规则（shared/pet-triggers.ts）：
+   *   鼠标靠近 -> catch_down / catch_right
+   *   GPU 温度 -> overheat
+   *   心情过低 -> sad
+   *   饿      -> hungry（余额优先，见 AIService.refreshBalance）
+   *   掉线    -> offline（没配 key / key 无效 / 余额不足）
+   *
+   * 感知类触发（shy / work / read / remind / talk）不在这里：
+   * 它们由感知服务在拿到观察结果时判定（那里才有场景稳定性与切换频率）。
+   */
+  private createTriggerService(): void {
+    if (this.triggers !== null) return;
+    this.triggers = new TriggerService({
+      logger: this.loggerFactory.create('Triggers'),
+      trigger: (animationId, reason) => {
+        // 收起/隐藏状态下不打扰：她自己有 sleep/peek 那套随机动画
+        if (this.display.hidden || this.display.dock !== 'free') return;
+        this.triggerAnimation(animationId, reason, 'system');
+      },
+      /*
+       * 「暂停行为」= **不要自己动**：随机池、鼠标靠近的接住、心情/饿/掉线的表达
+       * 全都属于"她主动演"，暂停时一律不做（用户点她仍然照常有反应）。
+       * 这也让"验收里动画断言不被真实光标位置影响"有一个正经开关可用
+       * （实测：鼠标恰好停在宠物附近时，catch_right 会插进动画断言里）。
+       */
+      isPaused: () => this.behaviorPaused,
+      getPetRect: () => {
+        if (!(this.windowManager?.isVisible() ?? false)) return null;
+        return this.petRectOnScreen();
+      },
+      getEmotion: () => {
+        const status = this.aiService?.status();
+        return status ? { mood: status.emotion.mood, hunger: status.emotion.hunger } : null;
+      },
+      getOfflineReason: () => this.aiService?.offlineReason().reason ?? '',
+    });
+    this.triggers.start();
+  }
+
   /** 某天的场景分布（用感知服务当天的观察记录统计；没有就返回空）。 */
   private sceneCountsFor(date: string): Record<string, number> {
     const observations = this.perception?.observationsOn(date) ?? [];
@@ -697,12 +802,29 @@ class DesktopPetApplication {
   }
 
   /** 她说一句话：气泡 + 动画 + 推给聊天窗口。 */
-  private handleSpeak(request: { text: string; animation: string | null; kind: string; level?: 'info' | 'warn' | 'error' }): void {
-    if (request.text.trim() !== '') {
+  /**
+   * 触发一条动画（感知 / AI / 系统来源）。
+   *
+   * 与托盘「播放动画（测试）」的 `setAnimation` 分开：那条会强制切换并绕过冷却，
+   * 这条走普通优先级仲裁 —— 触发的动画（work / read / sad / shy…）不该硬切掉
+   * 用户正在看的点击反应，也不该绕过防刷屏的冷却。
+   */
+  private triggerAnimation(animationId: string, reason: string, source: string): void {
+    if (!animationId) return;
+    this.ipcManager?.triggerAnimation({ animationId, reason, source });
+  }
+
+  private handleSpeak(request: { text: string; animation: string | null; kind: string; level?: 'info' | 'warn' | 'error' }): void {    if (request.text.trim() !== '') {
       this.applyBubble({ visible: true, text: request.text, ready: false });
     }
     if (request.animation) {
-      this.ipcManager?.setAnimation(request.animation);
+      /*
+       * 走"触发动画"通道而不是 `setAnimation`：
+       * 前者是自动来源（普通优先级仲裁 + 冷却，会被点击动画礼貌挡住），
+       * 后者是"用户在托盘挑动画测试"（强制切换 + 绕过冷却）。
+       * 她说话时演 talk，不该把用户正在看的点击反应硬切掉。
+       */
+      this.triggerAnimation(request.animation, `speak:${request.kind}`, 'ai');
     }
     this.chatWindow?.pushMessage({
       role: request.kind === 'system' ? 'system' : 'pet',
@@ -789,22 +911,43 @@ class DesktopPetApplication {
   }
 
   /**
-   * 切换"收起（不打扰）"。
+   * 切换"收起（贴边）"。
    *
-   * 收起的语义（与 2.3 的衰减三档一致）：
-   * - 她还在屏幕上，但**整窗点击穿透**，不接收任何点击/拖动；
-   * - 行为暂停（不会自己跳动画打扰你）；
-   * - 情绪衰减加快（1.0/分钟，隐藏是 2.2）。
+   * ⚠️ 语义已经改过一轮（用户明确要求）：
+   * 以前这个菜单项是"**原地不动 + 整窗点击穿透 + 暂停行为**"，
+   * 现在它等于"**贴到最近的边缘收起**"：
+   *   - 她还在屏幕上、仍然能点（点一下就是展开）；
+   *   - 默认动画换成 lie（下方）/ watch（右侧），随机动画只剩一个且间隔更长；
+   *   - "完全看不到 / 不打扰" 改由「隐藏桌宠」承担（原来的收起行为其实就是隐藏）。
    */
   private toggleCollapsed(): boolean {
-    const next: PetPresence = this.presence === 'collapsed' ? 'visible' : 'collapsed';
-    this.setPresence(next);
-    return next === 'collapsed';
+    if (this.display.dock !== 'free') {
+      this.handleUndock();
+      return false;
+    }
+    const area = this.workAreaRect();
+    const pet = this.petRectOnScreen();
+    if (!area || !pet) return false;
+    /*
+     * 托盘/右键进来的"收起"没有鼠标落点，按"离哪条边近就收哪边"：
+     * 下边缘按剩余空间判断，右边同理；两边都远就收下方（桌面宠物最常见的姿势）。
+     */
+    const rightGap = area.x + area.width - (pet.x + pet.width);
+    const bottomGap = area.y + area.height - (pet.y + pet.height);
+    const dock: Exclude<PetDock, 'free'> = rightGap < bottomGap ? 'right' : 'bottom';
+    this.snapToDock(dock);
+    this.setDisplay({ dock });
+    return true;
   }
 
-  private setPresence(presence: PetPresence): void {
-    if (presence === this.presence) return;
-    const wasCollapsed = this.presence === 'collapsed';
+  /**
+   * 应用在场状态（情绪衰减三档 + 窗口显隐 + 行为暂停）。
+   *
+   * 由显示状态**推导**，不再由菜单直接设置 —— 两个来源各自改状态是上一版
+   * 状态不一致的根源（收起靠边了、情绪却还以为自己是"正常在场"）。
+   */
+  private applyPresence(presence: PetPresence): void {
+    const wasHidden = this.presence === 'hidden';
     this.presence = presence;
 
     if (presence === 'hidden') {
@@ -815,17 +958,21 @@ class DesktopPetApplication {
       this.windowVisible = true;
     }
 
-    const collapsed = presence === 'collapsed';
-    this.windowManager?.setIgnoreMouseEvents(collapsed, true);
-    if (collapsed !== wasCollapsed) {
-      this.behaviorPaused = collapsed;
-      this.ipcManager?.setBehaviorPaused(collapsed);
+    /*
+     * 收起（贴边）**不**暂停行为：她有自己的随机池（sleep / peek，3–8 分钟一次），
+     * 暂停了反而"收起之后就彻底死了"。隐藏才暂停 —— 看不到就不该浪费电。
+     */
+    const pause = presence === 'hidden';
+    if (pause !== this.behaviorPaused) {
+      this.behaviorPaused = pause;
+      this.ipcManager?.setBehaviorPaused(pause);
     }
 
     this.aiService?.setPresence(presence);
-    this.aiService?.recordEvent('presence', presence === 'collapsed' ? '收起（不打扰）' : presence === 'hidden' ? '隐藏桌宠' : '展开桌宠');
+    if (wasHidden !== (presence === 'hidden')) {
+      this.aiService?.recordEvent('presence', presence === 'collapsed' ? '收起（贴边）' : presence === 'hidden' ? '隐藏桌宠' : '展开桌宠');
+    }
     this.logger.info('pet presence changed', { data: { presence } });
-    this.refreshTray();
   }
 
   private createTray(): void {
@@ -1013,6 +1160,39 @@ class DesktopPetApplication {
   }
 
   /**
+   * 读取显示状态与随机池配置（`assets/config/behavior.json`）。
+   *
+   * 缺文件 / 坏了都退回内置默认（与需求给定的池与间隔一致），
+   * 因为"随机动画没了"属于静默失败，比"配置没读到"严重得多。
+   */
+  private loadBehaviorConfig(): void {
+    const file = join(this.config.configPath, 'behavior.json');
+    let parsed: unknown;
+    if (existsSync(file)) {
+      try {
+        parsed = JSON.parse(readFileSync(file, 'utf8'));
+      } catch (error) {
+        this.logger.error('behavior config parse failed; using defaults', { error: describeError(error), data: { file } });
+      }
+    } else {
+      this.logger.warn('behavior.json missing; using built-in defaults', { data: { file } });
+    }
+    const { config, issues } = parseBehaviorConfig(parsed);
+    for (const issue of issues) {
+      const log = issue.level === 'error' ? this.logger.error : this.logger.warn;
+      log.call(this.logger, `behavior 配置: ${issue.message}`);
+    }
+    this.behaviorConfig = config;
+    this.logger.info('behavior config loaded', {
+      data: {
+        file,
+        states: Object.keys(config.states).length,
+        pools: Object.keys(config.pools).length,
+      },
+    });
+  }
+
+  /**
    * 由素材宽高比 + 用户设定的 scale 计算窗口尺寸。
    *
    * 基准高度固定为 PET_BASE_HEIGHT(480)，实际高度 = 480 × scale，
@@ -1161,6 +1341,8 @@ class DesktopPetApplication {
       mode: this.mode,
       assetsPath: this.config.assetsPath,
       animationManifest: this.animationManifest,
+      behaviorConfig: this.behaviorConfig,
+      display: this.display,
     };
   }
 
@@ -1177,6 +1359,8 @@ class DesktopPetApplication {
        * 只靠 IPC 推送会漏掉那一次。
        */
       ...(this.bubbleController ? { bubble: this.bubbleController.payload() } : {}),
+      // 显示状态同理：可能启动时就已经是收起/隐藏
+      display: this.display,
     };
   }
 
@@ -1192,13 +1376,181 @@ class DesktopPetApplication {
   private showPet(): void {
     this.windowManager?.show();
     this.windowVisible = true;
+    // 隐藏是"显示状态"的一部分，必须一起改：否则渲染层仍以为自己被藏着，
+    // 默认动画与随机池都不对。
+    this.setDisplay({ hidden: false });
     this.refreshTray();
   }
 
   private hidePet(): void {
     this.windowManager?.hide();
     this.windowVisible = false;
+    this.setDisplay({ hidden: true });
     this.refreshTray();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 显示状态：收起（贴边）/ 隐藏                                         */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * 主进程侧的显示状态（单一事实来源）。
+   *
+   * 为什么放在主进程：贴边判定要用工作区（`screen.workArea`）与窗口真实位置，
+   * 只有主进程拿得到；渲染层只需要"在这个状态下默认播什么、随机池有哪些"。
+   */
+  private display: PetDisplayState = { ...DEFAULT_DISPLAY_STATE };
+  /**
+   * 最近一次"没贴边"时的窗口位置。
+   *
+   * 用途：点一下展开时回到这里。**不能**用"贴边前那一刻的位置" ——
+   * 那一刻用户正把她往屏幕外拖（Windows 的边界收敛允许窗口只剩 60px 在屏内），
+   * 回到那里等于"点一下反而更看不见了"（实测：点完只剩 60px 露在屏幕里）。
+   * 因此只记"判定为没贴边"的位置：它一定在她好好待在桌面上的时候产生。
+   */
+  private lastFreePosition: WindowPosition | null = null;
+
+  /**
+   * 设置界面的"在场状态"入口（`ai:set-presence`）。
+   *
+   * 显示状态现在是**主进程**的事实来源，所以这里把三档映射成显示动作，
+   * 而不是反过来直接改在场字段：
+   *   visible   -> 展开（贴边则回到收起前的位置）
+   *   collapsed -> 收起（贴最近的边）
+   *   hidden    -> 隐藏窗口
+   */
+  private applyPresenceFromUI(presence: PetPresence): void {
+    if (presence === 'hidden') {
+      this.setDisplay({ hidden: true });
+      return;
+    }
+    if (presence === 'collapsed') {
+      if (this.display.hidden) this.setDisplay({ hidden: false });
+      this.toggleCollapsed();
+      return;
+    }
+    if (this.display.hidden) this.setDisplay({ hidden: false });
+    if (this.display.dock !== 'free') this.handleUndock();
+  }
+
+  /** 更新显示状态并广播给渲染层（不变则不广播，避免无谓的状态重置）。 */
+  private setDisplay(patch: Partial<PetDisplayState>): PetDisplayState {
+    const next: PetDisplayState = { ...this.display, ...patch };
+    if (next.dock === this.display.dock && next.hidden === this.display.hidden) return this.display;
+    const before = this.display;
+    this.display = next;
+
+    // 在场状态（情绪衰减三档）跟着显示状态走：收起 = 安静待着，隐藏 = 看不到主人
+    const presence: PetPresence = next.hidden ? 'hidden' : next.dock === 'free' ? 'visible' : 'collapsed';
+    this.applyPresence(presence);
+
+    this.ipcManager?.notifyDisplayState(next);
+    this.logger.info('pet display state changed', {
+      data: {
+        from: `${before.dock}${before.hidden ? '+hidden' : ''}`,
+        to: `${next.dock}${next.hidden ? '+hidden' : ''}`,
+        state: resolveDisplayState(next),
+      },
+    });
+    this.refreshTray();
+    return next;
+  }
+
+  /** 当前宠物矩形（屏幕坐标）——贴边判定与"点击宠物"命中都用它。 */
+  private petRectOnScreen(): Rect | null {
+    const window = this.windowManager;
+    if (!window?.exists()) return null;
+    const size = this.resolveWindowSize();
+    const bounds = window.describe();
+    return petRectIn(
+      { x: bounds.position.x, y: bounds.position.y, width: bounds.size.width, height: bounds.size.height },
+      { width: size.width, height: size.height },
+      this.bubbleController?.getLayout().petBottomOffset ?? 0,
+    );
+  }
+
+  private workAreaRect(): Rect | null {
+    try {
+      const area = screen.getPrimaryDisplay().workArea;
+      return { x: area.x, y: area.y, width: area.width, height: area.height };
+    } catch (error) {
+      this.logger.warn('reading work area failed; docking disabled this time', { error: describeError(error) });
+      return null;
+    }
+  }
+
+  /**
+   * 拖拽结束：按最终位置决定是否收起（需求："拖动宠物放到最右边或者最下边时触发收起宠物状态"）。
+   *
+   * @returns 新的显示状态（渲染层据此换默认动画）
+   */
+  private handleDragEnd(): PetDisplayState {
+    const pet = this.petRectOnScreen();
+    const area = this.workAreaRect();
+    if (!pet || !area) return this.display;
+
+    const evaluation = evaluateDock(pet, area);
+    if (evaluation.dock === 'free') {
+      // 放在中间 = 展开（拖动离开边缘即展开，与"点一下展开"是同一结果）
+      this.lastFreePosition = this.windowManager?.getPosition() ?? this.lastFreePosition;
+      return this.setDisplay({ dock: 'free' });
+    }
+
+    this.snapToDock(evaluation.dock);
+    return this.setDisplay({ dock: evaluation.dock });
+  }
+
+  /** 把宠物贴平到边缘（只挪窗口位置）。 */
+  private snapToDock(dock: Exclude<PetDock, 'free'>): void {
+    const window = this.windowManager;
+    const area = this.workAreaRect();
+    if (!window?.exists() || !area) return;
+    const size = this.resolveWindowSize();
+    const bounds = window.describe();
+    const target = dockTargetPosition({
+      dock,
+      petSize: { width: size.width, height: size.height },
+      windowSize: bounds.size,
+      workArea: area,
+      current: { x: bounds.position.x, y: bounds.position.y },
+      petBottomOffset: this.bubbleController?.getLayout().petBottomOffset ?? 0,
+    });
+    window.setPosition(target.x, target.y);
+  }
+
+  /**
+   * 收起状态下拖动窗口：拖离边缘就自动展开。
+   *
+   * 在每次 `setWindowPosition` 里顺手判定，而不是等松手 ——
+   * "拖出来一半就恢复"比"松手才恢复"更跟手。
+   */
+  /** 收起（贴边）状态下拖动窗口：拖离边缘就自动展开。 */
+  private checkUndockWhileDragging(): void {
+    if (this.display.dock === 'free') return;
+    const pet = this.petRectOnScreen();
+    const area = this.workAreaRect();
+    if (!pet || !area) return;
+    if (!shouldUndock(this.display.dock, pet, area)) return;
+    this.setDisplay({ dock: 'free' });
+  }
+
+  /** 请求展开（收起状态下点了宠物）：回到最近一次"好好待在桌面上"的位置。 */
+  private handleUndock(): PetDisplayState {
+    if (this.display.dock === 'free') return this.display;
+    const dock = this.display.dock;
+    const restore = this.lastFreePosition;
+    const next = this.setDisplay({ dock: 'free' });
+    if (restore) {
+      this.windowManager?.setPosition(restore.x, restore.y);
+      return next;
+    }
+    // 没有记录（例如启动时就已经是收起状态）：至少把她从边缘往里挪开
+    const current = this.windowManager?.getPosition();
+    if (current) {
+      const target = nudgeInward(dock, current);
+      this.windowManager?.setPosition(target.x, target.y);
+    }
+    return next;
   }
 
   private applyTrayState(state: TrayStatePayload): void {
@@ -1218,6 +1570,8 @@ class DesktopPetApplication {
       behaviorPaused: this.behaviorPaused,
       currentAnimation: this.currentAnimation,
       currentState: this.currentState as TrayStatePayload['currentState'],
+      // 显示状态（收起方向）也要给菜单：它决定显示"收起（贴边）"还是"展开"
+      display: this.display,
       plugins: this.pluginRecords,
       // 尺寸与置顶由主进程自己持有，不需要 renderer 上报
       size: this.resolveWindowSize(),

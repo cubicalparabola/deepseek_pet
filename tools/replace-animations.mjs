@@ -3,8 +3,8 @@
  * 用桌面上的新素材**整体替换**现有动画。
  *
  * 来源：E:\Desktop\webm
- *   顶层 *.webm            -> 一次性动画（19 个，含 peek_ 需改名为 peek）
- *   <name>/<name>_{start,loop,end}.webm -> 持续动画三段（overheat/read/sleep/watch/work）
+ *   顶层 *.webm            -> 一次性动画（含 peek_ 需改名为 peek）
+ *   <name>/<name>_{start,loop,end}.webm -> 持续动画三段（overheat/read/sad/sleep/watch/work）
  *
  * 目标：assets/animations/ 下扁平存放，命名统一用连字符：
  *   <name>.webm                 一次性
@@ -51,7 +51,8 @@ for (const file of readdirSync(source).filter((f) => f.endsWith('.webm'))) {
 }
 
 // 桌面源目录里 read/sleep/work 的"单文件版"也在顶层，但它们是持续动画，必须排除
-const PERSISTENT_NAMES = ['overheat', 'read', 'sleep', 'watch', 'work'];
+// （sad 是后加的：桌面既有 sad/ 三段目录，顶层没有 sad.webm，但一起列上更保险）
+const PERSISTENT_NAMES = ['overheat', 'read', 'sad', 'sleep', 'watch', 'work'];
 const finalOneShots = oneShots.filter((id) => !PERSISTENT_NAMES.includes(id));
 for (const id of oneShots.filter((id) => PERSISTENT_NAMES.includes(id))) {
   rmSync(join(target, `${id}.webm`), { force: true });

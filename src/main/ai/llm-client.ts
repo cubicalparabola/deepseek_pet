@@ -11,6 +11,7 @@
  */
 
 import type { AIProviderConfig } from '../../shared/ai-types';
+import { balanceEndpoint, parseBalance, type LLMBalanceResult } from '../../shared/balance';
 import type { Logger } from '../../shared/logger';
 import { describeError } from '../../shared/errors';
 
@@ -249,6 +250,54 @@ export class LLMClient {
       totalTokens: promptTokens + completionTokens,
       model: typeof parsed.model === 'string' ? parsed.model : this.config.model,
     };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* ------------------------------------------------------------------ */
+  /* 余额查询（DeepSeek 官方只有这一个"用量/额度"接口）                     */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * 查询账号余额：`GET /user/balance`。
+   *
+   * 为什么是"余额"而不是"token 用量"：DeepSeek 官方文档只提供
+   * `GET /user/balance`（返回 `is_available` 与 `balance_infos[]`，
+   * 每项含 `currency` / `total_balance` / `granted_balance` / `topped_up_balance`），
+   * **没有**公开的 token 用量查询接口 —— 累计 token 只能自己统计
+   * （我们已经按 `usage.total_tokens` 累加在预算里）。
+   * 因此"还剩多少额度"以余额为准，本地累计 token 只在查不到余额时兜底。
+   *
+   * 只在 DeepSeek 的官方域名下调用：one-api / Ollama 这类兼容网关没有这个接口，
+   * 对它们发请求只会得到 404 噪音。
+   */
+  public async fetchBalance(): Promise<LLMBalanceResult> {
+    const config = this.config;
+    const key = config.apiKey.trim();
+    if (key === '') throw new LLMError('NO_KEY', '未配置 API Key');
+
+    const url = balanceEndpoint(config.baseUrl);
+    const timeoutMs = Math.min(config.timeoutMs, 15000);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          accept: 'application/json',
+          authorization: `Bearer ${key}`,
+        },
+        signal: controller.signal,
+      });
+      const text = await response.text();
+      if (!response.ok) throw this.httpError(response.status, text);
+      const parsed = safeParse(text);
+      if (parsed === null) throw new LLMError('PARSE', '余额接口返回的不是合法 JSON');
+      return parseBalance(parsed, new Date().toISOString());
+    } catch (error) {
+      throw this.normalizeError(error, timeoutMs);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /* ------------------------------------------------------------------ */
