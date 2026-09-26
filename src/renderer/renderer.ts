@@ -37,6 +37,7 @@ import {
   DOCKED_RANDOM_INTERVAL_MS,
   NORMAL_RANDOM_INTERVAL_MS,
   defaultAnimationFor,
+  isQuietDisplay,
   parseBehaviorConfig,
   pickPoolAnimation,
   poolsFor,
@@ -1346,6 +1347,8 @@ class PetApplication {
       readonly poolsFor: typeof poolsFor;
       readonly defaultAnimationFor: typeof defaultAnimationFor;
       readonly resolveDisplayState: typeof resolveDisplayState;
+      /** 收起/隐藏 = 安静模式（这时她不该开口说话）。 */
+      readonly isQuietDisplay: typeof isQuietDisplay;
       readonly DEFAULT_BEHAVIOR_CONFIG: typeof DEFAULT_BEHAVIOR_CONFIG;
       readonly NORMAL_RANDOM_INTERVAL_MS: typeof NORMAL_RANDOM_INTERVAL_MS;
       readonly DOCKED_RANDOM_INTERVAL_MS: typeof DOCKED_RANDOM_INTERVAL_MS;
@@ -1536,6 +1539,7 @@ class PetApplication {
         poolsFor,
         defaultAnimationFor,
         resolveDisplayState,
+        isQuietDisplay,
         DEFAULT_BEHAVIOR_CONFIG,
         NORMAL_RANDOM_INTERVAL_MS,
         DOCKED_RANDOM_INTERVAL_MS,

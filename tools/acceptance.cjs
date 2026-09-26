@@ -1196,6 +1196,29 @@ app.whenReady().then(async () => {
     JSON.stringify(dockModel),
   );
 
+  /* 收起/隐藏 = 安静模式（用户要求："收起时不应该发生对话"）—— 纯函数先钉死 */
+  const quietModel = await run(`(() => {
+    const model = window.petDebug.animationModel;
+    return [
+      ['free', { dock: 'free', hidden: false }],
+      ['right', { dock: 'right', hidden: false }],
+      ['bottom', { dock: 'bottom', hidden: false }],
+      ['hidden', { dock: 'free', hidden: true }],
+      ['hidden+docked', { dock: 'bottom', hidden: true }],
+    ].map((entry) => [entry[0], model.isQuietDisplay(entry[1])]);
+  })()`);
+  record(
+    '安静模式判定：只有"好好待在桌面上"（free 且没隐藏）才允许她开口；收起/隐藏一律安静',
+    JSON.stringify(quietModel) === JSON.stringify([
+      ['free', false],
+      ['right', true],
+      ['bottom', true],
+      ['hidden', true],
+      ['hidden+docked', true],
+    ]),
+    JSON.stringify(quietModel),
+  );
+
   /* 显示状态 -> 默认动画 / 随机池（纯函数 + 真机 app 的当前显示状态） */
   const poolModel = await run(`(() => {
     const model = window.petDebug.animationModel;

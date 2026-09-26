@@ -66,6 +66,22 @@ export function resolveDisplayState(input: PetDisplayState): DisplayStateId {
 
 export const DEFAULT_DISPLAY_STATE: PetDisplayState = { dock: 'free', hidden: false };
 
+/**
+ * 收起（贴边）或隐藏 = **安静模式**：她不开口说话。
+ *
+ * 用户要求原文："收起时不应该发生对话"。
+ * 为什么当成一条**纯函数**而不是散在几处 if 里：
+ *   - 收起/隐藏这两个状态是"别打扰我"的意思，判定只有一处才不会漏
+ *     （感知干预、AI 主动搭话、日记提醒、聊天回复的气泡都要问它）；
+ *   - 验收能逐条钉死（`dock: free` 才允许开口，其余三种一律安静）。
+ *
+ * ⚠️ 注意这与"能不能被点击"无关：收起时点她仍然照常展开（那是用户主动的动作）。
+ * 安静模式管的是**她主动出声**。
+ */
+export function isQuietDisplay(display: PetDisplayState): boolean {
+  return display.hidden || display.dock !== 'free';
+}
+
 /* -------------------------------------------------------------------------- */
 /* 二、配置结构                                                                */
 /* -------------------------------------------------------------------------- */

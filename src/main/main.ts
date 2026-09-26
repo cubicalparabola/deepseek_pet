@@ -27,6 +27,7 @@ import type { AnimationDefinition, AnimationManifest } from '../shared/animation
 import {
   DEFAULT_BEHAVIOR_CONFIG,
   DEFAULT_DISPLAY_STATE,
+  isQuietDisplay,
   parseBehaviorConfig,
   resolveDisplayState,
   type BehaviorConfig,
@@ -309,7 +310,11 @@ class DesktopPetApplication {
         this.growth?.recordUserActivity();
         return this.aiService?.chat(text, 'chat-window') ?? localChatFallback('AI 模块未就绪');
       },
-      aiSpeakUp: async () => this.aiService?.speakUp('tray') ?? localChatFallback('AI 模块未就绪'),
+      aiSpeakUp: async () => {
+        // 用户主动要她说话：收起/隐藏时先把她请回桌面（见 expandForSpeech）
+        this.expandForSpeech('ai-speak-up');
+        return this.aiService?.speakUp('tray') ?? localChatFallback('AI 模块未就绪');
+      },
       aiHistory: () => this.aiService?.history() ?? [],
       aiMemory: () => this.aiService?.memorySnapshot() ?? emptyMemorySnapshot(),
       aiClearMemory: () => this.aiService?.clearMemory() ?? emptyMemorySnapshot(),
@@ -578,19 +583,34 @@ class DesktopPetApplication {
   private handleIntervention(plan: { kind: string; text: string; animation: string | null; hide: boolean }, reason: string): void {
     this.logger.info('perception intervention', { data: { reason, text: plan.text.slice(0, 40) } });
     /*
-     * 4.2 的反馈起点：记下"我说了这句话、当时是什么场景"。
-     * 之后 3 分钟里如果用户有任何互动/对话，就算"被回应"——
-     * 回应率是她反思"该不该少说话"的唯一依据。
+     * 收起 / 隐藏 = 安静模式：**感知干预整条不发生**（不冒泡、不演开口动画，
+     * 也不记"干预" —— 她没开口就谈不上被回应，记了会白占每小时的打扰额度、
+     * 还会把成长模块的回应率算歪）。
+     *
+     * 唯一的例外是 `plan.hide`（敏感内容 / 陌生人时捂住眼睛躲起来）：
+     * 那是隐私动作，与"说不说话"无关，照做。
      */
-    this.growth?.recordIntervention({
-      kind: plan.kind,
-      text: plan.text,
-      scene: this.perception?.status().lastObservation?.scene ?? 'other',
-    });
-    if (plan.text.trim() !== '') {
+    const quiet = this.isQuiet();
+    const shouldSpeak = plan.text.trim() !== '' && !quiet;
+    if (plan.text.trim() !== '' && quiet) {
+      this.logger.info('perception intervention speech suppressed: pet is collapsed or hidden', {
+        data: { kind: plan.kind, reason, dock: this.display.dock, hidden: this.display.hidden },
+      });
+    }
+    if (shouldSpeak) {
+      /*
+       * 4.2 的反馈起点：记下"我说了这句话、当时是什么场景"。
+       * 之后 3 分钟里如果用户有任何互动/对话，就算"被回应"——
+       * 回应率是她反思"该不该少说话"的唯一依据。
+       */
+      this.growth?.recordIntervention({
+        kind: plan.kind,
+        text: plan.text,
+        scene: this.perception?.status().lastObservation?.scene ?? 'other',
+      });
       this.applyBubble({ visible: true, text: plan.text, ready: false });
     }
-    if (plan.animation) {
+    if (plan.animation && !quiet) {
       this.triggerAnimation(plan.animation, `perception:${plan.kind}`, 'perception');
     }
     if (plan.hide) {
@@ -643,6 +663,8 @@ class DesktopPetApplication {
   /** 3.2 按需看屏幕（只剩场景）：结果同时进气泡与聊天窗口（和 AI 回复走同一套展示）。 */
   private async viewScreen(mode: PerceptionViewMode): Promise<void> {
     if (!this.perception) return;
+    // 用户主动点的「看我在做什么」：收起/隐藏时先请回桌面，结果才有地方说
+    this.expandForSpeech('view-screen');
     const result = await this.perception.viewNow(mode);
     this.handleSpeak({ text: result.text, animation: this.animationForScene(result.scene), kind: 'reply' });
     if (this.aiService) {
@@ -844,7 +866,64 @@ class DesktopPetApplication {
     this.ipcManager?.triggerAnimation({ animationId, reason, source });
   }
 
-  private handleSpeak(request: { text: string; animation: string | null; kind: string; level?: 'info' | 'warn' | 'error' }): void {    if (request.text.trim() !== '') {
+  /**
+   * 收起（贴边）或隐藏时，她**不开口**（用户要求："收起时不应该发生对话"）。
+   *
+   * 判定本身在 `shared/behavior-config.ts` 的 `isQuietDisplay()`（纯函数，验收钉死）。
+   */
+  private isQuiet(): boolean {
+    return isQuietDisplay(this.display);
+  }
+
+  /**
+   * 用户主动要她开口（托盘 / 聊天窗口的「让她说句话」、各种摘要、日记…）：
+   * 收起或隐藏时**先把她请回桌面**，再让气泡出现在桌面上。
+   *
+   * 为什么用户主动的那些不直接静音：菜单点了却一声不吭，看起来就是坏了。
+   * 先展开（和"点一下展开"是同一套逻辑）既满足"收起时不发生对话"，
+   * 也让对话发生在桌面上 —— 展开是同步的状态变化，窗口位置照旧由渲染层
+   * 在收尾段播完之后再挪（见 `handleUndock` / CommandMoveWhenSettled）。
+   */
+  private expandForSpeech(reason: string): void {
+    if (!this.isQuiet()) return;
+    this.logger.info('expanding pet before speaking (user asked)', {
+      data: { reason, dock: this.display.dock, hidden: this.display.hidden },
+    });
+    if (this.display.hidden) this.setDisplay({ hidden: false }, `${reason}:unhide`);
+    if (this.display.dock !== 'free') this.handleUndock();
+  }
+
+  private handleSpeak(request: { text: string; animation: string | null; kind: string; level?: 'info' | 'warn' | 'error' }): void {
+    /*
+     * 收起 / 隐藏 = 安静模式（用户要求："收起时不应该发生对话"）：
+     *   - `proactive` / `system`（她自己想说话、日记提醒、系统提示）：**整条丢弃** ——
+     *     连聊天窗口都不推，因为她本来就不该在这时候开口；
+     *   - `reply`（用户刚在聊天窗口说了话）：**回复照常给聊天窗口**，只是不在屏幕
+     *     边上冒泡、也不演开口动画 —— 对话发生在聊天窗口里，收起状态下她不"出声"。
+     */
+    if (this.isQuiet()) {
+      const automatic = request.kind !== 'reply';
+      this.logger.info('speech suppressed: pet is collapsed or hidden', {
+        data: {
+          kind: request.kind,
+          automatic,
+          dock: this.display.dock,
+          hidden: this.display.hidden,
+          text: request.text.slice(0, 20),
+        },
+      });
+      if (automatic) return;
+      if (request.text.trim() !== '') {
+        this.chatWindow?.pushMessage({
+          role: 'pet',
+          text: request.text,
+          at: new Date().toISOString(),
+          ...(request.level ? { level: request.level } : {}),
+        });
+      }
+      return;
+    }
+    if (request.text.trim() !== '') {
       this.applyBubble({ visible: true, text: request.text, ready: false });
     }
     if (request.animation) {
@@ -935,6 +1014,7 @@ class DesktopPetApplication {
     }
     const entry = await this.aiService.writeDiary(undefined, true);
     // 写完把正文冒泡出来 —— 用户点菜单就是想看内容
+    this.expandForSpeech('write-diary');
     this.applyBubble({ visible: true, text: entry.body, ready: false });
     this.refreshTray();
     return entry;
@@ -1110,6 +1190,7 @@ class DesktopPetApplication {
           this.openChatWindow();
         },
         onSpeakUp: () => {
+          this.expandForSpeech('tray-speak-up');
           void this.aiService?.speakUp('tray');
         },
         onWriteDiary: () => {
@@ -1121,6 +1202,7 @@ class DesktopPetApplication {
           this.openPath(this.aiService?.diaryService.dataDir ?? '');
         },
         onShowMemoryDigest: () => {
+          this.expandForSpeech('tray-memory-digest');
           this.applyBubble({ visible: true, text: this.memoryDigest(), ready: false });
         },
         onToggleCollapsed: () => this.toggleCollapsed(),
@@ -1135,6 +1217,8 @@ class DesktopPetApplication {
           void this.viewScreen(mode);
         },
         onTogglePrivacyMode: () => {
+          // 这句确认也是"她开口"：收起/隐藏时先请回桌面再说
+          this.expandForSpeech('tray-privacy-mode');
           const before = this.perception?.settings.privacyMode ?? false;
           const status = this.perception?.setSettings({ privacyMode: !before }) ?? this.perceptionStatus();
           this.applyBubble({
@@ -1147,6 +1231,7 @@ class DesktopPetApplication {
           return status.settings.privacyMode;
         },
         onShowPerceptionDigest: () => {
+          this.expandForSpeech('tray-perception-digest');
           this.applyBubble({ visible: true, text: this.perceptionDigest(), ready: false });
         },
         onOpenPerceptionLog: () => {
@@ -1166,12 +1251,14 @@ class DesktopPetApplication {
 
         /* ------------------ 成长、记忆与反思（4.1 / 4.2） ------------------ */
         onShowPalaceDigest: () => {
+          this.expandForSpeech('tray-palace-digest');
           this.applyBubble({ visible: true, text: this.growth?.digest() ?? '成长模块未就绪', ready: false });
         },
         onOpenPalaceFile: () => {
           this.openPath(this.growth?.palacePath ?? '');
         },
         onReflectNow: () => {
+          this.expandForSpeech('tray-reflect-now');
           void this.growth?.reflectNow().then((entry) => {
             this.applyBubble({ visible: true, text: entry.body, ready: false });
             this.refreshTray();
@@ -1528,6 +1615,20 @@ class DesktopPetApplication {
     // 在场状态（情绪衰减三档）跟着显示状态走：收起 = 安静待着，隐藏 = 看不到主人
     const presence: PetPresence = next.hidden ? 'hidden' : next.dock === 'free' ? 'visible' : 'collapsed';
     this.applyPresence(presence);
+
+    /*
+     * 变安静（收起 / 隐藏）时**正在冒的泡也要收掉**（用户要求："收起时不应该发生对话"）。
+     *
+     * 只拦"新的开口"不够：她可能正说着话的时候被拖到边上，
+     * 气泡会一直挂在屏幕边缘（实测：窗口被气泡撑到 396×330 挂在右边不动）。
+     * 这里只处理"从能说话变成不能说话"这一跳 —— 展开时不会反过来乱冒泡。
+     */
+    if (isQuietDisplay(next) && !isQuietDisplay(before) && (this.bubbleController?.isVisible() ?? false)) {
+      this.applyBubble(null);
+      this.logger.info('bubble hidden: pet is collapsed or hidden now', {
+        data: { reason, dock: next.dock, hidden: next.hidden },
+      });
+    }
 
     this.ipcManager?.notifyDisplayState(next);
     this.logger.info('pet display state changed', {
