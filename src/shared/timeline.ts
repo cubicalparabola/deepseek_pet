@@ -9,6 +9,7 @@
 
 import type { ScreenObservation } from './perception-types';
 import type { ActivitySegment, DayTimeline, TimelineTotals } from './timeline-types';
+import { isRecognizedScene } from './perception-types';
 import { sceneLabel } from './perception';
 
 /** 两条观察最多间隔多久还算"同一段"（默认 90s = 3 倍采样间隔，容忍漏采一两次）。 */
@@ -105,6 +106,16 @@ export function appendObservation(
   observation: Pick<ScreenObservation, 'at' | 'scene' | 'app'>,
   options?: { readonly gapMs?: number },
 ): ActivitySegment[] {
+  /*
+   * 「没认出来」＝当作没看见（用户要求）。
+   *
+   * 直接原样返回：不新起一段、也不打断上一段 —— 时间线要回答的是
+   * "今天在做什么"，而"没认出来"不是一个答案；把它写进去会让
+   * 「今天在做什么」「日记」这两处文本出现"上午在其他（没认出来）"，
+   * 她照着念出来就变成了用户听到的那句怪话。
+   */
+  if (!isRecognizedScene(observation.scene)) return [...segments];
+
   const gapMs = Math.max(1000, options?.gapMs ?? SEGMENT_GAP_MS);
   const at = observation.at;
   const scene = observation.scene;
@@ -211,7 +222,13 @@ export function formatTimelineText(timeline: DayTimeline, options?: { readonly m
   if (totals.activeMinutes <= 0 && totals.idleMinutes <= 0) return '';
   const maxSegments = Math.max(1, options?.maxSegments ?? 3);
   const until = totals.lastAt === '' ? '' : `（截至 ${formatClock(totals.lastAt)}）`;
+  /*
+   * 这段文本会被塞进聊天提示词与日记里，所以**"没认出来"一律不提**
+   * （用户要求："如果是没认出来，就当作没看见"）。老的时间线文件里可能已经存了
+   * `other` 段，这里再过一道，保证她嘴里不会出现"上午在其他（没认出来）"。
+   */
   const scenePart = totals.byScene
+    .filter((item) => isRecognizedScene(item.scene))
     .slice(0, 4)
     .map((item) => `${sceneLabel(item.scene)} ${formatDuration(item.minutes)}（${Math.round(item.share * 100)}%）`)
     .join('、');
@@ -219,7 +236,7 @@ export function formatTimelineText(timeline: DayTimeline, options?: { readonly m
     .slice(0, 3)
     .map((item) => `${item.app} ${formatDuration(item.minutes)}`)
     .join('、');
-  const recent = timeline.segments.slice(-maxSegments).map(formatSegmentLine);
+  const recent = recognizedSegments(timeline.segments).slice(-maxSegments).map(formatSegmentLine);
 
   return [
     `今天${until}：${scenePart === '' ? '没有记录到明确的活动' : scenePart}`,
@@ -228,6 +245,11 @@ export function formatTimelineText(timeline: DayTimeline, options?: { readonly m
   ]
     .filter((line) => line !== '')
     .join('\n');
+}
+
+/** 只留"看懂了"的段（老时间线文件里可能存着 `other`）。 */
+export function recognizedSegments(segments: readonly ActivitySegment[]): ActivitySegment[] {
+  return segments.filter((segment) => isRecognizedScene(segment.scene));
 }
 
 /**
@@ -243,7 +265,8 @@ export function buildNarrativeMessages(input: {
 }): { readonly system: string; readonly user: string } {
   const { timeline } = input;
   const owner = input.userName.trim() === '' ? '主人' : input.userName.trim();
-  const lines = timeline.segments.map(formatSegmentLine).join('\n');
+  // 同上：让模型写叙述时也不给"没认出来"的段，免得她照着说出来
+  const lines = recognizedSegments(timeline.segments).map(formatSegmentLine).join('\n');
   return {
     system: [
       `你是「${input.petName}」，一只住在 Windows 桌面上的鲸鱼娘桌宠。`,

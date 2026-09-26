@@ -45,6 +45,23 @@ export type SceneKind =
 /** 由行为信号推测的用户状态。 */
 export type UserState = 'deep' | 'shallow' | 'idle' | 'away' | 'unknown';
 
+/**
+ * 这个场景算不算"看懂了"。
+ *
+ * 用户要求（原话）："如果是没认出来，就当作没看见，不应该在宠物对话的时候
+ * 说出『这个时候经常在说不清』这种话"。
+ *
+ * `other` 就是"模型没把画面归进受控词表里的任何一类"。它**可以**留在观察日志里
+ * 供排查（面板/日志会写"其他（没认出来）"），但绝不能：
+ *   - 进习惯统计（否则她会学到"这个点一般在没认出来"）；
+ *   - 进时间线（否则"今天在做什么"和日记里会出现这种话）；
+ *   - 被拿去开口（`habitPredictionText` 会照着场景标签说一句话）。
+ * 所以判定集中在这一处。
+ */
+export function isRecognizedScene(scene: SceneKind): boolean {
+  return scene !== 'other';
+}
+
 export interface PerceptionSettings {
   /** 3.1 屏幕感知总开关。 */
   readonly screen: boolean;

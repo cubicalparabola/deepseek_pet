@@ -71,7 +71,7 @@ import { resolveBubbleLayout, type BubblePayload, type BubbleState } from '../sh
 import type { AIStatusView, DiaryEntry, PetPresence } from '../shared/ai-types';
 import { createDefaultAIStatus } from '../shared/ai-types';
 import type { PerceptionStatus, PerceptionViewMode } from '../shared/perception-types';
-import { DEFAULT_PERCEPTION_SETTINGS } from '../shared/perception-types';
+import { DEFAULT_PERCEPTION_SETTINGS, isRecognizedScene } from '../shared/perception-types';
 import { sceneLabel } from '../shared/perception';
 import { PerceptionService, viewModeLabel } from './perception/perception-service';
 import { GrowthService } from './growth/growth-service';
@@ -562,7 +562,10 @@ class DesktopPetApplication {
     const lines = [
       status.capturing ? '感知中' : `暂停感知（${status.pausedReason || '未开启'}）`,
       observation
-        ? `最近看到：${sceneLabel(observation.scene)}${observation.app ? `（${observation.app}）` : ''}${observation.sensitive ? ' · 私人内容' : ''}`
+        ? (isRecognizedScene(observation.scene)
+            ? `最近看到：${sceneLabel(observation.scene)}${observation.app ? `（${observation.app}）` : ''}${observation.sensitive ? ' · 私人内容' : ''}`
+            // 没认出来就直说"没认出来"，不要拿一个假场景名糊上去（用户要求"当作没看见"）
+            : `最近一次没认出在做什么${observation.app ? `（当时是 ${observation.app}）` : ''}`)
         : '还没看到什么（需要接上大模型才能看懂屏幕）',
       `行为：空闲 ${status.behavior.idleSeconds}s · 连续使用 ${status.behavior.sessionMinutes} 分钟 · 本小时切换 ${status.behavior.switchesLastHour} 次`,
       `在场：${status.presence.present ? '在电脑前' : '不在'}（来源：${status.presence.source}）`,
@@ -604,7 +607,11 @@ class DesktopPetApplication {
       this.growth?.recordIntervention({
         kind: plan.kind,
         text: plan.text,
-        scene: this.perception?.status().lastObservation?.scene ?? 'other',
+        // 没认出来 / 没有观察 -> 空串（"没有场景"）；反思文本会照场景名拼句子，别把 'other' 传下去
+        scene: (() => {
+          const scene = this.perception?.status().lastObservation?.scene;
+          return scene !== undefined && isRecognizedScene(scene) ? scene : '';
+        })(),
       });
       this.applyBubble({ visible: true, text: plan.text, ready: false });
     }
@@ -712,7 +719,11 @@ class DesktopPetApplication {
       getMoodCurve: (date) => this.aiService?.emotionService.moodCurve(date) ?? { start: 60, end: 60, low: 60 },
       getSceneCounts: (date) => this.sceneCountsFor(date),
       getHabitSamples: () => this.perception?.habitSamples() ?? 0,
-      getCurrentScene: () => this.perception?.status().lastObservation?.scene ?? 'other',
+      getCurrentScene: () => {
+        const scene = this.perception?.status().lastObservation?.scene;
+        // 没认出来 / 没观察 -> 空串（"没有场景"），不要把 'other' 当成一个场景传下去
+        return scene !== undefined && isRecognizedScene(scene) ? scene : '';
+      },
       getPerceptionSettings: () => this.perception?.settings ?? DEFAULT_PERCEPTION_SETTINGS,
       onPolicyChanged: (overlay) => this.perception?.setPolicyOverlay(overlay),
       onStatus: (status) => this.ipcManager?.notifyGrowthStatus(status),
@@ -772,6 +783,8 @@ class DesktopPetApplication {
     const observations = this.perception?.observationsOn(date) ?? [];
     const counts: Record<string, number> = {};
     for (const observation of observations) {
+      // "没认出来"不进场景分布：反思文本里会照着场景名拼句子（用户要求"当作没看见"）
+      if (!isRecognizedScene(observation.scene)) continue;
       counts[observation.scene] = (counts[observation.scene] ?? 0) + 1;
     }
     return counts;

@@ -82,7 +82,7 @@ import {
   supportsBalanceQuery,
 } from '../shared/balance';
 import type { PerceptionStatus } from '../shared/perception-types';
-import { DEFAULT_PERCEPTION_SETTINGS } from '../shared/perception-types';
+import { DEFAULT_PERCEPTION_SETTINGS, isRecognizedScene } from '../shared/perception-types';
 import type { GrowthStatus } from '../shared/growth-types';
 import { NODE_KINDS, POLICY_MIN_FACTOR } from '../shared/growth-types';
 import {
@@ -157,6 +157,7 @@ import {
   formatSegmentLine,
   formatTimelineText,
   localDayOf,
+  recognizedSegments,
   selectExpiredDays,
   summarizeDay,
 } from '../shared/timeline';
@@ -1365,6 +1366,13 @@ class PetApplication {
       readonly emptyHabitProfile: typeof emptyHabitProfile;
       readonly habitPredictionText: typeof habitPredictionText;
       readonly topSceneAtHour: typeof topSceneAtHour;
+      /** 这个场景算不算"看懂了"（`other` = 没认出来，一律当作没看见）。 */
+      readonly isRecognizedScene: typeof isRecognizedScene;
+      /** 时间线上只留"看懂了"的段（老文件里可能存着 `other`）。 */
+      readonly recognizedSegments: typeof recognizedSegments;
+      readonly appendObservation: typeof appendObservation;
+      readonly formatTimelineText: typeof formatTimelineText;
+      readonly summarizeDay: typeof summarizeDay;
       readonly matchesSensitiveKeywords: typeof matchesSensitiveKeywords;
       readonly capturePermission: typeof capturePermission;
       readonly isPlanEnabled: typeof isPlanEnabled;
@@ -1550,6 +1558,11 @@ class PetApplication {
         emptyHabitProfile,
         habitPredictionText,
         topSceneAtHour,
+        isRecognizedScene,
+        recognizedSegments,
+        appendObservation,
+        formatTimelineText,
+        summarizeDay,
         matchesSensitiveKeywords,
         capturePermission,
         isPlanEnabled,

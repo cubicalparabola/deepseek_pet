@@ -3770,7 +3770,48 @@ app.whenReady().then(async () => {
     const predict = model.habitPredictionText({
       profile, now: new Date(2025, 0, 6, 10, 30, 0).getTime(), settings, behavior,
     });
+    /*
+     * 「没认出来」当作没看见（用户要求："如果是没认出来，就当作没看见，
+     * 不应该在宠物对话的时候说出『这个时候经常在说不清』这种话"）。
+     *   1. 全是 other 的画像 -> 学不到东西、也没有台词；
+     *   2. 混着 other 与 coding 的画像 -> 取到的是 coding（不会取到 other）；
+     *   3. 老画像里已经存了 other 的计数 -> 也要被跳过（不能靠"不再写入"糊过去）；
+     *   4. 时间线 / 今天在做什么文本里不出现 other 段。
+     */
+    const otherOnly = model.learnHabit(model.emptyHabitProfile(), Object.assign(obs('other'), { at: new Date(2025, 0, 8, 10, 0, 0).toISOString() }));
+    const mixedProfile = (() => {
+      let p = model.emptyHabitProfile();
+      for (let i = 0; i < 5; i++) p = model.learnHabit(p, Object.assign(obs('other'), { at: new Date(2025, 0, 9, 10, i, 0).toISOString() }));
+      for (let i = 0; i < 3; i++) p = model.learnHabit(p, Object.assign(obs('coding'), { at: new Date(2025, 0, 9, 10, 10 + i, 0).toISOString() }));
+      return p;
+    })();
+    const legacyProfile = { ...model.emptyHabitProfile(), hours: { '10': { other: 9 } }, samples: 9, observedHours: 1 };
+    const timelineBase = { date: '2025-01-09', segments: [], totals: { activeMinutes: 0, idleMinutes: 0, byScene: [], byApp: [], firstAt: '', lastAt: '' }, narrative: '', updatedAt: '' };
+    const withOther = model.appendObservation([], { at: new Date(2025, 0, 9, 10, 0, 0).toISOString(), scene: 'other', app: 'unknown.exe' });
+    const withCoding = model.appendObservation(withOther, { at: new Date(2025, 0, 9, 10, 1, 0).toISOString(), scene: 'coding', app: 'Code' });
+    const otherSegment = { start: new Date(2025, 0, 9, 9, 0, 0).toISOString(), end: new Date(2025, 0, 9, 9, 30, 0).toISOString(), scene: 'other', app: 'unknown.exe', samples: 3, minutes: 30 };
+    const codingSegment = { start: new Date(2025, 0, 9, 10, 0, 0).toISOString(), end: new Date(2025, 0, 9, 11, 0, 0).toISOString(), scene: 'coding', app: 'Code', samples: 6, minutes: 60 };
+    const mixedTimeline = {
+      ...timelineBase,
+      segments: [otherSegment, codingSegment],
+      totals: model.summarizeDay([otherSegment, codingSegment]),
+    };
     return {
+      unrecognized: {
+        recognized: [model.isRecognizedScene('coding'), model.isRecognizedScene('other'), model.isRecognizedScene('idle')],
+        learnOtherOnly: otherOnly.samples,
+        learnMixed: mixedProfile.samples,
+        topOtherOnly: model.topSceneAtHour(otherOnly, 10),
+        topMixed: model.topSceneAtHour(mixedProfile, 10),
+        topLegacy: model.topSceneAtHour(legacyProfile, 10),
+        textOtherOnly: model.habitPredictionText({ profile: otherOnly, now: new Date(2025, 0, 9, 10, 30, 0).getTime(), settings, behavior }),
+        textMixed: model.habitPredictionText({ profile: mixedProfile, now: new Date(2025, 0, 9, 10, 30, 0).getTime(), settings, behavior }),
+        textLegacy: model.habitPredictionText({ profile: legacyProfile, now: new Date(2025, 0, 9, 10, 30, 0).getTime(), settings, behavior }),
+        segmentsAfterOther: withOther.length,
+        segmentsAfterCoding: withCoding.length,
+        recognizedSegments: model.recognizedSegments(mixedTimeline.segments).map((item) => item.scene),
+        timelineText: model.formatTimelineText(mixedTimeline, { maxSegments: 3 }),
+      },
       states: {
         deep: model.inferUserState(5, 1),
         shallow: model.inferUserState(5, 12),
@@ -3896,6 +3937,28 @@ app.whenReady().then(async () => {
       perceptionModel.normalize[3] === 'gaming' &&
       perceptionModel.sceneLabel === '写代码',
     JSON.stringify(perceptionModel.normalize),
+  );
+  record(
+    '感知：「没认出来」当作没看见——不进习惯统计、不拿来说话、不进时间线文本',
+    JSON.stringify(perceptionModel.unrecognized.recognized) === JSON.stringify([true, false, true]) &&
+      // other 不进统计：只喂 other 时画像一份样本都没涨
+      perceptionModel.unrecognized.learnOtherOnly === 0 &&
+      perceptionModel.unrecognized.learnMixed === 3 &&
+      // 台词：只有 other -> 不说；混着 coding -> 说"写代码"；老画像里的 other 也被跳过
+      perceptionModel.unrecognized.topOtherOnly === null &&
+      perceptionModel.unrecognized.topMixed === 'coding' &&
+      perceptionModel.unrecognized.topLegacy === null &&
+      perceptionModel.unrecognized.textOtherOnly === null &&
+      typeof perceptionModel.unrecognized.textMixed === 'string' &&
+      perceptionModel.unrecognized.textMixed.includes('写代码') &&
+      perceptionModel.unrecognized.textLegacy === null &&
+      // 时间线：other 观察不新起段、也不打断上一段
+      perceptionModel.unrecognized.segmentsAfterOther === 0 &&
+      perceptionModel.unrecognized.segmentsAfterCoding === 1 &&
+      JSON.stringify(perceptionModel.unrecognized.recognizedSegments) === JSON.stringify(['coding']) &&
+      perceptionModel.unrecognized.timelineText.includes('写代码') &&
+      !perceptionModel.unrecognized.timelineText.includes('没认出来'),
+    JSON.stringify(perceptionModel.unrecognized),
   );
 
   /*

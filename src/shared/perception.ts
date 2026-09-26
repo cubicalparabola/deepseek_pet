@@ -25,6 +25,7 @@ import type {
   ScreenObservation,
   UserState,
 } from './perception-types';
+import { isRecognizedScene } from './perception-types';
 
 /* -------------------------------------------------------------------------- */
 /* 一、词表与展示                                                              */
@@ -845,6 +846,8 @@ export function learnHabit(profile: HabitProfile, observation: ScreenObservation
   const at = new Date(observation.at);
   if (Number.isNaN(at.getTime())) return profile;
   if (observation.scene === 'idle' || observation.scene === 'sensitive') return profile;
+  // 没认出来的场景**当作没看见**：不进统计，否则她会学到"这个点一般在没认出来"
+  if (!isRecognizedScene(observation.scene)) return profile;
 
   const hour = String(at.getHours());
   const dateKey = observation.at.slice(0, 10);
@@ -880,6 +883,12 @@ export function topSceneAtHour(profile: HabitProfile, hour: number, minSamples =
   let best: { scene: string; count: number } | null = null;
   let total = 0;
   for (const [scene, count] of Object.entries(bucket)) {
+    /*
+     * "没认出来"那一类**不参与**：老画像文件里已经存了 `other` 的计数，
+     * 光靠 `learnHabit` 不再写入是不够的 —— 这里也必须跳过，
+     * 否则用户升级后照样会听到"这个点一般在其他（没认出来）"。
+     */
+    if (!isRecognizedScene(normalizeScene(scene))) continue;
     total += count;
     if (!best || count > best.count) best = { scene, count };
   }
@@ -909,6 +918,8 @@ export function habitPredictionText(input: {
   }
 
   if (typical === 'idle') return null;
+  // 兜底：认不出来的场景**不当成"她在做什么"**（用户要求"当作没看见"）
+  if (!isRecognizedScene(typical)) return null;
   return `按你平时的习惯，这个点一般在${sceneLabel(typical)}，今天也是吗？`;
 }
 
