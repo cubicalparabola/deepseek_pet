@@ -153,18 +153,3 @@ export function dockLabel(dock: PetDock): string {
   if (dock === 'bottom') return '下方收起';
   return '正常';
 }
-
-/**
- * 没有"上次自由位置"可回退时（例如启动即收起）的兜底：把她从贴边位置往里挪一点。
- *
- * 只挪贴边的那条轴，往屏幕内侧移动 `distance` 像素 ——
- * 这样她一定完全可见，也不会因为"挪一下又贴上了"来回抖。
- */
-export function nudgeInward(
-  dock: Exclude<PetDock, 'free'>,
-  current: { readonly x: number; readonly y: number },
-  distance = UNDOCK_DISTANCE_PX + DOCK_EDGE_THRESHOLD_PX,
-): { readonly x: number; readonly y: number } {
-  if (dock === 'right') return { x: Math.round(current.x - distance), y: Math.round(current.y) };
-  return { x: Math.round(current.x), y: Math.round(current.y - distance) };
-}

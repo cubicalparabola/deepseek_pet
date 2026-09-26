@@ -1,11 +1,12 @@
 // @ts-check
 /**
- * 探针：**展开时"播 end 不动位置"** + **watch 的渲染向右偏移**。
+ * 探针：**展开时就地站起来（位置一动不动）** + **watch 的渲染向右偏移**。
  *
  * 两件事都是用户看着画面提的，所以这里既查数值、也**存图**给人眼确认：
  *
- *   1. 播 end 时窗口不许动：收起 -> 点击展开 -> 记录 end 段期间与之后的窗口位置，
- *      要求 "end 期间位置 == 收起时的位置"，且之后才挪回收起前的位置。
+ *   1. 收起（贴边）后点一下展开：她播完收尾段（watch-end）后应当**留在屏幕边缘**，
+ *      位置一次都不许变 —— 用户要求："播放完收起的 end 动画直接贴着屏幕边缘即可，
+ *      不必回到原位置"。（以前会挪回"贴边之前的位置"，实测从 (1392,624) 跳到 (500,300)。）
  *   2. watch 的渲染偏移：收起右侧后截图（`build/watch-offset.png`），
  *      并把 `render.offsetXPercent` 读出来一起写进结果。
  *
@@ -79,11 +80,12 @@ app.whenReady().then(async () => {
       if (current === 'idle' && idleAt === null) idleAt = Date.now() - t0;
       if (idleAt !== null && Date.now() - t0 > idleAt + 1200) break;
     }
-    const movingSamples = samples.filter((s) => s.phase === 'end' && (s.x !== posDocked.x || s.y !== posDocked.y));
+    const movingSamples = samples.filter((s) => (s.x !== posDocked.x || s.y !== posDocked.y));
     return {
       posDocked,
       endSamples: samples.filter((s) => s.phase === 'end').length,
-      movedDuringEnd: movingSamples.length,
+      movedDuringEnd: samples.filter((s) => s.phase === 'end' && (s.x !== posDocked.x || s.y !== posDocked.y)).length,
+      movedAtAll: movingSamples.length,
       firstMovedAt: movingSamples[0] ?? null,
       finalPosition: await pos(),
       idleAt,
@@ -137,10 +139,12 @@ app.whenReady().then(async () => {
     undock,
     offset,
     verdict: {
-      // end 段里窗口一次都不能动
+      // 从点击到回到 idle 的**全过程**里位置一次都不能变
       noMoveDuringEnd: undock.movedDuringEnd === 0 && undock.endSamples > 0,
-      // 展开后确实回到了收起前的位置（500,300 附近）
-      movedAfterEnd: Math.abs(undock.finalPosition.x - 500) < 40 && Math.abs(undock.finalPosition.y - 300) < 40,
+      // 展开后就地站起来：终点位置 = 收起时的位置（不再挪回原先的自由位置）
+      stayedAtEdge: undock.movedAtAll === 0 &&
+        undock.finalPosition.x === undock.posDocked.x &&
+        undock.finalPosition.y === undock.posDocked.y,
       // watch 的渲染偏移生效（清单 + 行内 transform 两处都要有）
       watchOffsetApplied:
         typeof offset.offsetXPercent === 'number' &&

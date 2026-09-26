@@ -37,7 +37,6 @@ import {
 import {
   dockTargetPosition,
   evaluateDock,
-  nudgeInward,
   petRectIn,
   shouldUndock,
   type Rect,
@@ -52,7 +51,6 @@ import type {
   RuntimeInfo,
   StateChangedPayload,
   TrayStatePayload,
-  WindowPosition,
 } from '../shared/ipc';
 import type { PetAction } from '../shared/action-types';
 import type { PluginRecord } from '../shared/plugin-types';
@@ -881,8 +879,8 @@ class DesktopPetApplication {
    *
    * 为什么用户主动的那些不直接静音：菜单点了却一声不吭，看起来就是坏了。
    * 先展开（和"点一下展开"是同一套逻辑）既满足"收起时不发生对话"，
-   * 也让对话发生在桌面上 —— 展开是同步的状态变化，窗口位置照旧由渲染层
-   * 在收尾段播完之后再挪（见 `handleUndock` / CommandMoveWhenSettled）。
+   * 也让对话发生在桌面上 —— 展开只改显示状态，位置一动不动（她就地在屏幕
+   * 边缘站起来，见 `handleUndock`），所以气泡不会跟着她乱跑。
    */
   private expandForSpeech(reason: string): void {
     if (!this.isQuiet()) return;
@@ -1568,15 +1566,6 @@ class DesktopPetApplication {
    * 只有主进程拿得到；渲染层只需要"在这个状态下默认播什么、随机池有哪些"。
    */
   private display: PetDisplayState = { ...DEFAULT_DISPLAY_STATE };
-  /**
-   * 最近一次"没贴边"时的窗口位置。
-   *
-   * 用途：点一下展开时回到这里。**不能**用"贴边前那一刻的位置" ——
-   * 那一刻用户正把她往屏幕外拖（Windows 的边界收敛允许窗口只剩 60px 在屏内），
-   * 回到那里等于"点一下反而更看不见了"（实测：点完只剩 60px 露在屏幕里）。
-   * 因此只记"判定为没贴边"的位置：它一定在她好好待在桌面上的时候产生。
-   */
-  private lastFreePosition: WindowPosition | null = null;
 
   /**
    * 设置界面的"在场状态"入口（`ai:set-presence`）。
@@ -1676,12 +1665,10 @@ class DesktopPetApplication {
    */
   private handleDragEnd(): PetDisplayState {
     /*
-     * 关掉"拖到边缘自动收起"时：拖动就只是拖动。
-     * 顺手记下"她现在好好待在桌面上"的位置（点一下展开时要用）。
+     * 关掉"拖到边缘自动收起"时：拖动就只是拖动（位置本来就是用户放的）。
      */
     if (!this.settings.dockOnEdge) {
       if (this.display.dock !== 'free') return this.setDisplay({ dock: 'free' }, 'drag-end:disabled');
-      this.lastFreePosition = this.windowManager?.getPosition() ?? this.lastFreePosition;
       return this.display;
     }
 
@@ -1692,7 +1679,6 @@ class DesktopPetApplication {
     const evaluation = evaluateDock(pet, area);
     if (evaluation.dock === 'free') {
       // 放在中间 = 展开（拖动离开边缘即展开，与"点一下展开"是同一结果）
-      this.lastFreePosition = this.windowManager?.getPosition() ?? this.lastFreePosition;
       return this.setDisplay({ dock: 'free' }, 'drag-end:free');
     }
 
@@ -1734,27 +1720,25 @@ class DesktopPetApplication {
     this.setDisplay({ dock: 'free' }, 'drag-away');
   }
 
-  /** 请求展开（收起状态下点了宠物）：回到最近一次"好好待在桌面上"的位置。 */
+  /**
+   * 请求展开（收起状态下点了宠物 / 用户要她开口）。
+   *
+   * 用户要求（本轮）："播放完收起的 end 动画**直接贴着屏幕边缘即可，不必回到原位置**"。
+   *
+   * 所以这里**只改显示状态，一动不动**：她会就地在屏幕边缘站起来（收尾段 watch-end /
+   * sleep-end 播完，默认动画换成 idle），随机池与说话能力一并恢复。
+   *
+   * 为什么不再挪回"贴边之前的位置"：那个位置只是"她上次被拖走之前待的地方"，
+   * 用户点她一下只是想让她别再缩着，而不是想让她**瞬移**回桌面中间
+   * （实测：收在 (1392,624)，点一下之后跑到 (500,300)）。而贴边位置本身是合法的
+   * —— 她整只都在屏幕内、完全可见，没有任何"看不见"的风险。
+   * 顺带一个好处：拖到边上、点开、再拖走这条操作链上不再有二次位移。
+   *
+   * @returns 新的显示状态（渲染层据此换默认动画）
+   */
   private handleUndock(): PetDisplayState {
     if (this.display.dock === 'free') return this.display;
-    const dock = this.display.dock;
-    const restore = this.lastFreePosition;
-    const next = this.setDisplay({ dock: 'free' }, 'undock-request');
-    /*
-     * ⚠️ 位置**不在这里**改：她此刻正开始播默认姿势的收尾段（watch-end / sleep-end），
-     * 需求要求"播 end 时不要移动位置"。所以只把目标坐标发给渲染层，
-     * 由它在收尾段播完、新默认动画真正开始时才挪窗口（见 CommandMoveWhenSettled）。
-     */
-    const target = restore ?? this.nudgeTarget(dock);
-    if (target) this.ipcManager?.moveWhenSettled({ x: target.x, y: target.y, reason: 'undock' });
-    return next;
-  }
-
-  /** 没有"上次自由位置"可回退时（例如启动即收起）的兜底目标：从贴边位置往里挪一点。 */
-  private nudgeTarget(dock: Exclude<PetDock, 'free'>): WindowPosition | null {
-    const current = this.windowManager?.getPosition();
-    if (!current) return null;
-    return nudgeInward(dock, current);
+    return this.setDisplay({ dock: 'free' }, 'undock-request');
   }
 
   private applyTrayState(state: TrayStatePayload): void {

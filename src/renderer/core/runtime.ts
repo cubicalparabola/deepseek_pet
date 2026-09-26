@@ -8,7 +8,7 @@
  * 注意：本文件不 import 任何 electron / node 模块，能力全部来自 preload 的 contextBridge。
  */
 
-import type { PetBridge, TrayStatePayload, TriggerAnimationPayload, MoveWhenSettledPayload } from '../../shared/ipc';
+import type { PetBridge, TrayStatePayload, TriggerAnimationPayload } from '../../shared/ipc';
 import type { PetDisplayState } from '../../shared/behavior-config';
 import type { PetAction } from '../../shared/action-types';
 import type { PluginRecord } from '../../shared/plugin-types';
@@ -99,12 +99,6 @@ export class RuntimeCapabilities {
   public onDisplayState(handler: (payload: PetDisplayState) => void): () => void {
     if (!this.bridge) return () => undefined;
     return this.bridge.commands.onDisplayState(handler);
-  }
-
-  /** 主进程要求"等当前过渡播完再挪窗口"（展开时用，避免一边起身一边滑走）。 */
-  public onMoveWhenSettled(handler: (payload: MoveWhenSettledPayload) => void): () => void {
-    if (!this.bridge) return () => undefined;
-    return this.bridge.commands.onMoveWhenSettled(handler);
   }
 
   /** 上报拖拽结束，由主进程判定贴边收起；返回新的显示状态。 */

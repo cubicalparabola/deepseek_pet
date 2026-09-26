@@ -338,15 +338,12 @@ app.whenReady().then(async () => {
       if (current === 'idle') { afterClick = Date.now() - t0; break; }
     }
     /*
-     * 位置是**等收尾段播完**才挪的（需求："播 end 时不要移动位置"），
-     * 所以这里要再等一会儿才读得到终点位置 —— 最多等 3 秒。
+     * 位置**一动不动**（用户本轮要求："播放完收起的 end 动画直接贴着屏幕边缘即可，
+     * 不必回到原位置"）—— 收尾段播完后她仍然贴在边上，只把默认动画换成 idle。
+     * 因此这里不"等它挪到 500,300"，而是过一会儿再读一次，确认还是原处。
      */
-    let posAfter = await api.window.getPosition();
-    for (let i = 0; i < 30; i += 1) {
-      if (Math.abs(posAfter.x - 500) < 40) break;
-      await wait(100);
-      posAfter = await api.window.getPosition();
-    }
+    await wait(1500);
+    const posAfter = await api.window.getPosition();
     return {
       docked,
       posDocked,
@@ -358,12 +355,12 @@ app.whenReady().then(async () => {
       finalAnimation: anim.getCurrentAnimation(),
       sequence: [...sawAnimations],
       stateAfterClick: window.petDebug.display().dock,
-      // 展开应该回到"收起前的位置"（500,300 附近），而不是留在屏幕边缘
+      // 展开后就地站起来：位置应当仍是收起时那个位置
       posAfter,
     };
   })()`);
   step(
-    '收起状态下点一下宠物：先播 end（不动位置）→ 再回 idle，并回到收起前的位置',
+    '收起状态下点一下宠物：先播 end（不动位置）→ 再回 idle，且**就地**展开（不回到原位置）',
     undock,
     undock.docked === 'right' &&
       undock.beforeClick === 'watch' &&
@@ -374,7 +371,8 @@ app.whenReady().then(async () => {
       // 全程只应看到 watch -> idle；cute/fawning/stroke 出现在这里就是"多插了一段"
       undock.sequence.every((id) => id === 'watch' || id === 'idle') &&
       undock.stateAfterClick === 'free' &&
-      Math.abs(undock.posAfter.x - 500) < 40,
+      Math.abs(undock.posAfter.x - undock.posDocked.x) < 4 &&
+      Math.abs(undock.posAfter.y - undock.posDocked.y) < 4,
   );
 
   /*

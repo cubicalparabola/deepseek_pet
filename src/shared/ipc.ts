@@ -274,16 +274,6 @@ export const IpcChannels = {
    * 渲染层据此切换默认动画与随机池（正常 idle / 下方 sleep / 右侧 watch）。
    */
   CommandDisplayState: 'pet:command-display-state',
-  /**
-   * Main -> 渲染层：**等当前过渡播完再挪窗口**。
-   *
-   * 用途：从收起状态展开时，她正在播默认姿势的收尾段（watch-end / sleep-end）。
-   * 如果这时就把窗口挪回收起前的位置，画面上是"一边起身一边滑走" ——
-   * 需求明确要求**播 end 时不要移动位置**。所以主进程只发目标坐标，
-   * 由渲染层在收尾段播完、新默认动画真正开始时才落地。
-   * （拖动展开不经过这条：那是用户自己拖的，窗口本来就跟着鼠标走。）
-   */
-  CommandMoveWhenSettled: 'pet:command-move-when-settled',
   CommandShutdown: 'pet:command-shutdown',
 } as const;
 
@@ -361,19 +351,6 @@ export interface AnimationChangedPayload {
   readonly priority: number;
   readonly source?: string;
   readonly reason?: string;
-}
-
-/**
- * "等过渡播完再挪窗口"的目标位置（Main -> Renderer）。
- *
- * 为什么要有这条：展开时她正在播收尾段（watch-end / sleep-end），
- * 那一刻就挪窗口会变成"一边起身一边滑走"；需求要求播 end 时不动。
- */
-export interface MoveWhenSettledPayload {
-  readonly x: number;
-  readonly y: number;
-  /** 触发原因（写日志用，例如 `undock`）。 */
-  readonly reason: string;
 }
 
 /**
@@ -532,11 +509,6 @@ export interface CommandAPI {
   onTriggerAnimation(handler: (payload: TriggerAnimationPayload) => void): () => void;
   /** 显示状态变化（收起方向 / 隐藏）：渲染层据此切换默认动画与随机池。 */
   onDisplayState(handler: (payload: PetDisplayState) => void): () => void;
-  /**
-   * 等当前过渡播完再挪窗口（从收起展开时用，避免"一边起身一边滑走"）。
-   * 渲染层收到后先记下目标，等新默认动画真正开始再落地。
-   */
-  onMoveWhenSettled(handler: (payload: MoveWhenSettledPayload) => void): () => void;
   /** 尺寸变化（托盘/右键菜单/设置界面调整）时通知 Renderer。 */
   onSizeChanged(handler: (size: PetSizeInfo) => void): () => void;
   /** 对话气泡状态/布局变化（含由它引起的窗口尺寸变化）。 */

@@ -1183,12 +1183,11 @@ app.whenReady().then(async () => {
       targetRightGap: area.width - (targetRect.x + targetRect.width),
       stillDocked: model.shouldUndock('right', moved40, area),
       undocked: model.shouldUndock('right', moved200, area),
-      nudged: model.nudgeInward('bottom', { x: 700, y: 656 }),
       undockDistancePx: model.UNDOCK_DISTANCE_PX,
     };
   })()`);
   record(
-    '贴边收起几何：**必须推到最边上**（8px 内）才收起，差 9px 都不算；贴平到边缘、拖离阈值、内移兜底',
+    '贴边收起几何：**必须推到最边上**（8px 内）才收起，差 9px 都不算；贴平到边缘、拖离阈值',
     dockModel.threshold === 8 &&
       // 以前 24px 阈值时，离边 20px 就收起了；现在这一段必须是"没收起"
       dockModel.nearRightGap === 20 &&
@@ -1201,8 +1200,7 @@ app.whenReady().then(async () => {
       dockModel.freeDock === 'free' &&
       dockModel.targetRightGap === 0 &&
       dockModel.stillDocked === false &&
-      dockModel.undocked === true &&
-      dockModel.nudged.y === 656 - dockModel.undockDistancePx - 8,
+      dockModel.undocked === true,
     JSON.stringify(dockModel),
   );
 
