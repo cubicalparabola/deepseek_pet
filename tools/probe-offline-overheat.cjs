@@ -122,13 +122,36 @@ app.whenReady().then(async () => {
     lastError: s.lastError, balanceError: s.balanceError,
   }))`);
 
-  /* 3) 等状态轮询（默认 30 秒一轮）把"断网"判出来并演 one offline */
+  /* 3) 等状态轮询（默认 30 秒一轮）把"断网"判出来并演一次 offline */
   const deadline = Date.now() + 45000;
   while (Date.now() < deadline) {
     if (playedSequence(logText()).includes('offline')) break;
     await wait(1000);
   }
   await wait(1500);
+
+  /* 4) 坏状态**还持续着**：等它按随机间隔再演一次（用户要求"随机触发"，不是只演一次） */
+  /*
+   * 默认重复区间是 3~8 分钟（`CONDITION_REPEAT_RANGE_MS`），过热每 60 秒探一次、
+   * 掉线每 30 秒判一次 —— 所以这里最多等 ~9.5 分钟：等到"过热 >= 2 次"且
+   * "掉线 >= 2 次"为止。这一条是**真实默认间隔**下的验证，不是把间隔调小糊弄过去的。
+   */
+  const countOf = (text, id) => (text.match(new RegExp(`"animationId":"${id}"`, 'g')) ?? []).length;
+  const repeatStart = Date.now();
+  const repeatDeadline = repeatStart + 9.5 * 60_000;
+  while (Date.now() < repeatDeadline) {
+    const text = logText();
+    if (countOf(text, 'overheat') >= 2 && countOf(text, 'offline') >= 2) break;
+    await wait(2000);
+  }
+  result.repeat = {
+    waitedMs: Date.now() - repeatStart,
+    overheatCount: countOf(logText(), 'overheat'),
+    offlineCount: countOf(logText(), 'offline'),
+    triggers: firedTriggers(logText()),
+  };
+  // 第二次之后的触发理由里应该带着"仍然过热"的真读数
+  const repeatReason = (result.repeat.triggers[result.repeat.triggers.length - 1] ?? {}).reason;
 
   const finalLog = logText();
   result.triggers = firedTriggers(finalLog);
@@ -146,10 +169,15 @@ app.whenReady().then(async () => {
     thresholdFromPerceptionSettings: startupThreshold !== null && Number(startupThreshold[1]) === PROBE_OVERHEAT_C,
     // 过热是**真温度**越阈值触发的，而且报出来的就是真读数
     overheatFiredOnRealTemperature:
-      result.overheatFired.length === 1 &&
+      result.overheatFired.length >= 1 &&
       overheatMatch !== null &&
       Number(overheatMatch[2]) === PROBE_OVERHEAT_C &&
       realTemp !== null && realTemp > PROBE_OVERHEAT_C && realTemp < 150,
+    // 坏状态持续期间**会重复演**（用户要求"随机触发"）：过热与掉线各至少 2 次
+    repeatsWhileConditionLasts:
+      result.overheatFired.length >= 2 &&
+      result.offlineFired.length >= 2 &&
+      String(repeatReason).length > 0,
     // 画面上真的演了 overheat
     overheatPlayed: result.played.includes('overheat'),
     // 反向对照：启动时（还没发那次必败请求）不该说有掉线
@@ -161,8 +189,10 @@ app.whenReady().then(async () => {
     chatFailedAsNetwork:
       String(result.aiAfterChat.lastError).includes('网络请求失败') &&
       result.aiBeforeChat.providerBaseUrl === UNREACHABLE_BASE_URL,
-    // 断网被判定成 offline:network（而不是 invalid-key / no-balance）
-    offlineNetworkFired: result.offlineFired.length === 1 && result.offlineFired[0].reason === 'offline:network',
+    // 断网被判定成 offline:network（而不是 invalid-key / no-balance）；重复的几次也一样
+    offlineNetworkFired:
+      result.offlineFired.length >= 1 &&
+      result.offlineFired.every((item) => item.reason === 'offline:network'),
     // 画面上真的演了 offline
     offlinePlayed: result.played.includes('offline'),
   };
@@ -173,6 +203,7 @@ app.whenReady().then(async () => {
   console.log(`[triggers] ${JSON.stringify(result.triggers)}`);
   console.log(`[played] ${result.played.join(' -> ')}`);
   console.log(`[chat] ${JSON.stringify(result.chatReply)} lastError=${result.aiAfterChat.lastError}`);
+  console.log(`[repeat] ${JSON.stringify({ waitedMs: result.repeat.waitedMs, overheat: result.repeat.overheatCount, offline: result.repeat.offlineCount })}`);
   app.exit(Object.values(result.verdict).every(Boolean) ? 0 : 1);
 }).catch((error) => {
   try { writeFileSync(outFile, JSON.stringify({ fatal: String(error), stack: error && error.stack }, null, 1), 'utf8'); } catch (e) { /* 忽略 */ }
@@ -180,4 +211,5 @@ app.whenReady().then(async () => {
   app.exit(1);
 });
 
-setTimeout(() => app.exit(2), 180000);
+// 默认重复区间 3~8 分钟，加上两次 60/30 秒轮询与启动时间，整体给足 12 分钟
+setTimeout(() => app.exit(2), 12 * 60_000);

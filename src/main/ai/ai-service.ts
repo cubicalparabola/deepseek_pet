@@ -38,7 +38,7 @@ import {
   applyInteraction,
   describeEmotionForPrompt,
   formatEmotion,
-  hungerFromBalance,
+  satietyFromBalance,
   moodLabel,
   preferredAnimation,
   tokensRemainingRatio,
@@ -244,11 +244,16 @@ export class AIService {
    */
   public async refreshBalance(): Promise<AIBalanceState | null> {
     const settings = this.settings;
-    if (!settings.enabled || !settings.balance.enabled) return this.balance;
+    /*
+     * 余额查询**永远开着**（用户要求："删掉余额计算选项（默认开启）"）：
+     * 原先那个 `balance.enabled` 开关已删除。总开关关着时当然还是不查；
+     * 非 DeepSeek 官方域名下也会跳过（那里没有这个接口，见 supportsBalanceQuery）。
+     */
+    if (!settings.enabled) return this.balance;
     if (settings.provider.apiKey.trim() === '') {
       this.balanceError = '未配置 API Key';
       this.balance = null;
-      this.applyBalanceHunger();
+      this.applyBalanceSatiety();
       this.emitStatus();
       return null;
     }
@@ -259,7 +264,7 @@ export class AIService {
        */
       this.balanceError = '当前服务商不提供余额查询（余额只在 DeepSeek 官方地址下可用）';
       this.balance = null;
-      this.applyBalanceHunger();
+      this.applyBalanceSatiety();
       this.emitStatus();
       return null;
     }
@@ -273,10 +278,10 @@ export class AIService {
         grantedBalance: result.grantedBalance,
         toppedUpBalance: result.toppedUpBalance,
         fetchedAt: result.fetchedAt,
-        drivesHunger: true,
+        drivesSatiety: true,
       };
       this.balanceError = '';
-      this.applyBalanceHunger();
+      this.applyBalanceSatiety();
       this.logger.info('balance refreshed', {
         data: {
           currency: result.currency,
@@ -296,18 +301,18 @@ export class AIService {
     }
   }
 
-  /** 把余额映射成饥饿度并交给情绪服务（余额优先于本地 token 预算）。 */
-  private applyBalanceHunger(): void {
+  /** 把余额映射成饱腹度并交给情绪服务（余额优先于本地 token 预算）。 */
+  private applyBalanceSatiety(): void {
     const settings = this.settings;
-    const hunger = this.balance === null
+    const satiety = this.balance === null
       ? null
-      : hungerFromBalance(this.balance.totalBalance, {
+      : satietyFromBalance(this.balance.totalBalance, {
           low: settings.balance.lowBalance,
           full: settings.balance.fullBalance,
         });
-    this.emotion.setBalanceHunger(hunger);
-    // 余额不足（官方 `is_available=false`）等价于"没额度了"：直接拉满饥饿
-    if (this.balance !== null && !this.balance.isAvailable) this.emotion.setBalanceHunger(100);
+    this.emotion.setBalanceSatiety(satiety);
+    // 余额不足（官方 `is_available=false`）等价于"没额度了"：直接拉到最低（饱腹 0）
+    if (this.balance !== null && !this.balance.isAvailable) this.emotion.setBalanceSatiety(0);
   }
 
   /**
@@ -457,7 +462,7 @@ export class AIService {
   public async chat(text: string, source: 'chat-window' | 'tray' | 'plugin' | 'system' = 'chat-window'): Promise<AIChatReply> {
     const message = sanitizeMessage(text);
     if (message === '') {
-      return { ok: false, reply: '（没听清，主人再说一次？）', mode: 'local', tokens: 0, error: '空消息', mood: this.emotion.get().mood, hunger: this.emotion.get().hunger };
+      return { ok: false, reply: '（没听清，主人再说一次？）', mode: 'local', tokens: 0, error: '空消息', mood: this.emotion.get().mood, satiety: this.emotion.get().satiety };
     }
 
     // 说话也算互动（2.3）
@@ -530,7 +535,7 @@ export class AIService {
       ...(error !== '' && mode === 'local' ? { error } : {}),
       ...(animation ? { animation } : {}),
       mood: this.emotion.get().mood,
-      hunger: this.emotion.get().hunger,
+      satiety: this.emotion.get().satiety,
     };
   }
 
@@ -809,7 +814,7 @@ export class AIService {
       turns,
       events,
       mood: this.emotion.moodCurve(date),
-      hunger: this.emotion.get().hunger,
+      satiety: this.emotion.get().satiety,
       highlights: { chat: chatHighlights, event: eventHighlights },
     };
   }
@@ -825,7 +830,7 @@ export class AIService {
         chatHighlights: context.highlights.chat,
         eventHighlights: context.highlights.event,
         mood: context.mood,
-        hunger: context.hunger,
+        satiety: context.satiety,
         petName: context.petName,
       });
       return { ...draft, source: 'template', tokens: 0 };
@@ -976,7 +981,7 @@ export class AIService {
       const text = '主人，我在的哦。';
       const animation = this.pickAnimation('greeting');
       this.options.onSpeak?.({ text, animation, kind: 'proactive' });
-      return { ok: true, reply: text, mode: 'local', tokens: 0, mood: this.emotion.get().mood, hunger: this.emotion.get().hunger, ...(animation ? { animation } : {}) };
+      return { ok: true, reply: text, mode: 'local', tokens: 0, mood: this.emotion.get().mood, satiety: this.emotion.get().satiety, ...(animation ? { animation } : {}) };
     }
     const promptText =
       reason === 'lonely'
@@ -1017,7 +1022,7 @@ export class AIService {
       past: context.pastSnippets,
       turns: context.recentTurns.length,
       mood: this.emotion.get().mood,
-      hunger: this.emotion.get().hunger,
+      satiety: this.emotion.get().satiety,
       tokensRemaining: Math.round(tokensRemainingRatio(this.settings.budget) * 100),
     });
   }

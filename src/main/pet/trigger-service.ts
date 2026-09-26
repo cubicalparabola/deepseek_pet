@@ -21,12 +21,14 @@ import type { Logger } from '../../shared/logger';
 import { describeError } from '../../shared/errors';
 import {
   APPROACH_COOLDOWN_MS,
+  CONDITION_REPEAT_RANGE_MS,
   classifyApproach,
   evaluateHungry,
   evaluateOffline,
   evaluateOverheat,
   evaluateSad,
   OVERHEAT_TEMP_C,
+  pickRepeatDelayMs,
   type TriggerAnimationId,
 } from '../../shared/pet-triggers';
 import type { Rect } from '../../shared/dock';
@@ -44,8 +46,8 @@ export interface TriggerServiceOptions {
   readonly isPaused?: () => boolean;
   /** 宠物在屏幕上的矩形；窗口不可见时返回 null。 */
   readonly getPetRect: () => Rect | null;
-  /** 情绪快照（mood / hunger）。 */
-  readonly getEmotion: () => { readonly mood: number; readonly hunger: number } | null;
+  /** 情绪快照（mood / satiety 饱腹）。 */
+  readonly getEmotion: () => { readonly mood: number; readonly satiety: number } | null;
   /** 掉线原因（空串 = 没掉线）。 */
   readonly getOfflineReason: () => string;
   /** 光标轮询间隔（毫秒，默认 250）。 */
@@ -64,6 +66,15 @@ export interface TriggerServiceOptions {
    * "真温度 -> 真触发 -> 真动画"这条链路（见 tools/probe-offline-overheat.cjs）。
    */
   readonly getOverheatThresholdC?: () => number;
+  /**
+   * 「持续状态」触发的重复间隔（毫秒，默认 `CONDITION_REPEAT_RANGE_MS` = 3~8 分钟）。
+   *
+   * 断网与过热只要还在持续，就按这个区间**随机**再演一次（用户要求）。
+   * 做成可注入是为了验收能在几秒内看到"重复"这件事（见 probe-offline-overheat）。
+   */
+  readonly conditionRepeatRangeMs?: readonly [number, number];
+  /** 随机源（默认 `Math.random`，验收可注入固定值）。 */
+  readonly random?: () => number;
 }
 
 export class TriggerService {
@@ -82,6 +93,15 @@ export class TriggerService {
 
   /** 上一次"接住"发生的时间（0 = 从没演过）；冷却靠它算。 */
   private approachLastTriggerAt = 0;
+
+  /**
+   * 「持续状态」下一次该重演的时间（0 = 还没进入坏状态）。
+   *
+   * 断网与过热共用这套：状态刚变坏时立刻演一次，之后每隔随机 3~8 分钟再演一次，
+   * 直到状态恢复（恢复时清零 —— 下次变坏又是"立刻演"）。
+   */
+  private offlineNextAt = 0;
+  private overheatNextAt = 0;
 
   /** 最近一次 GPU 温度（摄氏度）；null = 读不到。 */
   private gpuTempC: number | null = null;
@@ -216,13 +236,13 @@ export class TriggerService {
     this.sadArmed = sad.armed;
     if (sad.animationId) this.fire(sad.animationId, `mood-low:${emotion.mood}`);
 
-    const hungry = evaluateHungry(emotion.hunger, this.hungryArmed);
+    const hungry = evaluateHungry(emotion.satiety, this.hungryArmed);
     this.hungryArmed = hungry.armed;
-    if (hungry.animationId) this.fire(hungry.animationId, `hunger-high:${emotion.hunger}`);
+    if (hungry.animationId) this.fire(hungry.animationId, `satiety-low:${emotion.satiety}`);
   }
 
   /* ------------------------------------------------------------------ */
-  /* 3) 掉线（没配密钥 / 密钥无效 / 余额不足）                              */
+  /* 3) 掉线（没配密钥 / 密钥无效 / 网络不通 / 余额不足）                    */
   /* ------------------------------------------------------------------ */
 
   private checkOffline(): void {
@@ -230,7 +250,32 @@ export class TriggerService {
     const reason = this.options.getOfflineReason();
     const decision = evaluateOffline(reason, this.offlineArmed);
     this.offlineArmed = decision.armed;
-    if (decision.animationId) this.fire(decision.animationId, `offline:${reason}`);
+    if (decision.animationId) {
+      this.fire(decision.animationId, `offline:${reason}`);
+      this.offlineNextAt = Date.now() + this.repeatDelay();
+      return;
+    }
+    if (reason === '') {
+      // 恢复了：下次一断就立刻演（而不是接着上一轮的计时）
+      this.offlineNextAt = 0;
+      return;
+    }
+    // 还在掉线：到点了就再演一次（用户要求"网络不连通时随机触发"）
+    if (this.offlineNextAt !== 0 && Date.now() >= this.offlineNextAt) {
+      this.fire('offline', `offline:${reason}`);
+      this.offlineNextAt = Date.now() + this.repeatDelay();
+    }
+  }
+
+  /** 持续状态的下一次重复间隔（随机；可注入随机源与区间，便于验收）。 */
+  private repeatDelay(): number {
+    const random = this.options.random ?? Math.random;
+    try {
+      return pickRepeatDelayMs(random, this.options.conditionRepeatRangeMs ?? CONDITION_REPEAT_RANGE_MS);
+    } catch {
+      // 随机源坏了也不能让她再不被提醒：退回区间下限
+      return (this.options.conditionRepeatRangeMs ?? CONDITION_REPEAT_RANGE_MS)[0];
+    }
   }
 
   /* ------------------------------------------------------------------ */
@@ -277,8 +322,21 @@ export class TriggerService {
     const threshold = this.resolveOverheatThreshold();
     const decision = evaluateOverheat(this.gpuTempC, this.overheatArmed, { threshold });
     this.overheatArmed = decision.armed;
+    const reason = `gpu-hot:${this.gpuTempC ?? '?'}C>=${threshold}C`;
     if (decision.animationId) {
-      this.fire(decision.animationId, `gpu-hot:${this.gpuTempC ?? '?'}C>=${threshold}C`);
+      this.fire(decision.animationId, reason);
+      this.overheatNextAt = Date.now() + this.repeatDelay();
+      return;
+    }
+    // 温度降下来了（含读不到温度）：下次一热就立刻演
+    if (this.gpuTempC === null || this.gpuTempC < threshold) {
+      this.overheatNextAt = 0;
+      return;
+    }
+    // 还热着：到点了就再演一次（用户要求"温度过高时随机触发"）
+    if (this.overheatNextAt !== 0 && Date.now() >= this.overheatNextAt) {
+      this.fire('overheat', reason);
+      this.overheatNextAt = Date.now() + this.repeatDelay();
     }
   }
 

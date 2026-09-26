@@ -115,6 +115,29 @@ export const OVERHEAT_TEMP_C = 80;
 export const OVERHEAT_HYSTERESIS_C = 5;
 
 /**
+ * 「持续状态」触发的重复间隔（毫秒）—— 断网与过热共用。
+ *
+ * 用户要求：断网动画与 GPU 过热动画都要"在网络不连通 / 温度过高时**随机触发**"，
+ * 也就是**别只演一次**：只要坏状态还在，就每隔一段随机时间再演一次提醒她主人。
+ *
+ * 取 3~8 分钟：比随机池（25~60 秒）稀疏得多，不会变成"卡屏"；
+ * 又比"一直不演"有用 —— 主人一小时才回来一次的话，也还能看见她"掉线了/好热"。
+ *
+ * 状态刚变坏的那一次**立刻演**（不等），之后按这个间隔随机重复。
+ */
+export const CONDITION_REPEAT_RANGE_MS: readonly [number, number] = [3 * 60_000, 8 * 60_000];
+
+/** 在 `range` 里随机取一个重复间隔（含两端，注入随机源便于验收钉死）。 */
+export function pickRepeatDelayMs(
+  random: () => number = Math.random,
+  range: readonly [number, number] = CONDITION_REPEAT_RANGE_MS,
+): number {
+  const min = Math.max(1000, Math.round(Math.min(range[0], range[1])));
+  const max = Math.max(min, Math.round(Math.max(range[0], range[1])));
+  return min + Math.round(random() * (max - min));
+}
+
+/**
  * GPU 温度 -> 要不要演过热动画。
  *
  * `tempC === null` = 读不到温度（没有 N 卡 / 没有 nvidia-smi）：
@@ -163,22 +186,25 @@ export function evaluateSad(
 /* -------------------------------------------------------------------------- */
 
 /**
- * 饥饿度阈值：与 `hungerLabel()` 的 `hungry`（>=60）保持一致；
- * 回到 40 以下重新武装。
+ * 饱腹度阈值：与 `satietyLabel()` 的 `hungry`（<=40）保持一致；
+ * 回到 60 以上（明显吃饱了）重新武装。
+ *
+ * 用户要求把"饥饿值"改成"饱腹值"并**把数值反过来**（越大越饱），
+ * 所以这里的方向也跟着反了：条件持续**偏低**才演 `hungry`。
  */
-export const HUNGRY_THRESHOLD = 60;
-export const HUNGRY_REARM = 40;
+export const HUNGRY_SATIETY_THRESHOLD = 40;
+export const HUNGRY_SATIETY_REARM = 60;
 
 export function evaluateHungry(
-  hunger: number,
+  satiety: number,
   armed: boolean,
   options: { readonly threshold?: number; readonly rearm?: number } = {},
 ): TriggerDecision {
-  if (!Number.isFinite(hunger)) return { animationId: null, armed };
-  const threshold = options.threshold ?? HUNGRY_THRESHOLD;
-  const rearm = options.rearm ?? HUNGRY_REARM;
-  if (hunger >= threshold && armed) return { animationId: 'hungry', armed: false };
-  if (hunger <= rearm) return { animationId: null, armed: true };
+  if (!Number.isFinite(satiety)) return { animationId: null, armed };
+  const threshold = options.threshold ?? HUNGRY_SATIETY_THRESHOLD;
+  const rearm = options.rearm ?? HUNGRY_SATIETY_REARM;
+  if (satiety <= threshold && armed) return { animationId: 'hungry', armed: false };
+  if (satiety >= rearm) return { animationId: null, armed: true };
   return { animationId: null, armed };
 }
 

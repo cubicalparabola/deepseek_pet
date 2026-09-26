@@ -11,7 +11,7 @@
  */
 
 import type { EmotionState, MemoryFact, PetPresence } from '../../shared/ai-types';
-import { hungerLabel, moodLabel } from '../../shared/emotion';
+import { moodLabel, satietyLabel } from '../../shared/emotion';
 
 export interface LocalReplyInput {
   readonly text: string;
@@ -61,13 +61,13 @@ const THANKS = ['谢谢', '谢啦', '辛苦了'] as const;
 export function localReply(input: LocalReplyInput): string {
   const text = input.text.trim();
   const mood = moodLabel(input.emotion.mood);
-  const hunger = hungerLabel(input.emotion.hunger);
+  const satiety = satietyLabel(input.emotion.satiety);
   const who = input.userName.trim() === '' ? '主人' : input.userName.trim();
   const pet = input.petName.trim() === '' ? '鲸鱼娘' : input.petName.trim();
-  const seed = `${text}|${mood.key}|${hunger.key}|${input.emotion.mood}`;
+  const seed = `${text}|${mood.key}|${satiety.key}|${input.emotion.mood}`;
 
   // 1) 极端状态优先：太饿 / 太难过时，说什么都先从状态出发（人格一致性）
-  if (hunger.key === 'starving') return pick(HUNGRY, seed);
+  if (satiety.key === 'starving') return pick(HUNGRY, seed);
   if (mood.key === 'sad') return pick(SAD, seed);
 
   // 2) 明显的意图
@@ -134,7 +134,7 @@ export interface LocalDiaryInput {
   readonly chatHighlights: readonly string[];
   readonly eventHighlights: readonly string[];
   readonly mood: { readonly start: number; readonly end: number; readonly low: number };
-  readonly hunger: number;
+  readonly satiety: number;
   readonly petName: string;
 }
 
@@ -173,8 +173,8 @@ export function localDiary(input: LocalDiaryInput): { title: string; body: strin
     for (const item of input.eventHighlights.slice(0, 4)) lines.push(`- ${item}`);
   }
 
-  const hunger = hungerLabel(input.hunger);
-  if (hunger.key === 'hungry' || hunger.key === 'starving') {
+  const satiety = satietyLabel(input.satiety);
+  if (satiety.key === 'hungry' || satiety.key === 'starving') {
     lines.push('');
     lines.push('（今天说话有点多，脑子空空的，明天要省着点用。）');
   }

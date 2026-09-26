@@ -757,7 +757,7 @@ class DesktopPetApplication {
       },
       getEmotion: () => {
         const status = this.aiService?.status();
-        return status ? { mood: status.emotion.mood, hunger: status.emotion.hunger } : null;
+        return status ? { mood: status.emotion.mood, satiety: status.emotion.satiety } : null;
       },
       getOfflineReason: () => this.aiService?.offlineReason().reason ?? '',
       // 过热阈值来自感知设置（面板「采样与频率」里可改）；服务没起来时用默认 80 度
@@ -891,22 +891,60 @@ class DesktopPetApplication {
     if (this.display.dock !== 'free') this.handleUndock();
   }
 
+  /**
+   * 日常对话只在 IDLE 状态触发（用户要求）。
+   *
+   * 判据是"她现在有没有在演**动作**"：主进程从渲染层上报的托盘状态里拿到
+   * `currentAnimation`（见 `applyTrayState`）。**闲着**的定义：
+   *   - 没有动画在播（`null` / 空串）；
+   *   - 正在播兜底 idle；
+   *   - 正在播某个显示状态的**默认姿势**（收起的 watch / sleep 之类）——
+   *     那是"她待着的样子"，不是"她在做事"。
+   * 其余（点击反应、触发动画、随机池动画）一律算忙着。
+   *
+   * 为什么不用状态机那个 `IDLE`：渲染层播兜底 idle 时状态机也在 PLAYING
+   * （AnimationStart 会把任何动画都推成 PLAYING），拿它当判据等于"永远不 idle"。
+   * 为什么默认姿势也算闲着：用户从托盘点「让她说句话」时她会先**就地展开**，
+   * 而展开的第一瞬仍在播收尾段（动画 id 还是 watch）—— 若把那算"忙着"，
+   * 用户点了菜单却一声不吭，看起来就是坏了。
+   */
+  private isIdleToTalk(): boolean {
+    const current = this.currentAnimation;
+    if (current === null || current === '') return true;
+    if (current === 'idle') return true;
+    return this.defaultAnimations.has(current);
+  }
+
+  /** 各显示状态的默认动画 id（来自 behavior.json；用来判断"她只是在待着"）。 */
+  private get defaultAnimations(): ReadonlySet<string> {
+    const ids = Object.values(this.behaviorConfig.states)
+      .map((state) => state.defaultAnimation)
+      .filter((id): id is string => typeof id === 'string' && id !== '');
+    return new Set(ids);
+  }
+
   private handleSpeak(request: { text: string; animation: string | null; kind: string; level?: 'info' | 'warn' | 'error' }): void {
     /*
-     * 收起 / 隐藏 = 安静模式（用户要求："收起时不应该发生对话"）：
+     * 两道闸（都是"她不开口"的场合，只是原因不同）：
+     *   1. 收起 / 隐藏 = 安静模式（用户要求："收起时不应该发生对话"）；
+     *   2. **没在 idle 状态**：她正在演别的动画时，日常对话不插进去
+     *      （用户要求："日常对话只能在 idle 状态触发"）。
+     * 两道闸的处理一样：
      *   - `proactive` / `system`（她自己想说话、日记提醒、系统提示）：**整条丢弃** ——
      *     连聊天窗口都不推，因为她本来就不该在这时候开口；
      *   - `reply`（用户刚在聊天窗口说了话）：**回复照常给聊天窗口**，只是不在屏幕
-     *     边上冒泡、也不演开口动画 —— 对话发生在聊天窗口里，收起状态下她不"出声"。
+     *     边上冒泡、也不演开口动画 —— 对话留在聊天窗口里。
      */
-    if (this.isQuiet()) {
+    const quiet = this.isQuiet();
+    const busy = !this.isIdleToTalk();
+    if (quiet || busy) {
       const automatic = request.kind !== 'reply';
-      this.logger.info('speech suppressed: pet is collapsed or hidden', {
+      this.logger.info('speech suppressed: pet is collapsed, hidden or busy', {
         data: {
           kind: request.kind,
           automatic,
-          dock: this.display.dock,
-          hidden: this.display.hidden,
+          reason: quiet ? (this.display.hidden ? 'hidden' : 'docked') : 'busy',
+          currentAnimation: this.currentAnimation,
           text: request.text.slice(0, 20),
         },
       });
@@ -2008,9 +2046,9 @@ function localChatFallback(reason: string): {
   tokens: number;
   error: string;
   mood: number;
-  hunger: number;
+  satiety: number;
 } {
-  return { ok: false, reply: '我还没准备好……等我一下下。', mode: 'local', tokens: 0, error: reason, mood: 62, hunger: 0 };
+  return { ok: false, reply: '我还没准备好……等我一下下。', mode: 'local', tokens: 0, error: reason, mood: 62, satiety: 100 };
 }
 
 function emptyMemorySnapshot(): {  profile: { userName: string; petName: string; facts: never[]; summary: string; updatedAt: string };

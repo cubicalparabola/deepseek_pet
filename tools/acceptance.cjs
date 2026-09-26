@@ -132,6 +132,14 @@ app.on('web-contents-created', (_e, contents) => {
   });
 });
 
+/**
+ * 收尾还原用户设置的钩子（在主流程里被赋值，见 `restoreUserSettings`）。
+ *
+ * 为什么提到外面来：`.catch()` 与主流程是**两个作用域**，中途抛错时要还原设置
+ * 就得有一个两边都看得见的入口。
+ */
+let restoreUserSettings = async () => false;
+
 app.whenReady().then(async () => {
   /*
    * 抢在"触发服务"启动之前把"她会自己动"的路径静音。
@@ -431,6 +439,29 @@ app.whenReady().then(async () => {
     // 用启动前读到的原值（验收早段已经把它临时关掉了，见文件顶部）
     dockOnEdge: originalDockOnEdge ?? true,
   };
+  /**
+   * 把用户设置写回快照值。
+   *
+   * 为什么单独抽成一个函数：验收中途一旦抛错（fatal），末尾那段还原根本走不到 ——
+   * 结果就是**用户的缩放/贴边开关被悄悄改掉**（实测踩过：一次崩溃把 scale 0.4 留成 1、
+   * dockOnEdge true 留成 false，后续所有真机探针都跟着"收不起来"）。
+   * 所以正常收尾与 fatal 收尾都要调用它。
+   */
+  const restoreUserSettingsImpl = async () => {
+    try {
+      await run(`(async () => {
+        await window.petAPI.settings.setScale(${settingsSnapshot.scale});
+        await window.petAPI.settings.setAlwaysOnTop(${settingsSnapshot.alwaysOnTop});
+        await window.petAPI.settings.setDockOnEdge(${settingsSnapshot.dockOnEdge});
+        return true;
+      })()`);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  };
+  // 挂到外层（fatal 收尾时也要用它）
+  restoreUserSettings = restoreUserSettingsImpl;
   const sizePresets = await run(`(async () => {
     const api = window.petAPI.settings;
     const out = {};
@@ -1296,8 +1327,15 @@ app.whenReady().then(async () => {
       sadStuck: steps((mood, armed) => model.evaluateSad(mood, armed), [20, 18, 22, 20, 19]),
       // 心情恢复后再次变低：重新演一次
       sadRearm: steps((mood, armed) => model.evaluateSad(mood, armed), [20, 60, 20]),
-      // 饿
-      hungry: steps((hunger, armed) => model.evaluateHungry(hunger, armed), [70, 75, 20, 80]),
+      // 饿：**饱腹值越低越饿**（用户要求把数值反过来），<=40 触发、>=60 重新武装
+      hungry: steps((satiety, armed) => model.evaluateHungry(satiety, armed), [30, 20, 80, 10]),
+      // 「持续状态」重复间隔：在区间内随机（用户要求断网/过热"随机触发"）
+      repeatDelays: [
+        model.pickRepeatDelayMs(() => 0),
+        model.pickRepeatDelayMs(() => 1),
+        model.pickRepeatDelayMs(() => 0.5, [1000, 2000]),
+        model.CONDITION_REPEAT_RANGE_MS,
+      ],
       // 掉线：持续掉线只演一次，恢复后再掉线再演
       offline: steps((reason, armed) => model.evaluateOffline(reason, armed), ['no-key', 'no-key', '', 'invalid-key']),
       // 过热：阈值附近有回差
@@ -1362,7 +1400,7 @@ app.whenReady().then(async () => {
     };
   })()`);
   record(
-    '触发规则：持续越界只演一次（心情/饿/掉线），恢复后才重新武装',
+    '触发规则：持续越界只演一次（心情/饱腹/掉线），恢复后才重新武装',
     triggerRules.sadStuck.fired.length === 1 &&
       triggerRules.sadStuck.fired[0] === 'sad' &&
       triggerRules.sadRearm.fired.length === 2 &&
@@ -1376,6 +1414,14 @@ app.whenReady().then(async () => {
     JSON.stringify(triggerRules.overheat.fired) === JSON.stringify(['overheat', 'overheat']) &&
       triggerRules.overheatUnknown.fired.length === 0,
     JSON.stringify({ hot: triggerRules.overheat, unknown: triggerRules.overheatUnknown }),
+  );
+  record(
+    '触发规则：「持续状态」（断网/过热）的重复间隔是 3~8 分钟内随机（用户要求"随机触发"）',
+    triggerRules.repeatDelays[0] === 180000 &&
+      triggerRules.repeatDelays[1] === 480000 &&
+      triggerRules.repeatDelays[2] === 1500 &&
+      JSON.stringify(triggerRules.repeatDelays[3]) === JSON.stringify([180000, 480000]),
+    JSON.stringify(triggerRules.repeatDelays),
   );
   record(
     '触发规则：过热阈值可配置（感知设置里那条）——52 度配 45 度阈值演、50 度配 80 度不演',
@@ -1458,11 +1504,11 @@ app.whenReady().then(async () => {
       empty: balance.parseBalance({}, 'now').totalBalance,
       unavailable: balance.parseBalance({ is_available: false, balance_infos: [{ total_balance: '0.00' }] }, 'now').isAvailable,
       formatted: balance.formatBalance(parsed),
-      hungerRich: model.hungerFromBalance(50, { low: 2, full: 20 }),
-      hungerEmpty: model.hungerFromBalance(0, { low: 2, full: 20 }),
-      hungerMid: model.hungerFromBalance(11, { low: 2, full: 20 }),
-      hungerUnknown: model.hungerFromBalance(null, { low: 2, full: 20 }),
-      hungerReversed: model.hungerFromBalance(11, { low: 20, full: 2 }),
+      satietyRich: model.satietyFromBalance(50, { low: 2, full: 20 }),
+      satietyEmpty: model.satietyFromBalance(0, { low: 2, full: 20 }),
+      satietyMid: model.satietyFromBalance(11, { low: 2, full: 20 }),
+      satietyUnknown: model.satietyFromBalance(null, { low: 2, full: 20 }),
+      satietyReversed: model.satietyFromBalance(11, { low: 20, full: 2 }),
     };
   })()`);
   record(
@@ -1482,12 +1528,12 @@ app.whenReady().then(async () => {
     JSON.stringify(balanceModel),
   );
   record(
-    '余额 -> 饿：见底 100、充足 0、中间线性；查不到时返回 null（交给本地预算兜底）',
-    balanceModel.hungerRich === 0 &&
-      balanceModel.hungerEmpty === 100 &&
-      balanceModel.hungerMid === 50 &&
-      balanceModel.hungerUnknown === null &&
-      balanceModel.hungerReversed === 0,
+    '余额 -> 饱腹：见底 0、充足 100、中间线性（数值方向与旧的"饥饿值"相反）；查不到时返回 null（交给本地预算兜底）',
+    balanceModel.satietyRich === 100 &&
+      balanceModel.satietyEmpty === 0 &&
+      balanceModel.satietyMid === 50 &&
+      balanceModel.satietyUnknown === null &&
+      balanceModel.satietyReversed === 100,
     JSON.stringify(balanceModel),
   );
 
@@ -3222,11 +3268,11 @@ app.whenReady().then(async () => {
       hidden: hidden.mood,
       // 宽限期内不应衰减（刚被摸过就掉心情会让人觉得"摸她没用"）
       grace: model.decayEmotion(model.applyInteraction(base, 'click', now), { presence: 'hidden', now: now + 1000, tokensRemainingRatio: 1 }).mood,
-      // 饿 = 预算用光的比例，且与时间无关
-      hungerFull: model.applyTokens(base, 1, now).hunger,
-      hungerHalf: model.applyTokens(base, 0.5, now).hunger,
-      hungerEmpty: model.applyTokens(base, 0, now).hunger,
-      hungerUnlimited: model.hungerFromTokens(1),
+      // 饱腹 = 预算剩余的比例（数值越大越饱，用户要求把饥饿值反过来），且与时间无关
+      satietyFull: model.applyTokens(base, 1, now).satiety,
+      satietyHalf: model.applyTokens(base, 0.5, now).satiety,
+      satietyEmpty: model.applyTokens(base, 0, now).satiety,
+      satietyUnlimited: model.satietyFromTokens(1),
       labelSad: model.moodLabel(10).key,
       labelGreat: model.moodLabel(90).key,
       clamped: model.applyInteraction({ ...base, mood: 99 }, 'gift', now).mood,
@@ -3246,12 +3292,12 @@ app.whenReady().then(async () => {
   );
   record('情绪：互动后有宽限期（不会立刻掉回去）', emotionModel.grace === emotionModel.afterClick, `grace=${emotionModel.grace} afterClick=${emotionModel.afterClick}`);
   record(
-    '情绪：饥饿来自 token 剩余量（满/半/空 -> 0/50/100）',
-    emotionModel.hungerFull === 0 && emotionModel.hungerHalf === 50 && emotionModel.hungerEmpty === 100 && emotionModel.hungerUnlimited === 0,
+    '情绪：饱腹来自额度剩余量（满/半/空 -> 100/50/0；不限额 = 一直很饱）',
+    emotionModel.satietyFull === 100 && emotionModel.satietyHalf === 50 && emotionModel.satietyEmpty === 0 && emotionModel.satietyUnlimited === 100,
     JSON.stringify({
-      full: emotionModel.hungerFull,
-      half: emotionModel.hungerHalf,
-      empty: emotionModel.hungerEmpty,
+      full: emotionModel.satietyFull,
+      half: emotionModel.satietyHalf,
+      empty: emotionModel.satietyEmpty,
     }),
   );
   record(
@@ -3276,7 +3322,7 @@ app.whenReady().then(async () => {
       elapsed: Math.round(elapsed),
       moodBefore: before.emotion.mood,
       moodAfter: after.emotion.mood,
-      hunger: after.emotion.hunger,
+      satiety: after.emotion.satiety,
     };
   })()`);
   record(
@@ -3519,7 +3565,7 @@ app.whenReady().then(async () => {
     return {
       moodBefore: before.emotion.mood,
       moodAfter: after.emotion.mood,
-      hunger: after.emotion.hunger,
+      satiety: after.emotion.satiety,
       tokensUsed: after.tokensUsed,
       calls: after.calls,
     };
@@ -3529,7 +3575,7 @@ app.whenReady().then(async () => {
     interaction.moodAfter > interaction.moodBefore,
     JSON.stringify(interaction),
   );
-  record('情绪：token 用量被累计（预算 -> 饿 的依据）', interaction.tokensUsed >= 0 && interaction.hunger >= 0, JSON.stringify(interaction));
+  record('情绪：token 用量被累计（预算 -> 饱腹 的依据）', interaction.tokensUsed >= 0 && interaction.satiety >= 0, JSON.stringify(interaction));
 
   /*
    * 2.3「收起 / 隐藏」：需求要求"收起降低更快、隐藏最快"，
@@ -5075,16 +5121,7 @@ app.whenReady().then(async () => {
   const restoreScale = settingsSnapshot.scale;
   const restoreTop = settingsSnapshot.alwaysOnTop;
   const restoreDock = settingsSnapshot.dockOnEdge;
-  const restore = await run(`(async () => {
-    try {
-      await window.petAPI.settings.setScale(${restoreScale});
-      await window.petAPI.settings.setAlwaysOnTop(${restoreTop});
-      await window.petAPI.settings.setDockOnEdge(${restoreDock});
-      return true;
-    } catch (error) {
-      return false;
-    }
-  })()`);
+  const restore = await restoreUserSettings();
   const savedAfterRun = readSavedScale();
   const dockAfterRun = readSavedDockOnEdge();
   record(
@@ -5100,7 +5137,16 @@ app.whenReady().then(async () => {
   );
 
   finish({});
-}).catch((error) => {
+}).catch(async (error) => {
+  /*
+   * 中途抛错也要把用户设置写回去（否则一次崩溃就会把 scale / 贴边开关留在测试值上，
+   * 后续真机探针与用户的桌宠都跟着变形 —— 实测踩过）。
+   */
+  try {
+    await restoreUserSettings();
+  } catch (restoreError) {
+    /* 还原失败就算了：fatal 信息更重要 */
+  }
   finish({ fatal: String((error && error.stack) || error) });
 });
 

@@ -32,7 +32,7 @@ export interface DiaryContext {
   readonly turns: readonly ChatTurn[];
   readonly events: readonly MemoryEvent[];
   readonly mood: { readonly start: number; readonly end: number; readonly low: number };
-  readonly hunger: number;
+  readonly satiety: number;
   readonly highlights: {
     readonly chat: readonly string[];
     readonly event: readonly string[];

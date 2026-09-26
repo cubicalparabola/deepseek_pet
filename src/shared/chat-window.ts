@@ -38,7 +38,7 @@ export interface ChatWindowBridge {
   speakUp(): Promise<{ ok: boolean; reply: string; mode: 'llm' | 'local'; tokens: number; error?: string }>;
   /** 重新拉取历史（窗口复用时用）。 */
   history(): Promise<readonly ChatTurn[]>;
-  /** 当前状态（模式、心情、饥饿）。 */
+  /** 当前状态（模式、心情、饱腹）。 */
   status(): Promise<AIStatusView>;
   /** 订阅宠物主动说话 / 系统提示。 */
   onMessage(handler: (message: ChatMessagePush) => void): () => void;

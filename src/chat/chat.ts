@@ -11,7 +11,7 @@
  */
 
 import type { ChatMessagePush, ChatTurn } from '../shared/ai-types';
-import { hungerLabel, moodLabel } from '../shared/emotion';
+import { moodLabel, satietyLabel } from '../shared/emotion';
 import type { ChatWindowBridge } from '../shared/chat-window';
 
 function requireElement<T extends HTMLElement>(id: string): T {
@@ -32,7 +32,7 @@ const closeButton = requireElement<HTMLButtonElement>('close-window');
 const petNameLabel = requireElement('pet-name');
 const modeBadge = requireElement('mode-badge');
 const moodLine = requireElement('mood-line');
-const hungerLine = requireElement('hunger-line');
+const satietyLine = requireElement('hunger-line');
 const tokenLine = requireElement('token-line');
 const errorBar = requireElement('error-bar');
 
@@ -106,9 +106,9 @@ function renderStatus(): void {
     modeBadge.className = `badge ${status.usable ? 'badge-llm' : 'badge-local'}`;
 
     const mood = moodLabel(status.emotion.mood);
-    const hunger = hungerLabel(status.emotion.hunger);
+    const satiety = satietyLabel(status.emotion.satiety);
     moodLine.textContent = `心情 ${status.emotion.mood}（${mood.label}）${mood.face}`;
-    hungerLine.textContent = `饿 ${status.emotion.hunger}（${hunger.label}）`;
+    satietyLine.textContent = `饱腹 ${status.emotion.satiety}（${satiety.label}）`;
     tokenLine.textContent = settings.budget.budget > 0
       ? `token ${settings.budget.used}/${settings.budget.budget}`
       : `token ${settings.budget.used}`;

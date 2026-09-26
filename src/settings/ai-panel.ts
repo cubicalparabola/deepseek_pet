@@ -27,7 +27,7 @@ import type {
   MemorySnapshot,
   PetPresence,
 } from '../shared/ai-types';
-import { hungerLabel, moodLabel } from '../shared/emotion';
+import { moodLabel, satietyLabel } from '../shared/emotion';
 import { formatBalance } from '../shared/balance';
 
 import type { AIAPI } from '../shared/ipc';
@@ -118,7 +118,7 @@ interface BarHandle {
   readonly fill: HTMLDivElement;
 }
 
-/** 情绪/饥饿条：纯 div 宽度，不用 canvas（缩放窗口时不需要重绘）。 */
+/** 情绪/饱腹条：纯 div 宽度，不用 canvas（缩放窗口时不需要重绘）。 */
 function makeBar(id: string, labelText: string, warm: boolean): BarHandle {
   const bar = el('div', warm ? 'ai-bar ai-bar-warm' : 'ai-bar');
   bar.id = id;
@@ -227,12 +227,12 @@ export function mountAIPanel(root: HTMLElement, api: AIAPI, initial: AIStatusVie
   const modeReadout = makeReadout('模式');
   const presenceReadout = makeReadout('在场');
   const moodReadout = makeReadout('心情');
-  const hungerReadout = makeReadout('饿');
+  const satietyReadout = makeReadout('饱腹');
   const callsReadout = makeReadout('调用次数');
   const tokensReadout = makeReadout('累计 token');
   const lastErrorReadout = makeReadout('最近错误');
   const dataDirReadout = makeReadout('数据目录');
-  for (const readout of [modeReadout, presenceReadout, moodReadout, hungerReadout, callsReadout, tokensReadout, lastErrorReadout, dataDirReadout]) {
+  for (const readout of [modeReadout, presenceReadout, moodReadout, satietyReadout, callsReadout, tokensReadout, lastErrorReadout, dataDirReadout]) {
     overview.appendChild(readout.row);
   }
   dataDirReadout.value.classList.add('ai-small');
@@ -408,8 +408,10 @@ export function mountAIPanel(root: HTMLElement, api: AIAPI, initial: AIStatusVie
    * 余额不足 / key 无效还会让她演 offline —— 所以这块既是展示也是配置。
    */
   const balanceSection = makeSection('余额（DeepSeek）');
-  const balanceEnabled = makeCheckbox('ai-balance-enabled', '定期查询余额');
-  const balanceEnabledRow = checkRow('定期查询余额（仅 DeepSeek 官方地址可用）', balanceEnabled);
+  /*
+   * 注意这里**没有**"是否定期查询余额"的开关（用户要求："删掉余额计算选项（默认开启）"）。
+   * 查询永远是开的，只在非 DeepSeek 官方地址下自动跳过（那里没有这个接口）。
+   */
   const balanceIntervalInput = makeInput('number', 'ai-balance-interval-min', '查询间隔（分钟）');
   balanceIntervalInput.min = '1';
   balanceIntervalInput.max = '1440';
@@ -422,15 +424,14 @@ export function mountAIPanel(root: HTMLElement, api: AIAPI, initial: AIStatusVie
   balanceFullInput.step = '1';
 
   balanceSection.append(
-    balanceEnabledRow,
-    fieldRow('ai-balance-interval-min', '查询间隔（分钟）', balanceIntervalInput, '默认 30 分钟；启动时会先查一次。'),
-    fieldRow('ai-balance-low', '余额见底（元）', balanceLowInput, '余额低于这个数 = 很饿（hunger 100）。'),
-    fieldRow('ai-balance-full', '余额充足（元）', balanceFullInput, '余额高于这个数 = 不饿（hunger 0）；中间线性过渡。'),
+      fieldRow('ai-balance-interval-min', '查询间隔（分钟）', balanceIntervalInput, '默认 30 分钟；启动时会先查一次。'),
+    fieldRow('ai-balance-low', '余额见底（元）', balanceLowInput, '余额低于这个数 = 很饿（饱腹 0）。'),
+    fieldRow('ai-balance-full', '余额充足（元）', balanceFullInput, '余额高于这个数 = 很饱（饱腹 100）；中间线性过渡。'),
   );
 
   const balanceReadout = makeReadout('余额');
   const balanceFetchedReadout = makeReadout('上次查询');
-  const balanceSourceReadout = makeReadout('"饿"的来源');
+  const balanceSourceReadout = makeReadout('"饱腹"的来源');
   // 给读数加 id：自动化诊断要能直接读到"查到了什么/错误是什么"（与 ai-mood-value 同一个理由）
   balanceReadout.value.id = 'ai-balance-readout';
   balanceFetchedReadout.value.id = 'ai-balance-fetched';
@@ -449,14 +450,14 @@ export function mountAIPanel(root: HTMLElement, api: AIAPI, initial: AIStatusVie
   const moodValue = el('span', 'ai-readout-value');
   moodValue.id = 'ai-mood-value';
   moodValue.textContent = '—';
-  const hungerValue = el('span', 'ai-readout-value');
-  hungerValue.id = 'ai-hunger-value';
-  hungerValue.textContent = '—';
+  const satietyValue = el('span', 'ai-readout-value');
+  satietyValue.id = 'ai-satiety-value';
+  satietyValue.textContent = '—';
   const moodBar = makeBar('ai-mood-bar', '心情', false);
-  const hungerBar = makeBar('ai-hunger-bar', '饿', true);
+  const satietyBar = makeBar('ai-satiety-bar', '饱腹', false);
   emotionSection.append(
     barRow('心情', moodValue, moodBar.bar),
-    barRow('饿', hungerValue, hungerBar.bar),
+    barRow('饱腹', satietyValue, satietyBar.bar),
   );
   const emotionReset = makeButton('ai-emotion-reset', '重置情绪', 'ghost');
   emotionSection.appendChild(actionRow(emotionReset));
@@ -653,11 +654,11 @@ export function mountAIPanel(root: HTMLElement, api: AIAPI, initial: AIStatusVie
 
   function renderEmotion(status: AIStatusView): void {
     const mood = moodLabel(status.emotion.mood);
-    const hunger = hungerLabel(status.emotion.hunger);
+    const satiety = satietyLabel(status.emotion.satiety);
     moodValue.textContent = `${status.emotion.mood} / 100 · ${mood.label} ${mood.face}`;
-    hungerValue.textContent = `${status.emotion.hunger} / 100 · ${hunger.label}`;
+    satietyValue.textContent = `${status.emotion.satiety} / 100 · ${satiety.label}`;
     setBar(moodBar, status.emotion.mood);
-    setBar(hungerBar, status.emotion.hunger);
+    setBar(satietyBar, status.emotion.satiety);
   }
 
   function renderBudget(status: AIStatusView): void {
@@ -677,9 +678,9 @@ export function mountAIPanel(root: HTMLElement, api: AIAPI, initial: AIStatusVie
     presenceReadout.value.textContent = PRESENCE_LABELS[status.presence];
 
     const mood = moodLabel(status.emotion.mood);
-    const hunger = hungerLabel(status.emotion.hunger);
+    const satiety = satietyLabel(status.emotion.satiety);
     moodReadout.value.textContent = `${status.emotion.mood} / 100 · ${mood.label}`;
-    hungerReadout.value.textContent = `${status.emotion.hunger} / 100 · ${hunger.label}`;
+    satietyReadout.value.textContent = `${status.emotion.satiety} / 100 · ${satiety.label}`;
     callsReadout.value.textContent = String(status.calls);
     tokensReadout.value.textContent = settings.budget.budget > 0
       ? `${status.tokensUsed} / ${settings.budget.budget}`
@@ -755,8 +756,7 @@ export function mountAIPanel(root: HTMLElement, api: AIAPI, initial: AIStatusVie
     }
 
     if (scope === 'balance') {
-      setChecked(balanceEnabled, settings.balance.enabled);
-      // 面板用"分钟"，配置存毫秒（用户填 30 比填 1800000 自然）
+        // 面板用"分钟"，配置存毫秒（用户填 30 比填 1800000 自然）
       setValue(balanceIntervalInput, String(Math.round(settings.balance.intervalMs / 60000)));
       setValue(balanceLowInput, String(settings.balance.lowBalance));
       setValue(balanceFullInput, String(settings.balance.fullBalance));
@@ -1079,8 +1079,7 @@ export function mountAIPanel(root: HTMLElement, api: AIAPI, initial: AIStatusVie
       }
       return {
         balance: {
-          enabled: balanceEnabled.checked,
-          intervalMs: Math.round(minutes * 60000),
+            intervalMs: Math.round(minutes * 60000),
           lowBalance: low,
           fullBalance: full,
         },

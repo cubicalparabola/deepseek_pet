@@ -295,7 +295,7 @@ export class TrayManager {
     const callbacks = this.options.callbacks;
     const ai = this.state.ai;
     const collapsed = this.state.presence === 'collapsed';    const statusLine = ai
-      ? `${ai.usable ? '已接入大模型' : '本地兜底'} · 心情 ${ai.emotion.mood} · 饿 ${ai.emotion.hunger}`
+      ? `${ai.usable ? '已接入大模型' : '本地兜底'} · 心情 ${ai.emotion.mood} · 饱腹 ${ai.emotion.satiety}`
       : '状态未就绪';
     const enabled = ai?.settings.enabled === true;
 

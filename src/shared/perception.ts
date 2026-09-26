@@ -43,7 +43,12 @@ export const SCENE_LABELS: Readonly<Record<SceneKind, string>> = {
   terminal: '命令行',
   idle: '没在动',
   sensitive: '私人内容',
-  other: '说不清',
+  /*
+   * 用户反馈："『说不清』不知道是什么" —— 它原来就是 `other`（模型没把画面归进
+   * 受控词表里的任何一类）的标签，太含糊。改成把"没认出来"直接说出来，
+   * 面板与托盘里一眼就懂，也不会被当成"她出故障了"。
+   */
+  other: '其他（没认出来）',
 };
 
 /** 场景 -> 她开口时的说法（"主人开始写代码了"）。 */export const SCENE_OPENERS: Readonly<Record<SceneKind, string>> = {
@@ -62,7 +67,7 @@ export const SCENE_LABELS: Readonly<Record<SceneKind, string>> = {
 };
 
 export function sceneLabel(scene: SceneKind): string {
-  return SCENE_LABELS[scene] ?? '说不清';
+  return SCENE_LABELS[scene] ?? SCENE_LABELS.other;
 }
 
 /** 模型可能返回的近义词 -> 受控词表（脏数据不能进习惯统计）。 */

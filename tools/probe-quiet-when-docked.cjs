@@ -132,7 +132,17 @@ app.whenReady().then(async () => {
     await api.window.dragEnd();
     return window.petDebug.display().dock;
   })()`);
-  await wait(1200);
+  /*
+   * 等回到 idle 再发：本轮起"日常对话只在 idle 状态触发"（F 段验证），
+   * 展开的第一瞬还在播收尾段，那时发消息会被闸门拦下（本段要测的是"说话说到一半被收起"）。
+   */
+  for (let i = 0; i < 60; i += 1) {
+    if ((await run('window.petDebug.anim.getCurrentAnimation()')) === 'idle') break;
+    await wait(200);
+  }
+  await wait(400);
+  result.midSpeechIdleAnimation = await run('window.petDebug.anim.getCurrentAnimation()');
+  const midBubbleBefore = await bubbleState();
   await chatRun(`(async () => {
     const box = document.getElementById('input');
     box.value = '这句话说到一半我就把你收起来';
@@ -142,6 +152,7 @@ app.whenReady().then(async () => {
   await wait(1800);
   result.freeBubble = await bubbleState();
   result.freeBounds = petBounds();
+  result.midSpeechBubbleAppeared = result.freeBubble.visible === true && result.freeBubble.text !== midBubbleBefore.text;
   // 拖到右边缘收起（说话中途）
   await run(`(async () => {
     const api = window.petAPI;
@@ -225,6 +236,75 @@ app.whenReady().then(async () => {
     bounds: petBounds(),
   };
 
+  /* ---------------- F. 日常对话只在 IDLE 状态触发 ---------------- */
+  /*
+   * 用户要求："日常对话只能在 idle 状态触发"。
+   * 造法：先把状态弄回"好好待在桌面上"，然后用渲染层调试接口**真的播一条非 idle
+   * 动画**（`spin`，随机池里的长动画之一，播的时候 `currentAnimation` 不是 idle）
+   * → 这时在聊天窗口发一句，**不该冒泡**（回复仍进聊天窗口）；
+   * 等它播完回到 idle 再发一句 → 该冒泡 ✓（反向对照，证明闸门不是"永远不冒泡"）。
+   */
+  await run(`(async () => {
+    const api = window.petAPI;
+    await api.window.setPosition(500, 300);
+    await new Promise((r) => setTimeout(r, 400));
+    await api.window.dragEnd();
+    await new Promise((r) => setTimeout(r, 800));
+    return window.petDebug.display().dock;
+  })()`);
+  await wait(1500);
+  const busyPhase = await run(`(async () => {
+    const anim = window.petDebug.anim;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    /*
+     * 把她按在一条**动作**动画上（force 抢占）：用 cute（点击反应，约 6 秒、
+     * 不可打断）比随机池的 spin 稳 —— spin 在有些时序下会被兜底 idle 顶回去（实测）。
+     */
+    for (let i = 0; i < 60; i += 1) {
+      if (anim.getCurrentAnimation() === 'idle') break;
+      await wait(200);
+    }
+    anim.resetCooldowns();
+    await anim.play('cute', { interrupt: 'force', reason: 'quiet-probe-busy' });
+    for (let i = 0; i < 40 && anim.getCurrentAnimation() === 'idle'; i += 1) await wait(100);
+    return { animation: anim.getCurrentAnimation(), phase: anim.getPersistentPhase() };
+  })()`);
+  result.busyPhase = busyPhase;
+  const busyBubbleBefore = await bubbleState();
+  const busyMessagesBefore = await chatRun(`document.querySelectorAll('#messages .msg-pet').length`);
+  await chatRun(`(async () => {
+    const box = document.getElementById('input');
+    box.value = '你正忙着的时候我不该冒泡';
+    document.getElementById('send').click();
+    return true;
+  })()`);
+  await wait(2500);
+  result.busyBubble = await bubbleState();
+  result.busyAnimationAfter = await run('window.petDebug.anim.getCurrentAnimation()');
+  result.busyChatGotReply = (await chatRun(`document.querySelectorAll('#messages .msg-pet').length`)) > busyMessagesBefore;
+  // "没冒泡" = 气泡文本没有被她这句回复换掉（气泡可能还挂着上一段的话）
+  result.busyBubbleUnchanged = result.busyBubble.text === busyBubbleBefore.text;
+
+  // 等她回到 idle（最多 20 秒）再发一句：这次该冒泡
+  let idleAnimation = null;
+  for (let i = 0; i < 100; i += 1) {
+    idleAnimation = await run('window.petDebug.anim.getCurrentAnimation()');
+    if (idleAnimation === 'idle') break;
+    await wait(200);
+  }
+  await wait(600);
+  result.idleAnimationBeforeChat = idleAnimation;
+  const idleMessagesBefore = await chatRun(`document.querySelectorAll('#messages .msg-msg-pet, #messages .msg-pet').length`);
+  await chatRun(`(async () => {
+    const box = document.getElementById('input');
+    box.value = '现在你闲着了，应该冒泡';
+    document.getElementById('send').click();
+    return true;
+  })()`);
+  await wait(2500);
+  result.idleBubble = await bubbleState();
+  result.idleChatGotReply = (await chatRun(`document.querySelectorAll('#messages .msg-pet').length`)) > idleMessagesBefore;
+
   result.verdict = {
     // A：收起时用户发的对话**不在屏幕边上冒泡**
     noBubbleWhileDocked: result.dockedDisplay.dock === 'right' &&
@@ -234,10 +314,10 @@ app.whenReady().then(async () => {
     replyStillDelivered: result.chatGotReply === true,
     // A：收起状态没有被这次对话顺带展开
     stillDockedAfterChat: result.dockedDisplayAfterChat.dock === 'right',
-    // C：正说着话被收起 -> 已经冒出来的气泡收掉
-    bubbleHiddenWhenDockedMidSpeech: result.freeBubble.visible === true &&
-      result.afterDockBubble.visible === false &&
-      result.afterDockBounds.width === result.dockedBounds.width,
+    // C：展开且 idle 时说话 -> 气泡出现；把她收到边上 -> 气泡被收掉
+    bubbleHiddenWhenDockedMidSpeech: result.midSpeechIdleAnimation === 'idle' &&
+      result.midSpeechBubbleAppeared === true &&
+      result.afterDockBubble.visible === false,
     // B：收起时用户点"让她说句话" -> 先请回桌面（dock 变 free）再开口
     traySpeakExpandsFirst: result.traySpeak.before.display.dock === 'right' &&
       result.traySpeak.after.display.dock === 'free' &&
@@ -248,6 +328,14 @@ app.whenReady().then(async () => {
       result.autoSpeak.suppressedLog.includes('"kind":"proactive"') &&
       result.autoSpeak.bubble.visible === false &&
       result.autoSpeak.bounds.width === result.dockedBounds.width,
+    // F：非 idle 状态下日常对话不冒泡（回复仍进聊天窗口）
+    noBubbleWhileBusy: result.busyPhase.animation !== 'idle' &&
+      result.busyBubbleUnchanged === true &&
+      result.busyChatGotReply === true,
+    // F 反向对照：回到 idle 后同一路径该冒泡（闸门不是"永远不冒泡"）
+    bubbleWhenIdle: result.idleAnimationBeforeChat === 'idle' &&
+      result.idleBubble.visible === true &&
+      result.idleBubble.text !== result.busyBubble.text,
   };
 
   writeFileSync(outFile, JSON.stringify(result, null, 1), 'utf8');
@@ -256,6 +344,8 @@ app.whenReady().then(async () => {
   console.log(`[mid-speech] freeBubble=${JSON.stringify(result.freeBubble)} afterDock=${JSON.stringify(result.afterDockBubble)}`);
   console.log(`[traySpeak] ${JSON.stringify(result.traySpeak)}`);
   console.log(`[autoSpeak] todayWritten=${result.autoSpeak.todayWritten} bubble=${JSON.stringify(result.autoSpeak.bubble)} log=${result.autoSpeak.suppressedLog}`);
+  console.log(`[busy] phase=${JSON.stringify(result.busyPhase)} bubble=${JSON.stringify(result.busyBubble)} unchanged=${result.busyBubbleUnchanged} chatGotReply=${result.busyChatGotReply}`);
+  console.log(`[idle] animation=${result.idleAnimationBeforeChat} bubble=${JSON.stringify(result.idleBubble)} chatGotReply=${result.idleChatGotReply}`);
   app.exit(Object.values(result.verdict).every(Boolean) ? 0 : 1);
 }).catch((error) => {
   try { writeFileSync(outFile, JSON.stringify({ fatal: String(error), stack: error && error.stack }, null, 1), 'utf8'); } catch (e) { /* 忽略 */ }
@@ -263,4 +353,4 @@ app.whenReady().then(async () => {
   app.exit(1);
 });
 
-setTimeout(() => app.exit(2), 180000);
+setTimeout(() => app.exit(2), 300000);

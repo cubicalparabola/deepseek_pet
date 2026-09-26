@@ -679,7 +679,8 @@ const SCENE_NAMES: Readonly<Record<string, string>> = {
   terminal: '命令行',
   idle: '没在动',
   sensitive: '私人内容',
-  other: '说不清',
+  // 与 `SCENE_LABELS.other` 保持一致：把"没认出来"说出来（用户反馈"说不清不知道是什么"）
+  other: '其他（没认出来）',
   unknown: '不清楚',
 };
 

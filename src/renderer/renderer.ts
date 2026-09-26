@@ -24,10 +24,10 @@ import {
   applyInteraction,
   applyTokens,
   decayEmotion,
-  hungerFromBalance,
-  hungerFromTokens,
   initialEmotion,
   moodLabel,
+  satietyFromBalance,
+  satietyFromTokens,
 } from '../shared/emotion';
 import type { AIChatReply, AIStatusView, InteractionKind } from '../shared/ai-types';
 import {
@@ -61,7 +61,8 @@ import {
 import {
   APPROACH_COOLDOWN_MS,
   APPROACH_RADIUS_PX,
-  HUNGRY_THRESHOLD,
+  CONDITION_REPEAT_RANGE_MS,
+  HUNGRY_SATIETY_THRESHOLD,
   OVERHEAT_TEMP_C,
   SAD_MOOD_THRESHOLD,
   classifyApproach,
@@ -71,6 +72,7 @@ import {
   evaluateOverheat,
   evaluateSad,
   evaluateSceneTrigger,
+  pickRepeatDelayMs,
   sceneTriggerAnimation,
 } from '../shared/pet-triggers';
 import {
@@ -1302,12 +1304,15 @@ class PetApplication {
       readonly evaluateOffline: typeof evaluateOffline;
       readonly evaluateSceneTrigger: typeof evaluateSceneTrigger;
       readonly sceneTriggerAnimation: typeof sceneTriggerAnimation;
-      readonly hungerFromBalance: typeof hungerFromBalance;
+      readonly satietyFromBalance: typeof satietyFromBalance;
       readonly APPROACH_RADIUS_PX: typeof APPROACH_RADIUS_PX;
   readonly APPROACH_COOLDOWN_MS: typeof APPROACH_COOLDOWN_MS;
       readonly OVERHEAT_TEMP_C: typeof OVERHEAT_TEMP_C;
       readonly SAD_MOOD_THRESHOLD: typeof SAD_MOOD_THRESHOLD;
-      readonly HUNGRY_THRESHOLD: typeof HUNGRY_THRESHOLD;
+      readonly HUNGRY_SATIETY_THRESHOLD: typeof HUNGRY_SATIETY_THRESHOLD;
+      /** 「持续状态」（断网/过热）的重复间隔：3~8 分钟内随机。 */
+      readonly CONDITION_REPEAT_RANGE_MS: typeof CONDITION_REPEAT_RANGE_MS;
+      readonly pickRepeatDelayMs: typeof pickRepeatDelayMs;
     };
     /** DeepSeek 余额接口的纯解析（Money 是字符串、地址收敛、非官方域名跳过）。 */
     readonly balance: {
@@ -1329,7 +1334,7 @@ class PetApplication {
       readonly applyTokens: typeof applyTokens;
       readonly initialEmotion: typeof initialEmotion;
       readonly moodLabel: typeof moodLabel;
-      readonly hungerFromTokens: typeof hungerFromTokens;
+      readonly satietyFromTokens: typeof satietyFromTokens;
       readonly EMOTION: typeof EMOTION;
     };
     /** 对话的滚动前情摘要（"更早说过的事"怎么压成一段）。 */
@@ -1492,12 +1497,14 @@ class PetApplication {
         evaluateOffline,
         evaluateSceneTrigger,
         sceneTriggerAnimation,
-        hungerFromBalance,
+        satietyFromBalance,
         APPROACH_RADIUS_PX,
         APPROACH_COOLDOWN_MS,
         OVERHEAT_TEMP_C,
         SAD_MOOD_THRESHOLD,
-        HUNGRY_THRESHOLD,
+        HUNGRY_SATIETY_THRESHOLD,
+        CONDITION_REPEAT_RANGE_MS,
+        pickRepeatDelayMs,
       },
       balance: {
         balanceEndpoint,
@@ -1511,7 +1518,7 @@ class PetApplication {
         applyTokens,
         initialEmotion,
         moodLabel,
-        hungerFromTokens,
+        satietyFromTokens,
         EMOTION,
       },
       memorySummary: {

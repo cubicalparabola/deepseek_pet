@@ -43,7 +43,7 @@ export interface AIProviderConfig {
 
 /** Token 预算：情绪系统里"饿"的来源（饿 = 预算用光的比例）。 */
 export interface AITokenBudget {
-  /** 预算总量（token）。0 表示不限制（此时 hunger 恒为 0）。 */
+  /** 预算总量（token）。0 表示不限制（此时 satiety 恒为 100 = 一直很饱）。 */
   readonly budget: number;
   /** 已消耗（token，累计）。 */
   readonly used: number;
@@ -57,19 +57,21 @@ export interface AITokenBudget {
  * DeepSeek 官方只有"查余额"这一个额度接口（`GET /user/balance`），
  * 没有 token 用量接口 —— 所以"还剩多少额度"以**余额**为准，
  * 本地累计 token 只在查不到余额时兜底。
+ *
+ * 用户要求（本轮）："删掉余额计算选项（默认开启）" —— 原先那个
+ * `enabled` 开关已删除：**查询永远是开的**，只在非 DeepSeek 官方域名下
+ * 自动跳过（那里根本没有这个接口，见 `supportsBalanceQuery`）。
  */
 export interface AIBalanceSettings {
-  /** 是否定期查询（默认开；非 DeepSeek 官方域名会跳过，避免 404 噪音）。 */
-  readonly enabled: boolean;
   /** 查询间隔（毫秒，默认 30 分钟）。 */
   readonly intervalMs: number;
-  /** 余额低于这个金额算"快没额度了"（对应 hunger=100）。 */
+  /** 余额低于这个金额算"见底"（对应 satiety=0，饿得说不动话）。 */
   readonly lowBalance: number;
-  /** 余额高于这个金额算"额度充足"（对应 hunger=0）。 */
+  /** 余额高于这个金额算"额度充足"（对应 satiety=100，很饱）。 */
   readonly fullBalance: number;
 }
 
-/** 余额快照（设置面板展示 + 驱动"饿"/"掉线"）。 */
+/** 余额快照（设置面板展示 + 驱动"饱腹"/"掉线"）。 */
 export interface AIBalanceState {
   readonly isAvailable: boolean;
   readonly currency: string;
@@ -77,8 +79,8 @@ export interface AIBalanceState {
   readonly grantedBalance: number;
   readonly toppedUpBalance: number;
   readonly fetchedAt: string;
-  /** true = 这次"饿"是余额算出来的；false = 用的是本地累计 token。 */
-  readonly drivesHunger: boolean;
+  /** true = 这次"饱腹"是余额算出来的；false = 用的是本地累计 token。 */
+  readonly drivesSatiety: boolean;
 }
 
 /** AI 总配置（持久化到 userData/ai-settings.json）。 */
@@ -89,7 +91,7 @@ export interface AISettings {
   readonly chat: boolean;
   /** 2.2 用户记忆（记忆日志 + 长期上下文）。 */
   readonly memory: boolean;
-  /** 2.3 情绪系统（mood / hunger）。 */
+  /** 2.3 情绪系统（mood / satiety）。 */
   readonly emotion: boolean;
   /** 2.4 日记系统。 */
   readonly diary: boolean;
@@ -149,9 +151,9 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
     used: 0,
     resetAt: '',
   },
-  // 余额查询默认开，但只在 DeepSeek 官方域名下真的会发请求（见 llm-client）
+  // 余额查询永远开着（用户要求删掉那个默认开启的开关），
+  // 但只在 DeepSeek 官方域名下真的会发请求（见 supportsBalanceQuery）
   balance: {
-    enabled: true,
     intervalMs: 30 * 60000,
     lowBalance: 2,
     fullBalance: 20,
@@ -236,8 +238,8 @@ export type PetPresence = 'visible' | 'collapsed' | 'hidden';
 export interface EmotionState {
   /** 心情 0~100（0 = 很难过，100 = 很开心）。 */
   readonly mood: number;
-  /** 饥饿 0~100（100 = 很饿）。**由 token 剩余量推导**，不做时间衰减。 */
-  readonly hunger: number;
+  /** 饱腹 0~100（100 = 很饱，0 = 饿得说不动话）。**由额度剩余量推导**，不做时间衰减。 */
+  readonly satiety: number;
   /** 最近一次互动时间（epoch ms）。 */
   readonly lastInteractionAt: number;
   /** 最近一次结算时间（epoch ms），用于计算衰减经过了多少时间。 */
@@ -401,7 +403,7 @@ export interface AIChatReply {
   /** 这次回复让桌宠播了什么动画（便于验收）。 */
   readonly animation?: string;
   readonly mood: number;
-  readonly hunger: number;
+  readonly satiety: number;
 }
 
 /** Main -> 聊天窗口推送的一条消息（用于主动说话/日记提醒）。 */
@@ -532,9 +534,8 @@ export function sanitizeAISettings(raw: unknown, fallback: AISettings = DEFAULT_
       resetAt: str(budgetRaw.resetAt, fallback.budget.resetAt, 40),
     },
     balance: {
-      enabled: bool(balanceRaw.enabled, fallback.balance.enabled),
       intervalMs: Math.round(num(balanceRaw.intervalMs, fallback.balance.intervalMs, 60_000, 24 * 3600_000)),
-      // low 必须 <= full，否则"余额映射到饥饿度"会算出反的结果（写反了自动纠正）
+      // low 必须 <= full，否则"余额映射到饱腹度"会算出反的结果（写反了自动纠正）
       lowBalance: Math.min(low, full),
       fullBalance: full,
     },
@@ -612,7 +613,7 @@ export function createDefaultAIStatus(dataDir = ''): AIStatusView {
     dataDir,
     emotion: {
       mood: 62,
-      hunger: 0,
+      satiety: 100,
       lastInteractionAt: 0,
       lastUpdateAt: 0,
       updatedAt: '',

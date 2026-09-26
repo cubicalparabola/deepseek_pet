@@ -16,6 +16,7 @@ import type { EmotionState, InteractionKind, PetPresence } from '../../shared/ai
 import {
   applyInteraction,
   applyTokens,
+  clampMood,
   decayEmotion,
   initialEmotion,
   tokensRemainingRatio,
@@ -43,7 +44,7 @@ export interface EmotionServiceOptions {
 export interface MoodSample {
   readonly at: string;
   readonly mood: number;
-  readonly hunger: number;
+  readonly satiety: number;
   readonly presence: PetPresence;
 }
 
@@ -63,7 +64,7 @@ export class EmotionService {
    * 本地累计 token 只统计这台机器上我们发出去的请求，
    * 而余额才是"账号还剩多少额度"的真相（换机器、别的程序也在用）。
    */
-  private balanceHunger: number | null = null;
+  private balanceSatiety: number | null = null;
 
   public constructor(options: EmotionServiceOptions) {
     this.options = options;
@@ -75,7 +76,7 @@ export class EmotionService {
   /** 读盘（缺失/损坏都用初始值）。 */
   public load(now: number = Date.now()): EmotionState {
     this.state = this.read(now);
-    this.logger.info('emotion state loaded', { data: { mood: this.state.mood, hunger: this.state.hunger } });
+    this.logger.info('emotion state loaded', { data: { mood: this.state.mood, satiety: this.state.satiety } });
     this.refreshTokens(now);
     return this.state;
   }
@@ -108,11 +109,11 @@ export class EmotionService {
     return this.state;
   }
 
-  /** token 用量变化后刷新"饿"。 */
+  /** token 用量变化后刷新"饱腹度"。 */
   public refreshTokens(now: number = Date.now()): EmotionState {
     const ratio = this.remainingRatio();
     const next = applyTokens(this.state, ratio, now);
-    if (next.hunger !== this.state.hunger) {
+    if (next.satiety !== this.state.satiety) {
       this.state = next;
       this.save();
       this.emit();
@@ -121,25 +122,25 @@ export class EmotionService {
   }
 
   /**
-   * 设置"余额推出的饥饿度"（`null` = 没有余额信息，退回本地预算）。
+   * 设置"余额推出的饱腹度"（`null` = 没有余额信息，退回本地预算）。
    *
-   * 立刻结算一次：余额查回来就该马上反映在 hunger 上，
+   * 立刻结算一次：余额查回来就该马上反映在 satiety 上，
    * 而不是等下一次心跳（否则"没钱了"这件事要一分钟才生效）。
    */
-  public setBalanceHunger(hunger: number | null, now: number = Date.now()): EmotionState {
-    this.balanceHunger = hunger === null || !Number.isFinite(hunger)
+  public setBalanceSatiety(satiety: number | null, now: number = Date.now()): EmotionState {
+    this.balanceSatiety = satiety === null || !Number.isFinite(satiety)
       ? null
-      : Math.min(100, Math.max(0, Math.round(hunger)));
+      : Math.min(100, Math.max(0, Math.round(satiety)));
     return this.refreshTokens(now);
   }
 
-  public hasBalanceHunger(): boolean {
-    return this.balanceHunger !== null;
+  public hasBalanceSatiety(): boolean {
+    return this.balanceSatiety !== null;
   }
 
-  /** 当前用于推导"饿"的剩余比例：余额优先，其次本地累计 token。 */
+  /** 当前用于推导"饱腹度"的剩余比例：余额优先，其次本地累计 token。 */
   private remainingRatio(): number {
-    if (this.balanceHunger !== null) return 1 - this.balanceHunger / 100;
+    if (this.balanceSatiety !== null) return this.balanceSatiety / 100;
     return tokensRemainingRatio(this.options.getBudget());
   }
 
@@ -203,7 +204,15 @@ export class EmotionService {
       const fallback = initialEmotion(now);
       return {
         mood: clampNumber(record.mood, fallback.mood),
-        hunger: clampNumber(record.hunger, 0),
+        /*
+         * 迁移：老版本存的是 `hunger`（饥饿值，越大越饿），
+         * 现在是 `satiety`（饱腹值，越大越饱）—— 数值**反过来**：
+         * `satiety = 100 - hunger`。不做这一步的话，用户升上来会看到
+         * "本来很饱的宠物突然饿得说不出话"（旧文件里 hunger=0 会被读成 satiety=0）。
+         */
+        satiety: record.satiety === undefined && record.hunger !== undefined
+          ? clampMood(100 - clampNumber(record.hunger, 0))
+          : clampNumber(record.satiety, fallback.satiety),
         lastInteractionAt: clampNumber(record.lastInteractionAt, now),
         lastUpdateAt: clampNumber(record.lastUpdateAt, now),
         updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : new Date(now).toISOString(),
@@ -251,7 +260,7 @@ export class EmotionService {
     const entry: MoodSample = {
       at: new Date(now).toISOString(),
       mood: this.state.mood,
-      hunger: this.state.hunger,
+      satiety: this.state.satiety,
       presence: this.currentPresence,
     };
     try {
@@ -262,7 +271,7 @@ export class EmotionService {
     }
   }
 
-  /** 读某天的心情采样。 */
+  /** 读某天的心情采样（老的 `hunger` 字段按 `100 - hunger` 迁移成 `satiety`）。 */
   public samplesFor(date: string): MoodSample[] {
     const file = join(this.options.dataDir, 'mood', `mood-${date}.jsonl`);
     if (!existsSync(file)) return [];
@@ -271,9 +280,19 @@ export class EmotionService {
         .split('\n')
         .map((line) => line.trim())
         .filter((line) => line !== '')
-        .map((line) => {
+        .map((line): MoodSample | null => {
           try {
-            return JSON.parse(line) as MoodSample;
+            const raw = JSON.parse(line) as Record<string, unknown>;
+            const mood = clampNumber(raw.mood, this.state.mood);
+            const satiety = raw.satiety === undefined && raw.hunger !== undefined
+              ? clampMood(100 - clampNumber(raw.hunger, 0))
+              : clampNumber(raw.satiety, this.state.satiety);
+            return {
+              at: typeof raw.at === 'string' ? raw.at : new Date().toISOString(),
+              mood,
+              satiety,
+              presence: (raw.presence === 'collapsed' || raw.presence === 'hidden' ? raw.presence : 'visible'),
+            };
           } catch {
             return null;
           }

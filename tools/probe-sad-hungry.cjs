@@ -3,13 +3,13 @@
  * 探针：**心情低（sad）与饿（hungry）这两条触发，真机跑得通吗**。
  *
  * 和 `probe-offline-overheat.cjs` 是一对：那个管"外部条件"（断网 / GPU 温度），
- * 这个管"她自己的状态"（心情 / 饥饿）。两条都不是靠造一个假信号，
+ * 这个管"她自己的状态"（心情 / 饱腹）。两条都不是靠造一个假信号，
  * 而是**改真实的状态来源**，让规则自己去判定：
  *
  *   1. 先只让心情低：`emotion.json` 写 mood = 18（低于 sad 阈值 25），
- *      预算留着（budget 1000 / used 0 -> hunger 0）-> 启动时只该演 sad；
+ *      预算留着（budget 1000 / used 0 -> 饱腹 100 = 很饱）-> 启动时只该演 sad；
  *   2. 等 sad 演完，再把预算用光（`ai.setSettings({budget:{used:1000}})` +
- *      `ai.resetEmotion()` 让它立刻重算）-> hunger = (1-0)*100 = 100
+ *      `ai.resetEmotion()` 让它立刻重算）-> 饱腹 = 0（饿得说不出话）
  *      （高于 hungry 阈值 60）-> 30 秒内的状态轮询该演一次 hungry。
  *
  * 为什么不一次把两个条件都造出来：实测那样两条会在**同一瞬间**触发，
@@ -66,13 +66,13 @@ writeFileSync(join(dataDir, 'ai-settings.json'), JSON.stringify({
     timeoutMs: 8000,
   },
   budget: PROBE_BUDGET_INITIAL,
-  // 关掉余额查询：这样 hunger 用**本地预算**算（余额优先，会把本地预算盖掉）
-  balance: { enabled: false },
+  // 余额查询没有开关了（只在 DeepSeek 官方地址才真的查）；这个探针把地址指到别处，
+  // 于是走**本地预算**这条路（余额优先，会把本地预算盖掉）
 }, null, 2), 'utf8');
 
 writeFileSync(join(dataDir, 'emotion.json'), JSON.stringify({
   mood: PROBE_MOOD,
-  hunger: 0,
+  satiety: 100,
   // 10 分钟没互动：过了宽限期，衰减照常（但衰减只会让 mood 更低，不影响判定）
   lastInteractionAt: now - 10 * 60000,
   lastUpdateAt: now - 10 * 60000,
@@ -113,7 +113,7 @@ function playedSequence(text) {
 
 app.whenReady().then(async () => {
   const { BrowserWindow } = require('electron');
-  /* 触发服务在 did-finish-load 后 1.5 秒启动，启动时先查一次心情/饿 */
+  /* 触发服务在 did-finish-load 后 1.5 秒启动，启动时先查一次心情/饱腹 */
   await wait(12000);
 
   const win = BrowserWindow.getAllWindows()[0];
@@ -131,11 +131,11 @@ app.whenReady().then(async () => {
   result.triggersAfterSad = firedTriggers(afterSad);
   result.playedAfterSad = playedSequence(afterSad);
 
-  /* 第二步：把预算用光（真实设置补丁）+ 立刻重算情绪 -> hunger 100 */
+  /* 第二步：把预算用光（真实设置补丁）+ 立刻重算情绪 -> 饱腹 0 */
   result.budgetPatch = await run(`(async () => {
     const after = await window.petAPI.ai.setSettings({ budget: { used: 1000 } });
     const reset = await window.petAPI.ai.resetEmotion();
-    return { budget: after.settings.budget, mood: reset.emotion.mood, hunger: reset.emotion.hunger };
+    return { budget: after.settings.budget, mood: reset.emotion.mood, satiety: reset.emotion.satiety };
   })()`);
 
   /* 等 30 秒的状态轮询把"饿"判出来（多等一会儿留余量） */
@@ -153,7 +153,7 @@ app.whenReady().then(async () => {
   const sad = result.triggers.filter((item) => item.animationId === 'sad');
   const hungry = result.triggers.filter((item) => item.animationId === 'hungry');
   const moodInReason = /mood-low:(\d+(?:\.\d+)?)/.exec(sad.map((item) => item.reason).join(' '));
-  const hungerInReason = /hunger-high:(\d+(?:\.\d+)?)/.exec(hungry.map((item) => item.reason).join(' '));
+  const satietyInReason = /satiety-low:(\d+(?:\.\d+)?)/.exec(hungry.map((item) => item.reason).join(' '));
   result.sad = sad;
   result.hungry = hungry;
 
@@ -166,11 +166,11 @@ app.whenReady().then(async () => {
     nothingHungryBeforeBudget:
       result.triggersAfterSad.every((item) => item.animationId !== 'hungry') &&
       result.playedAfterSad.includes('hungry') === false,
-    // 预算用光 -> 情绪里 hunger 真的变成 100
-    hungerRecomputed: result.budgetPatch.hunger >= 60 && result.budgetPatch.mood > 25,
-    // 第二步：hunger >= 60 -> 演一次 hungry，而且理由里是真实读数
+    // 预算用光 -> 情绪里饱腹真的掉到 0
+    satietyRecomputed: result.budgetPatch.satiety <= 40 && result.budgetPatch.mood > 25,
+    // 第二步：饱腹 <= 40 -> 演一次 hungry，而且理由里是真实读数
     hungryFired: hungry.length === 1 &&
-      hungerInReason !== null && Number(hungerInReason[1]) >= 60,
+      satietyInReason !== null && Number(satietyInReason[1]) <= 40,
     hungryPlayed: result.played.includes('hungry'),
     // 两条都只演一次（持续越界只演一次）
     firedOnce: sad.length === 1 && hungry.length === 1,
