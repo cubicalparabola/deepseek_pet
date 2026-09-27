@@ -22,6 +22,8 @@ import type { TimelineStatusView } from './timeline-types';
 /* 一、开关与配置（默认全开，隐私相关的两项见上）                                  */
 /* -------------------------------------------------------------------------- */
 
+import type { HabitModel } from './habit-model';
+
 /**
  * 场景分类（视觉模型输出的**受控词表**）。
  *
@@ -77,6 +79,21 @@ export interface PerceptionSettings {
   readonly hideFromCapture: boolean;
   /** 屏幕采样间隔（毫秒）。 */
   readonly captureIntervalMs: number;
+  /**
+   * **模型复核间隔**（毫秒，默认 5 分钟）。
+   *
+   * 为什么需要它（用户实测后定的策略）：一次视觉调用约 1450~1700 token
+   * （系统提示词 + 整屏图 + 地址栏图 + 窗口列表），按 30 秒一次算就是
+   * **约 18 万 token/小时** —— 200,000/天的预算一小时就烧完，之后她只能退回
+   * "只看窗口名"的本地判断。而屏幕上的**场景**绝大多数时候并不会 30 秒变一次。
+   *
+   * 现在的规则（`perception-service.tick()`）：
+   * - 最上层**进程变了** → 立刻调模型（换了应用，值得重新看一眼）；
+   * - 否则距上次模型调用 ≥ 本值 → 调一次模型（兜底复核，防止同一窗口里换了内容）；
+   * - 其余采样仍然每 `captureIntervalMs` 记一条观察，只是**沿用上一次的模型判断**
+   *   （`mode: 'local'`，不主动开口）—— 时间线因此保持连贯，而几乎不花 token。
+   */
+  readonly modelRefreshMs: number;
   /** 截图宽度（高按屏幕比例），越小越省 token。 */
   readonly captureWidth: number;
   /**
@@ -133,6 +150,13 @@ export interface PerceptionSettings {
   /** 深夜提醒的起点小时（默认 1 点）。 */
   readonly lateNightHour: number;
   /**
+   * 几点之后可以"习惯建模"（把统计归纳成一段话，每天最多一次）。
+   *
+   * 与日记（22 点）/ 反思（23 点）一样是"当天结束前回顾一次"的口径，默认 22 点。
+   * 想立刻看结果不必等它 —— 设置面板里有「立刻建模」。
+   */
+  readonly habitModelHour: number;
+  /**
    * GPU「过热」阈值（摄氏度，默认 80）。
    *
    * 为什么放在感知设置里：这一条感知的是**这台机器本身**（`nvidia-smi` 读温度），
@@ -164,6 +188,8 @@ export const DEFAULT_PERCEPTION_SETTINGS: PerceptionSettings = {
   privacyMode: false,
   hideFromCapture: true,
   captureIntervalMs: 30000,
+  // 模型复核间隔 5 分钟：换了进程立刻看，否则 5 分钟兜底复核一次（省 token 的关键）
+  modelRefreshMs: 5 * 60000,
   captureWidth: 640,
   // 地址栏横条：默认开。它是"浏览网页被认成记笔记"这类误判最有效的解药，
   // 而代价只是每轮多一张几十 KB 的小图（且用完即弃，不落盘）。
@@ -186,6 +212,7 @@ export const DEFAULT_PERCEPTION_SETTINGS: PerceptionSettings = {
   quietHours: { start: 23, end: 8 },
   longSessionMinutes: 120,
   lateNightHour: 1,
+  habitModelHour: 22,
   // 80 度：N 卡默认温度墙通常在 83~90 度，80 度开始提醒还来得及降频/散散热
   overheatThresholdC: 80,
   sensitivityKeywords: ['密码', '银行', '支付', '身份证', '私密', 'password', 'bank', 'paypal', '1password'],
@@ -205,6 +232,7 @@ export interface PerceptionSettingsPatch {
   readonly privacyMode?: boolean;
   readonly hideFromCapture?: boolean;
   readonly captureIntervalMs?: number;
+  readonly modelRefreshMs?: number;
   readonly captureWidth?: number;
   readonly captureUrl?: boolean;
   readonly urlCaptureWidth?: number;
@@ -220,6 +248,8 @@ export interface PerceptionSettingsPatch {
   readonly quietHours?: { readonly start?: number; readonly end?: number };
   readonly longSessionMinutes?: number;
   readonly lateNightHour?: number;
+  /** 几点之后可以习惯建模（0~23）。 */
+  readonly habitModelHour?: number;
   readonly overheatThresholdC?: number;
   readonly sensitivityKeywords?: readonly string[];
   readonly sceneFixes?: readonly string[];
@@ -233,8 +263,21 @@ export interface PerceptionSettingsPatch {
 export interface ScreenObservation {
   readonly at: string;
   readonly scene: SceneKind;
-  /** 模型判定的应用名（用于习惯统计与敏感词匹配）。 */
+  /**
+   * 应用名 —— 但它是**稳定身份**，不是"模型随口给的名字"。
+   *
+   * 取值优先级（`vision.ts` 与本地降级路径都遵守）：
+   *   1. 最上层窗口的**进程名**（`msedge` / `Code` / `PlantsVsZombies.exe`）—— 稳定；
+   *   2. 拿不到进程名时才用模型读出来的 app。
+   *
+   * 为什么必须稳定：同一个程序在不同时刻会被模型读成不同字符串
+   * （实测：`PVZ Universe` / `Plants Vs. Zombies Universe` / `植物大战僵尸 Universe`
+   * 是同一个游戏），拿这种字符串当身份会让"今天用了什么"彻底散架
+   * （时间线被切碎、`byApp` 列成好几行）。友好名字放 `appLabel`。
+   */
   readonly app: string;
+  /** 展示用的友好应用名（模型给的，可能为空）。界面优先显示它、回退到 `app`。 */
+  readonly appLabel?: string;
   /** 一句话在做什么。 */
   readonly activity: string;
   /**
@@ -300,23 +343,61 @@ export interface PresenceState {
   readonly stranger?: boolean;
 }
 
-/** 3.6 习惯画像（按小时统计场景分布）。 */
+/**
+ * 3.6 习惯画像（按小时统计场景分布）。
+ *
+ * ## v2：从"逐次观察计数"改成"**窗口内的观察日期**"
+ *
+ * 第一版只有 `小时 -> 场景 -> 次数`（次数 = 观察次数），实测有四个问题：
+ *   1. 门槛形同虚设 —— 两个采样（约 1 分钟）就能让她说"按你平时的习惯"；
+ *   2. 没有遗忘 —— 三个月前的 10 点和昨天的 10 点权重完全一样，作息改了要等很久；
+ *   3. `latestActiveHour` 是历史最大值，只增不减，"通常几点还在"会长期偏晚；
+ *   4. 不区分工作日/周末，也不看应用（周六 10 点和周三 10 点是同一格）。
+ *
+ * 现在：桶是 `"<weekday|weekend|*>|<小时>"`，值是该场景**在哪几天**被看到（日期数组）。
+ *
+ * ⚠️ 为什么存"日期"而不是"衰减后的权重"：先试过指数衰减（×0.95/天），
+ * 结果"连续 3 天"的权重只有 2.85 —— **任何按"天"表达的门槛都会被衰减搞错**，
+ * 而且小数天数没法向用户解释。窗口模型则是精确的：
+ * "最近 21 天里有 6 天在工作日 10 点写代码"，**遗忘就是窗口滑动**，一眼看得懂。
+ *
+ * 旧文件（`version` 缺失或 1）由 `sanitizeHabits()` 迁移：计数按 `activeDays` 截断，
+ * 并在 `lastActiveDate` 之前合成同样多的日期，装进 `*`（不分平日周末）这一档 ——
+ * 见 `HABIT_KIND_ANY`，读的时候会先查具体档、再退回 `*` 档，所以旧数据不会被浪费。
+ */
 export interface HabitProfile {
-  /** `hour(0~23) -> scene -> 次数`。 */
-  readonly hours: Record<string, Record<string, number>>;
-  /** 有数据的小时数（用于"学得够不够"）。 */
+  /** 结构版本：`2` = 当前；缺失或 1 = 早期的"逐次观察计数"。 */
+  readonly version: number;
+  /**
+   * `"<weekday|weekend|*>|<小时>"` -> 场景 -> **观察到的日期**（`YYYY-MM-DD`，升序去重）。
+   *
+   * 天数 = 数组长度；窗口外的日期会被 `learnHabit` 剪掉（这就是遗忘）。
+   * 天数用 `habitCounts()` 取（不要自己 `.length`，那样会把窗口规则漏掉）。
+   */
+  readonly seen: Record<string, Record<string, readonly string[]>>;
+  /** 同上的 key -> 应用名 -> 观察到的日期（"这个点一般在用 VS Code"）。 */
+  readonly apps: Record<string, Record<string, readonly string[]>>;
+  /** 最近 `HABIT_WINDOW_DAYS` 天每天的作息（滚动窗口，"通常几点在线"由它算）。 */
+  readonly daily: Record<string, HabitDayEntry>;
+  /** 有数据的小时数（不分平日周末去重）。 */
   readonly observedHours: number;
-  /** 采样总数。 */
+  /** 观察总数（展示用，**不是**直方图的单位）。 */
   readonly samples: number;
-  /** 有记录的天数。 */
+  /** 历史累计活跃天数。 */
   readonly activeDays: number;
-  /** 学到的"通常几点还在"（最晚有活动的整点）。 */
+  /** 最近窗口内的"通常几点还在"（`daily` 里 latest 的中位数，没有 = null）。 */
   readonly latestActiveHour: number | null;
-  /** 学到的"通常几点开始用电脑"。 */
+  /** 最近窗口内的"通常几点开始用"。 */
   readonly earliestActiveHour: number | null;
   /** 最近活跃日期（YYYY-MM-DD，用于算 activeDays）。 */
   readonly lastActiveDate: string;
   readonly updatedAt: string;
+}
+
+/** 某一天的最小作息（用于滚动窗口）。 */
+export interface HabitDayEntry {
+  readonly latestHour: number;
+  readonly earliestHour: number;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -329,12 +410,12 @@ export interface InterventionRecord {
   readonly kind:
     | 'greeting'
     | 'long-session'
-    | 'late-night'
     | 'scene-change'
     | 'sensitive'
     | 'presence'
     | 'stranger'
     | 'habit'
+    | 'small-talk'
     | 'error-help';
   readonly reason: string;
   readonly text: string;
@@ -354,8 +435,16 @@ export interface PerceptionStatus {
     readonly activeDays: number;
     readonly latestActiveHour: number | null;
     readonly earliestActiveHour: number | null;
-    /** 当前小时最常做的事（学出来的）。 */
+    /** 当前小时最常做的事（学出来的；按当前是工作日/周末分档）。 */
     readonly typicalNow: SceneKind | null;
+    /** 上面那次判定用的是哪一档（`weekday` / `weekend` / `*`）。 */
+    readonly typicalKind: 'weekday' | 'weekend' | '*';
+    /** 作息滚动窗口里有几天的数据（"通常几点在线"就是这些天的中位数）。 */
+    readonly recentDays: number;
+    /** 遗忘窗口的长度（天）：窗口外的观察会被丢掉，面板展示"多久会忘掉旧习惯"）。 */
+    readonly windowDays: number;
+    /** 习惯模型（把统计归纳成一段话；`null` = 还没建模过）。 */
+    readonly model: HabitModel | null;
   };
   readonly lastIntervention: InterventionRecord | null;
   readonly interventionsToday: number;
@@ -475,6 +564,8 @@ export function sanitizePerceptionSettings(
     privacyMode: bool(record.privacyMode, fallback.privacyMode),
     hideFromCapture: bool(record.hideFromCapture, fallback.hideFromCapture),
     captureIntervalMs: num(record.captureIntervalMs, fallback.captureIntervalMs, 5000, 3600000),
+    // 下限 30 秒：比采样间隔还短就没有意义（每个采样点都调模型 = 没省下来）
+    modelRefreshMs: num(record.modelRefreshMs, fallback.modelRefreshMs, 30000, 86400000),
     captureWidth: num(record.captureWidth, fallback.captureWidth, 160, 1920),
     captureUrl: bool(record.captureUrl, fallback.captureUrl),
     urlCaptureWidth: num(record.urlCaptureWidth, fallback.urlCaptureWidth, 640, 3840),
@@ -493,6 +584,7 @@ export function sanitizePerceptionSettings(
     },
     longSessionMinutes: num(record.longSessionMinutes, fallback.longSessionMinutes, 10, 1440),
     lateNightHour: num(record.lateNightHour, fallback.lateNightHour, 0, 6),
+    habitModelHour: num(record.habitModelHour, fallback.habitModelHour, 0, 23),
     // 40~110：低于 40 度等于"一直过热"（开机就演），高于 110 度则永远等不到
     overheatThresholdC: num(record.overheatThresholdC, fallback.overheatThresholdC, 40, 110),
     sensitivityKeywords: keywords,

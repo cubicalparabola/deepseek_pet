@@ -1,0 +1,10 @@
+{
+  "name": "todo-plugin",
+  "displayName": "待办清单",
+  "version": "1.0.0",
+  "description": "输入时间与要做的事，到点由桌宠提醒（气泡 + 系统通知 + remind 动画）；随时打勾或删除",
+  "author": "ds_pet",
+  "main": "index.ts",
+  "permissions": ["ui", "notify", "mail"],
+  "private": true
+}

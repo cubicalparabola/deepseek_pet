@@ -3,18 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <!--
-      聊天窗口页面（2.1 大模型对话的唯一输入口）。
+      聊天窗口页面（大模型对话的唯一输入口）+ 小纸条 + 文件。
 
       为什么单独一个窗口：桌宠窗口是透明、无边框、点击穿透的"活体图层"，
       里面放输入框既看不见也会被 `setIgnoreMouseEvents` 吃掉焦点。
-      聊天是有历史、要滚动、要打字的交互，天然属于普通窗口。
+      聊天与收纳夹都是有历史、要滚动、要打字的交互，天然属于普通窗口。
+
+      为什么"小纸条/文件"是这个窗口里的页签、而不是再开一个窗口：
+      它们都需要**列表 + 滚动 + 打开文件**，正是这里已有的东西；
+      多一个窗口就多一套 html/css/preload 与构建产物，收益却只是"少一个页签"。
 
       安全基线：与设置窗口一致 —— 不联网、不 eval，只允许本地样式与脚本。
-      大模型调用一律在主进程完成（密钥不进渲染进程）。
+      大模型调用一律在主进程完成（密钥不进渲染进程）；
+      文件内容也由主进程读好再递过来（img-src 只开了 data:，页面读不到磁盘）。
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'none'; connect-src 'none'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+      content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src data:; connect-src 'none'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
     />
     <title>和鲸鱼娘说话</title>
     <link rel="stylesheet" href="./chat.css" />
@@ -34,30 +39,150 @@
       </div>
     </header>
 
-    <!-- 状态条：把"她现在的状态"摆在最上面，解释她为什么这样说话（2.3 的可视化） -->
-    <div id="status-bar" class="status-bar">
-      <span id="mood-line">心情 —</span>
-      <span id="hunger-line">饿 —</span>
-      <span id="token-line">token —</span>
-    </div>
+    <!--
+      视图切换（聊天 / 交互 / 日记）；未读数直接画在「交互」页签上。
 
-    <main id="messages" class="messages" aria-live="polite"></main>
+      「交互」= **邮件式收件箱**：她记的事、插件投递的消息与文件都在这一页
+      （2026-09 需求把原来的「小纸条」与「文件」两页合并成它）。
+    -->
+    <nav id="tabs" class="tabs" role="tablist">
+      <button id="tab-chat" class="tab tab-active" type="button" role="tab">聊天</button>
+      <button id="tab-notes" class="tab" type="button" role="tab">
+        交互
+        <span id="notes-badge" class="badge-count" hidden>0</span>
+      </button>
+      <button id="tab-diary" class="tab" type="button" role="tab">日记</button>
+    </nav>
 
-    <div id="empty-hint" class="empty-hint">
-      <p>还没有聊过天。</p>
-      <p class="muted">点下面的输入框跟她说句话吧。</p>
-    </div>
-
-    <!-- 出错时给一条可读的提示（例如密钥无效），而不是静默降级 -->
-    <div id="error-bar" class="error-bar" hidden></div>
-
-    <footer class="composer">
-      <textarea id="input" rows="2" placeholder="跟她说句话…（Enter 发送，Shift+Enter 换行）"></textarea>
-      <div class="composer-actions">
-        <button id="speak-up" type="button" class="ghost">让她说句话</button>
-        <button id="send" type="button" class="primary">发送</button>
+    <!-- ============================ 视图一：聊天 ============================ -->
+    <section id="view-chat" class="view">
+      <!-- 状态条：把"她现在的状态"摆在最上面，解释她为什么这样说话（2.3 的可视化） -->
+      <div id="status-bar" class="status-bar">
+        <span id="mood-line">心情 —</span>
+        <span id="hunger-line">饿 —</span>
+        <span id="token-line">token —</span>
       </div>
-    </footer>
+
+      <main id="messages" class="messages" aria-live="polite"></main>
+
+      <div id="empty-hint" class="empty-hint">
+        <p>还没有聊过天。</p>
+        <p class="muted">点下面的输入框跟她说句话吧。</p>
+      </div>
+
+      <!-- 出错时给一条可读的提示（例如密钥无效），而不是静默降级 -->
+      <div id="error-bar" class="error-bar" hidden></div>
+
+      <footer class="composer">
+        <textarea id="input" rows="2" placeholder="跟她说句话…（Enter 发送，Shift+Enter 换行）"></textarea>
+        <div class="composer-actions">
+          <button id="speak-up" type="button" class="ghost">让她说句话</button>
+          <button id="send" type="button" class="primary">发送</button>
+        </div>
+      </footer>
+    </section>
+
+    <!-- ===================== 视图二：交互（邮件式收件箱） =====================
+         2026-09 需求："把交互式纸条和文件合并，做成类似邮件的内容"。
+
+         所以这里**不再有单独的「文件」页签**：一条消息 = 发件人 + 主题 + 正文 + 附件，
+         文件以附件的形式挂在消息下面（也可以单独删某个附件）。
+         没被任何消息引用的文件归成一封「未归档的文件」—— 合并之后它们不该消失。
+
+         用户仍然只能看、不能留言：没有输入框，只有「让她记一件」与「收纳文件…」。
+         日记**不在这里**：它单独一页（视图三）。
+    -->
+    <section id="view-notes" class="view" hidden>
+      <div class="notes-head">
+        <p class="muted" id="notes-summary">收件箱还是空的。</p>
+        <div class="notes-head-actions">
+          <button id="notes-open-dir" type="button" class="ghost">打开文件夹</button>
+          <button id="notes-refresh" type="button" class="ghost">刷新</button>
+          <button id="notes-read" type="button" class="ghost">全部已读</button>
+          <button id="notes-clear" type="button" class="ghost">清空</button>
+        </div>
+      </div>
+
+      <div id="notes-list" class="notes" tabindex="-1" aria-live="polite"></div>
+
+      <footer class="composer">
+        <p class="muted notes-tip">
+          这里只有她自己（或插件）放进来的东西，你不能留言。删掉一条消息会连同它的附件一起删；
+          单独删附件就点附件那一行的「删除」。
+        </p>
+        <div class="composer-actions">
+          <button id="file-import" type="button" class="ghost">收纳文件…</button>
+          <button id="note-compose" type="button" class="primary">让她记一件</button>
+        </div>
+      </footer>
+    </section>
+
+    <!-- ============================ 视图三：日记 ============================
+         日记原来是托盘 AI 子菜单里的两项（看今天的日记 / 打开日记目录）。
+         2026-09 需求把那块子菜单删掉，日记搬到这里 —— 和设置窗口的 AI 面板
+         共用同一批 IPC，所以两边看到的永远是同一份。
+    -->
+    <section id="view-diary" class="view" hidden>
+      <div class="notes-head">
+        <p class="muted" id="diary-summary">还没有写过日记。</p>
+        <div class="notes-head-actions">
+          <button id="diary-open-dir" type="button" class="ghost">打开日记目录</button>
+          <button id="diary-write" type="button" class="primary">写今天的日记</button>
+        </div>
+      </div>
+
+      <div id="diary-list" class="notes" tabindex="-1" aria-live="polite"></div>
+
+      <!-- 正文按需展开（清单里只有摘要；正文由主进程读本地文件后递过来） -->
+      <div id="diary-detail" class="diary-detail" hidden>
+        <header class="diary-detail-head">
+          <strong id="diary-detail-title">日记</strong>
+          <span id="diary-detail-meta" class="muted"></span>
+          <span class="preview-spacer"></span>
+          <button id="diary-detail-close" type="button" class="ghost">收起</button>
+        </header>
+        <pre id="diary-detail-body" class="diary-detail-body"></pre>
+      </div>
+    </section>
+
+    <!-- ========================= 视图四：插件面板 ==========================
+         插件（TODO / 课程表 / 番茄钟…）自己的界面，挂在聊天窗口里而不是另开窗口：
+         它需要的正是这里已有的东西 —— 列表、滚动、打字、以及一个常驻的输入焦点区。
+
+         面板 HTML **由插件提供**，先过 `sanitizePluginHtml` 净化再渲染：
+         只留下展示型标签 + 两种声明式交互（`data-plugin-action` 按钮、
+         `data-plugin-field` 输入控件），没有脚本；页面 CSP 是 `script-src 'self'`，
+         所以就算净化漏了 `<script>` 或 `onclick=`，浏览器也不会执行。
+         点一下、输一行，都只把"动作 id + 字段快照"交回主进程转给插件。
+    -->
+    <section id="view-plugin" class="view" hidden>
+      <div class="plugin-head">
+        <strong id="plugin-panel-title">插件面板</strong>
+        <span id="plugin-panel-from" class="plugin-from"></span>
+      </div>
+
+      <div id="plugin-panel-body" class="plugin-body" tabindex="-1" aria-live="polite"></div>
+
+      <footer class="composer">
+        <p class="muted plugin-hint">
+          这一段内容来自插件：点里面的按钮、或在输入框里回车，都会交回给插件处理。
+        </p>
+      </footer>
+    </section>
+
+    <!-- 文件预览浮层：文本直接显示、图片直接显示、其它交给系统程序 -->
+    <div id="preview" class="preview" hidden>
+      <div class="preview-box" role="dialog" aria-modal="true" aria-labelledby="preview-name">
+        <header class="preview-head">
+          <strong id="preview-name">文件</strong>
+          <span id="preview-meta" class="muted"></span>
+          <span class="preview-spacer"></span>
+          <button id="preview-open" type="button" class="ghost">用系统程序打开</button>
+          <button id="preview-close" type="button" class="ghost">关闭</button>
+        </header>
+        <div id="preview-body" class="preview-body"></div>
+      </div>
+    </div>
 
     <script type="module" src="./chat.js"></script>
   </body>

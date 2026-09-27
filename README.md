@@ -27,7 +27,7 @@ npm run verify:alpha    # 逐条核验素材是否真的带 alpha（在 Chromium
 npm run verify:visual   # 验证运行时画面边缘是否真正透明
 npm run verify:console  # 核验日志字节层（UTF-8 合法且可逐字还原）
 npm run logs           # 实时查看日志（推荐；中文必定正常，见 §17）
-npm run acceptance      # 端到端验收（275 项检查）
+npm run acceptance      # 端到端验收（391 项检查）
 npm run pack            # electron-builder 打包成未安装目录（快速验证）
 npm run dist            # electron-builder 生成 Windows NSIS 安装包
 ```
@@ -35,12 +35,32 @@ npm run dist            # electron-builder 生成 Windows NSIS 安装包
 启动后：
 
 - 桌宠出现在主屏右下角，**透明、无边框、始终置顶**，默认大小 60%（288×384）；
-- **可调整大小**：托盘或右键菜单 →「调整大小…」**直接打开设置窗口**，用滚动条连续调节（20%–250%，步进 5%），
+- **可调整大小**：托盘或右键菜单 →「设置…」→ 顶部滚动条连续调节（20%–250%，步进 5%），
   拖动即时生效并自动写入 `assets/config/settings.json`，重启后保持；
-- 左键点击不同部位触发不同动画（头部/耳朵/肚子/尾巴），双击玩耍；
+- 左键点击随机播放一个互动反应（`cute` / `fawning` / `stroke`，不再区分身体部位），双击不再播放动画；
 - 按住左键拖动可移动桌宠（超过 5px 位移才判定为拖动）；
-- 右键弹出原生上下文菜单；托盘图标提供 显示/隐藏、大小、置顶、**播放动画（测试）**、暂停/恢复行为、重载插件、设置、退出；
-- **「播放动画（测试）」菜单列出全部 27 个动画**（按优先级排序，含标签与 id），点任意一条即刻试放 —— 这是第一版最直接的动画测试入口；
+- **交互（邮件式收件箱）**：她**保存重要事情**的地方，也是**插件交货**的地方。
+  一条消息 = 发件人（她 / 某个插件）+ 主题 + 正文 + **0..N 个附件** + 时间 + 已读/未读；
+  入口在托盘/右键菜单的「交互…」（带未看条数）或聊天窗口的「交互」页签。
+  **只能看、不能留言**：可以标记看过、清空、**逐条删除**（连同附件一起删）、**单独删某个附件**、
+  查看/用系统程序打开附件；她记东西的来源是她自己（点「让她记一件」），
+  文件来源是「收纳文件…」或插件投递（`context.mail.send`，见 §8）。
+  没被任何消息引用的文件归成一封**「未归档的文件」**，不会被藏起来；
+- **日记页签**：每天到点她自己写一篇（也可以点「写今天的日记」立刻写），
+  列表按日期倒序、点「看正文」展开全文，另有「打开日记目录」。
+  日记**不进收件箱**（只写 `data/diary/`）；它原来是托盘 AI 子菜单里的两项，
+  2026-09 需求把那一块子菜单删掉、搬进了这个窗口；
+- **单击托盘图标 = 弹出菜单**，菜单最上面几行就是她的属性（**心情与饱腹各占一行**）：
+  `心情 83/100（很开心）`、`饱腹 100/100（很饱）`、`token 本次 43 · 累计 43/200000`、
+  `感知：写代码 · 在电脑前`、`记得的经历 N 段 · 一起 N 天`（有未读纸条时也会提示）。
+  显示/隐藏桌宠仍然是菜单里的两项（左键不再是"切换显示"，改为把菜单弹出来）；
+- 托盘菜单与桌宠右键菜单是**同一份模板**（条目与顺序完全一致，由 `buildMainTemplate()` 保证）；
+  菜单只放**日常动作**：显示/隐藏、收起（贴边）、**交互…**（带未看条数）、
+  **播放动画（测试）**、插件、设置…、退出。
+  所有**配置项**都在设置窗口里：调整大小、总是置顶、拖到边缘自动收起、插件管理（安装/卸载/启停）、
+  打开配置目录、感知的全部开关与日志、情绪重置、AI 与成长设置（含**记忆宫殿**与日记，
+  菜单里不再重复这些条目）；
+- **「播放动画（测试）」菜单列出全部 28 个动画**（按优先级排序，含标签与 id），点任意一条即刻试放 —— 这是第一版最直接的动画测试入口；
 - 关闭窗口不会退出程序，桌宠继续驻留托盘。
 
 ---
@@ -55,7 +75,8 @@ Main Process
   ├── TrayManager          系统托盘 + 原生菜单（托盘菜单 / 右键菜单 / 设置入口）
   ├── SettingsWindowManager 设置窗口（滚动条调大小，即时生效 + 自动保存）
   ├── IpcManager           IPC 白名单中枢（唯一跨进程通道清单）
-  ├── PluginManager        插件发现 / TS 编译 / 生命周期编排
+  ├── PluginManager        插件发现 / TS 编译 / 生命周期编排 / 权限解析 / 启停写盘
+  ├── PluginRuntime        插件运行期能力（HTTP 代发 / 子进程与 Python / 定时器 / 通知 / 面板与菜单注册表）
   └── Application          生命周期、异常兜底、bootstrap 握手
           │
           │ preload（contextBridge）+ IPC
@@ -67,9 +88,13 @@ Renderer Process（桌宠窗口）
   ├── ActionManager     统一 Action Pipeline（守门 + 分发）
   ├── BehaviorManager   行为调度（随机动画池：按显示状态取池，见 §10）
   ├── InteractionManager 鼠标互动（命中区域、点击、拖拽）
-  ├── PluginHost        插件沙箱宿主 + PluginContext 注入
+  ├── PluginHost        插件沙箱宿主 + PluginContext 注入（启停即回收）
   └── PetLayers         渲染图层（video 双缓冲 / image 静态图）
 ```
+
+**插件界面（第三类窗口内容）**：插件的面板渲染在**聊天窗口**的插件页签里（`src/chat/`
++ `src/shared/plugin-panel-html.ts` 的净化器），插件自己跑在桌宠窗口的渲染进程，
+两边只通过 Main 中转"HTML 快照 + 点击动作" —— 插件拿不到第二个窗口的 DOM。
 
 **职责边界（整个项目最重要的约束）**
 
@@ -105,7 +130,7 @@ desktop-pet/
 │   │   └── settings.ts
 │   └── shared/          跨进程契约：事件、动画/状态/Action/插件类型、IPC、协议
 ├── assets/
-│   ├── animations/      27 个**带 alpha 的** VP9 WebM 动画素材
+│   ├── animations/      28 个**带 alpha 的** VP9 WebM 动画素材
 │   │   └── source-premultiplied/   原始预乘黑底素材备份（转换脚本自动生成）
 │   ├── brand/           ds.png（美术原图）+ ds.ico（原图自带的多尺寸 ICO）
 │   └── config/
@@ -113,10 +138,13 @@ desktop-pet/
 │       ├── plugins.json      插件开关与路径
 │       ├── media-meta.json   素材分辨率（用于推导窗口宽高比）
 │       └── settings.json     用户设置（尺寸 / 置顶），由程序写入
-├── plugins/
-│   ├── examples/        hello-plugin / random-action-plugin
+├── plugins/             插件目录（运行时读写）
+│   ├── todo-plugin/     **随包的第一个真插件**：待办清单（输入时间与事件，到点她提醒）
 │   └── types/           desktop-pet.d.ts（插件类型垫片，给 IDE 用）
+│                        装更多插件走设置窗口「插件 → 安装插件…」
 ├── build/               图标等打包资源（由 npm run assets 生成）
+├── data/                AI 认知层数据（记忆 / 日记 / 小纸条 / 心情 / 感知 / 反思 / AI 设置）
+│                        默认写在这里而不是 C 盘；**不进版本库**（含 API Key），见 §11.1
 ├── tools/               构建、素材预处理与验收脚本
 └── dist/                构建产物
 ```
@@ -155,7 +183,7 @@ getDefinition(animationId): AnimationDefinition | null
 
 ### 4.2 Manifest 驱动，不写死
 
-动画信息全部来自 `assets/config/animations.json`（27 条），**行为策略**来自
+动画信息全部来自 `assets/config/animations.json`（28 条），**行为策略**来自
 `assets/config/behavior.json`（显示状态 -> 默认动画 + 随机池 + 间隔）：
 
 ```json
@@ -196,15 +224,17 @@ Manifest 在加载时会做校验：重复 ID、未知 `type`、非法 `source`�
 
 | 分类 | 数量 | 成员 | 谁来决定播它 |
 | --- | --- | --- | --- |
-| `state` 状态动画 | 3 | idle / lie / watch | 显示状态的**默认动画**（idle=正常、lie=下方收起、watch=右侧收起） |
-| `random` 随机动画 | 10 | roll / hot / sleep / peek / bomb / play / shake / sing / spin / swim | BehaviorManager 按池随机（正常 25–60 秒；收起只有 1 个候选且 3–8 分钟） |
+| `state` 状态动画 | 3 | idle / sleep / watch | 显示状态的**默认动画**（idle=正常、sleep=下方收起、watch=右侧收起） |
+| `random` 随机动画 | 10 | roll / hot / lie / peek / bomb / play / shake / sing / spin / swim | 正常状态由 BehaviorManager 按池随机（25–60 秒）；`lie` / `peek` 由收起时的**随机小动作**触发（见 §10.2） |
 | `trigger` 触发动画 | 11 | catch_down / catch_right / hungry / remind / talk / sad / shy / offline / overheat / work / read | 事件触发（见 §4.5） |
 | `click` 点击动画 | 3 | cute / fawning / stroke | 用户点击；**不可打断** |
 
 #### 4.2.2 显示状态（收起 / 隐藏）
 
-拖到屏幕**右边缘或下边缘** -> 收起：贴平边缘、默认动画换成 `watch`（右侧）/ `lie`（下方），
-随机池缩到只剩一个候选且间隔更长。**拖动离开边缘**或**点一下她**即展开
+拖到屏幕**右边缘或下边缘** -> 收起：贴平边缘、默认动画换成 `watch`（右侧）/ `sleep`（下方），
+收起期间**没有随机池**——她安静维持默认姿势，只按"随机小动作"在默认姿势里插一小段
+（`sleep` 中随机时刻趴一会儿 `lie`、`watch` 阶段偷看 `peek`）。
+**拖动离开边缘**或**点一下她**即展开
 （展开是**就地站立**：播完收尾段直接留在边缘，位置一动不动）。
 托盘/右键的「收起（贴边）」与「隐藏桌宠」是两个不同的状态：
 前者仍在屏幕上、仍可交互，后者窗口直接藏起来（情绪衰减也按"看不到主人"算）。
@@ -456,15 +486,17 @@ ffmpeg 滤镜链（`tools/convert-alpha.mjs`）：
 
 | 入口 | 操作 |
 | --- | --- |
-| 托盘/右键 → **调整大小…** | **直接打开设置窗口**（没有中间层子菜单）：滚动条连续调节（20%–250%，步进 5%），拖动即生效并立刻写盘；菜单项标签上顺带显示当前尺寸 |
+| 托盘/右键 → **设置…** → 顶部滚动条 | 滚动条连续调节（20%–250%，步进 5%），拖动即生效并立刻写盘 |
+| 设置窗口 → **恢复默认大小** | 一键回到 100%（一个按钮，不再占用菜单） |
 | 插件 / 未来的设置界面 | `window.petAPI.settings.setScale(0.8)`（走同一条写盘路径） |
 
 > 需求明确"**只保留拖动改变大小**"，因此体型档位（迷你/小/中/大/超大）已**移除**：
 > 滚动条能拖出任意 5% 步进的值，档位 radio 在 85% 这种非档位值上只能全部不勾选，
 > 两套入口并存只会带来歧义。
 >
-> 同时按需求把「桌宠大小」从**子菜单**改成**一个直接点击的菜单项** ——
-> 之前要"展开子菜单 → 点调整大小"两步，现在一步到设置窗口。
+> 「调整大小…」这一项**已经从菜单里删掉**（2026-09 需求）：它属于配置，
+> 点「设置…」进去就是同一根滚动条，菜单里那一项只是把用户多绕一层。
+> 同一批搬进设置窗口的还有：总是置顶、拖到边缘自动收起、重载插件、打开配置目录。
 
 ### 设置窗口（`src/settings/` + `main/settings-window-manager.ts`）
 
@@ -480,8 +512,25 @@ ffmpeg 滤镜链（`tools/convert-alpha.mjs`）：
 
 安全上，设置窗口与桌宠窗口**共用同一份 preload 产物**，靠命令行参数
 `--pet-window=settings` 区分角色：设置窗口只拿到 `window.settingsAPI`
-（`setScale` / `setAlwaysOnTop` / `openConfigFolder` / `close` / `onChanged`），
+（`setScale` / `setAlwaysOnTop` / `setDockOnEdge` / `reloadPlugins` /
+`openConfigFolder` / `close` / `onChanged`），
 **拿不到 `window.petAPI`**（验收里有断言）。
+
+设置窗口顶部的「外观与行为」一组控件（2026-09 需求：配置从菜单搬进来）：
+
+| 控件 | 作用 | 走哪条 IPC |
+| --- | --- | --- |
+| 滚动条 + 恢复默认大小 | 20%–250% 连续调大小 | `SettingsWindowSetScale` |
+| 总是置顶 | 盖在其它窗口之上 | `SettingsWindowSetAlwaysOnTop` |
+| **拖到边缘自动收起** | 关掉后她可以停在屏幕中间、不贴边 | `SettingsWindowSetDockOnEdge` |
+| **插件面板**（列表 / 开关 / 权限 / **安装…** / **卸载** / 重新发现） | 装插件、卸插件、随时启停 | `PluginInstall` / `PluginUninstall` / `SettingsWindowSetPluginEnabled` / `SettingsWindowReloadPlugins` |
+| 打开配置目录 | 在文件管理器里打开 `assets/config/` | `SettingsWindowOpenConfig` |
+
+> 这四条以前都在托盘/右键菜单里。搬家的理由：它们都是**调一次就不动的配置**，
+> 留在菜单里既占位置，又把"和她说句话"这类日常动作挤到下半屏；
+> 现在菜单只放日常动作，点「设置…」能找到全部配置。
+> 感知那一整块（隐私模式、看我在做什么、立刻采样、感知日志、摄像头授权、
+> 习惯模型）也都在设置窗口的「环境与用户感知」面板里，菜单不再重复。
 
 细节：
 
@@ -608,15 +657,36 @@ interface PluginContext {
   state: PluginStateAPI;       // get / is / onChange / list（只读）
   actions: PluginActionAPI;    // execute(PetAction) —— 与 AI Agent 同一条管线
   behavior: PluginBehaviorAPI; // pause / resume / isPaused
-  system: PluginSystemAPI;     // getVersion / getPlatform / showNotification / log
+  system: PluginSystemAPI;     // getVersion / getPlatform / showNotification / log / openExternal
   storage: PluginStorageAPI;   // get / set / remove / keys（按插件命名空间隔离）
+  lifecycle: PluginLifecycleAPI; // permissions / has() / onDispose()（停用即回收）
+  timers: PluginTimerAPI;      // after / every / cancel —— **主进程计时**
+  net: PluginNetAPI;           // request / json                —— 权限 net
+  process: PluginProcessAPI;   // run / which                   —— 权限 process
+  python: PluginPythonAPI;     // available / run               —— 权限 python
+  notify: PluginNotifyAPI;     // send / onClick                —— 权限 notify
+  mail: PluginMailAPI;         // send(主题+正文+附件)           —— 权限 mail
+  ui: PluginUIAPI;             // 菜单项 / 聊天窗口面板 / say    —— 权限 ui
   logger: Logger;
   plugin: { id, name, version, ... };
   pluginDir: string;
 }
 ```
 
-插件**不能**访问：`BrowserWindow`、`ipcMain`、`require`（除虚拟模块 `desktop-pet`）、`process`、`fs`、`path`、Electron internals。
+`timers` / `net` / `process` / `python` / `notify` / `mail` / `ui` 是**按权限开放的系统能力**：
+权限写在插件自己的 `package.json`（`"permissions": ["net", "notify"]`），
+用户还能在 `assets/config/plugins.json` 里收窄（只减不增），执法点在主进程
+（`src/main/plugin-runtime.ts`）—— 渲染层根本没有"联网/起进程/发通知"的能力
+（CSP 是 `connect-src 'none'`，模板也读不到磁盘）。
+
+插件**不能**访问：`BrowserWindow`、`ipcMain`、`require`（除虚拟模块 `desktop-pet`）、`process`、`fs`、`path`、
+以及 `window` / `document` / `fetch` / `XMLHttpRequest` / `localStorage` / `window.petAPI`、Electron internals。
+后面这几个浏览器全局是在沙箱模块体里显式声明成 `undefined` 的：否则插件可以绕过 `PluginContext`
+直接调用桌宠的 IPC 面，权限声明就成了摆设。桌宠窗口另外拦了 `will-navigate` 与 `window.open`。
+
+**详细的接口清单、"八个想做的插件够不够"的逐条核实、以及还没实现的能力（`context.fs` /
+`context.secrets`）见 [`docs/plugins.md`](docs/plugins.md)。**
+
 
 **沙箱实现（一个值得说明的设计点）**：页面 CSP 是 `script-src 'self' blob:`，**没有** `unsafe-eval`，
 所以 `new Function` / `eval` 会被 CSP 直接拒绝。插件代码因此以 **blob ES module** 形式执行：
@@ -631,7 +701,7 @@ Main 进程把插件编译成自包含 CommonJS → Renderer 把代码内联进�
 
 | 场景 | 编译方式 |
 | --- | --- |
-| 开发 / 源码运行 | 运行时用 esbuild 编译 `.ts` 插件（改完代码点「重载插件」即可生效） |
+| 开发 / 源码运行 | 运行时用 esbuild 编译 `.ts` 插件（改完代码点设置窗口的「重载插件」即可生效） |
 | 打包运行 | 读取构建阶段由 `tools/build-plugins.mjs` 生成的 `dist/plugins/<path>/index.js` |
 
 两条路径产出格式完全一致，`PluginHost` 只有一条执行路径。
@@ -652,24 +722,114 @@ deactivatePlugin(id): boolean
 reloadPlugin(id): Promise<PluginCodePayload | null>
 unloadPlugin(id): boolean
 getLoadedPlugins(): readonly PluginRecord[]
+/* 运行期启停与权限（"插件可随时关闭"的那一半） */
+setPluginEnabled(id, enabled): PluginToggleResult   // 写回 plugins.json + 重新发现
+getPluginRecords(): readonly PluginRecord[]         // 含被关掉的插件
+getEffectivePermissions(id): readonly PluginPermission[]
+getDiscoveredPlugins(): readonly DiscoveredPlugin[]
 ```
 
-**插件异常隔离**：`activate()` 用 try/catch + 5s 超时保护；失败时回滚该插件的全部事件订阅、标记为 `failed` 并记录日志，不影响桌宠核心与其他插件。
+`PluginHost`（Renderer 进程）公开：
 
-### 8.3 启用 / 停用
+```ts
+bootstrap(plugins): Promise<void>
+enablePlugin(entry): Promise<boolean>        // 单个启用（现场取代码 + activate）
+disablePlugin(id): Promise<boolean>          // 单个停用（回收一切 + 下线菜单与面板）
+deactivate(id): Promise<boolean>
+reloadAll(entries): Promise<void>            // 整体重载
+applyEnabledCommand(id, enabled, entry)      // Main 下发的启停指令
+handleUIEvent(event)                         // 菜单点击 / 通知点击 / 面板动作
+handleTimerTick(pluginId, timerId, kind)     // 主进程定时器到点
+getLoadedPlugins(): readonly PluginRecord[]
+deactivateAll(): void
+```
 
-`assets/config/plugins.json`：
+**插件异常隔离**：`activate()` 用 try/catch + 5s 超时保护；失败时回滚该插件的全部事件订阅、
+回收它已登记的资源、标记为 `failed` 并记录日志，不影响桌宠核心与其他插件。
+
+### 8.3 启用 / 停用（可随时关闭，不用重启）
+
+`assets/config/plugins.json`（**随包只登记一个插件**：`todo-plugin` 待办清单，见 §8.5；
+原先两个示例插件 `hello-plugin` / `random-action-plugin` 已按需求卸载并删掉源码）：
 
 ```json
 {
   "plugins": [
-    { "id": "hello-plugin", "path": "examples/hello-plugin", "enabled": true },
-    { "id": "random-action-plugin", "path": "examples/random-action-plugin", "enabled": false }
+    { "id": "pomodoro-plugin", "path": "pomodoro-plugin", "enabled": true },
+    { "id": "search-plugin", "path": "search-plugin", "enabled": false, "permissions": ["net"] },
+    { "id": "builtin-thing", "path": "vendor/builtin-thing", "enabled": true }
   ]
 }
 ```
 
-改 `enabled` 即可启停，**核心程序无需修改**（托盘菜单「重载插件」可热重载）。
+- `enabled`：开关。改文件可以，但**不必手改** —— 设置窗口的「插件」面板与托盘菜单的
+  「插件」子菜单都能点，点了立刻生效并写回这个文件；
+- `path`：相对 `plugins/` 的目录。**没有 `/` 的（就在 `plugins/` 根下一层）算"用户安装的"，
+  可以一键卸载**；带层级的（如 `vendor/builtin-thing`）视为随包内置，卸载会被拒绝；
+- `permissions`（可选）：**用户额度**，只减不增 —— 写了就与插件 `package.json` 里声明的取交集，
+  可以用来"插件留着，但先不给它联网"；
+- 被关掉的插件仍然会出现在设置窗口与菜单里（状态 `disabled`），否则用户就"关得掉、开不回来"。
+
+关掉一个插件时按顺序发生（`PluginHost.disablePlugin` + `PluginRuntime.revoke`）：
+
+```text
+Main:     写盘 -> 收回权限 -> 清主进程定时器 -> 杀掉它的子进程 -> 下线菜单项与面板
+Renderer: 退订事件 -> 取消定时器 -> 跑 onDispose 回调 -> 调它自己的 deactivate()
+```
+
+两个刻意的顺序：**先回收 Main 侧资源再通知渲染层**（渲染层卡住也不影响回收）、
+**先退订事件最后才调 `deactivate()`**（插件收尾时不该还能收到事件）。
+再打开 = 现场取代码 + `activate()`，只动这一个插件，不打断其它插件。
+
+「重载插件」按钮仍然存在（整体重载）：它会**先向主进程要最新清单**再全部重来，
+所以新放进 `plugins/` 的插件与刚被关掉的插件都能立刻反映出来。
+
+### 8.3.1 安装 / 卸载插件
+
+设置窗口「插件」面板上有两个按钮：**「安装插件…」**（弹原生目录选择框）与每张卡片右下角的 **「卸载」**。
+
+```text
+安装：选一个插件文件夹 -> Main 校验（package.json + 能解析出入口 + 规模上限）
+      -> 复制进 plugins/<id>/ -> 登记到 plugins.json（enabled: true）-> 立刻启用
+卸载：停用（连带回收定时器/子进程/菜单/面板）-> 删除 plugins/<id>/ -> 从清单移除 -> 清掉它的存储
+```
+
+几条刻意定下的规则：
+
+| 规则 | 为什么 |
+| --- | --- |
+| 安装的是**文件夹**，不是 `.zip` | 插件就是"一个入口 + 若干资源"，没有依赖树；复制最可解释，用户能自己打开看、改、删 |
+| 必须有 `package.json` 且入口能解析 | 否则用户挑到 `C:\` 这种目录也会被当成插件；入口候选表与发现器**共用同一份** |
+| 文件数 > 2000 或体积 > 64MB 直接拒绝 | 一眼能看出"选错目录了"，不必复制到一半才发现 |
+| 不复制 `node_modules` / `.git` / `.vscode` / `__pycache__`，也不复制**符号链接** | 前者是垃圾，后者可能指向插件目录之外（留一个后门） |
+| 覆盖安装 = **升级**（只对用户安装的插件） | `plugins/examples/*` 是随程序发布的内置示例，绝不被覆盖 |
+| 卸载只允许删 `plugins/` **根下一层**的目录 | 内置示例删了会破坏随包内容；要删它们请直接改仓库 |
+| 卸载会清掉插件的 localStorage 与 `data/plugins/<id>/` | "卸载"应当等于"干净地消失" |
+| 覆盖安装时会**先失效代码缓存、再停后开** | 否则渲染层以"已经加载过"跳过，跑的还是旧代码（现象是"装了没变化"） |
+
+> 自动化入口：`install(directory)` 可以显式给路径（验收脚本用），不传才会弹框；
+> 卸载失败时会把插件**放回停用前的状态**，不会出现"点了一下卸载、插件反而被停了"。
+
+### 8.3.2 界面：菜单项与面板
+
+插件想被用户"叫起来"、想展示内容，有两条受控通道（权限 `ui`）：
+
+| 通道 | 用法 | 出现在哪 |
+| --- | --- | --- |
+| 菜单项 | `context.ui.registerMenuItem({ id, label, checked }, handler)` | 托盘 / 右键菜单的「插件」子菜单，按插件分组；点击回流给插件 |
+| 面板 | `context.ui.registerPanel({ id, title, html, onAction })` | 聊天窗口的插件页签（普通窗口、能滚动、能打字） |
+
+面板是**声明式**的：一段被净化的 HTML + `data-plugin-action="id"` 按钮 + `data-plugin-field="name"`
+输入控件。点一下就把**整个面板的字段快照**交给插件，插件返回新 HTML 即刷新；
+面板里的 `<a href>` 由宿主代开系统浏览器（保留动作 `@open-external`，页面自身不导航）。
+净化器（`src/shared/plugin-panel-html.ts`）只放行展示型标签，`script` / `on*` / 非 `data:` 图片 /
+非 http(s) 链接一律剔除 —— 因为面板内容常常是插件刚从网上取回的**远程数据**。
+
+**为什么面板在聊天窗口而不是桌宠窗口**：桌宠窗口是透明、点击穿透、跟着宠物缩放的"活体图层"，
+放不下 TODO 列表与课程表；而聊天窗口已经有"列表 + 滚动 + 打字"（「交互」页签就是同一个模式的先例）。
+插件跑在桌宠窗口的渲染进程里，面板渲染在聊天窗口里 —— 两边通过 Main 中转 HTML 快照与点击事件，
+插件**拿不到**第二个窗口的 DOM。
+
 
 ### 8.4 写一个插件
 
@@ -707,39 +867,82 @@ export default definePlugin({
   "name": "hello-plugin",
   "displayName": "Hello 插件",
   "version": "0.1.0",
-  "main": "index.ts"
+  "main": "index.ts",
+  "permissions": ["net", "notify"]
+}
+```
+
+`permissions` 是**系统能力声明**（`net` / `process` / `python` / `notify` / `mail` / `ui`），
+不写就什么系统能力都拿不到；用户还能在 `plugins.json` 里进一步收窄。
+写一个"到点提醒我"的插件最短路径：
+
+```ts
+async activate(ctx: PluginContext) {
+  ctx.ui.registerMenuItem({ id: 'start', label: '开始 25 分钟', checked: false }, () => {
+    ctx.timers.after(25 * 60 * 1000, () => {
+      void ctx.notify.send({ title: '番茄钟', body: '时间到，休息一下' });
+    });
+  });
+  // 停用时宿主会自动取消定时器；这里只登记"非事件类"的收尾
+  ctx.lifecycle.onDispose(() => ctx.logger.info('番茄钟已停止'));
+  ctx.logger.info('权限：', { data: { permissions: ctx.lifecycle.permissions } });
 }
 ```
 
 在 IDE 里想要类型提示，把 `plugins/types/desktop-pet.d.ts` 加入你的工程即可
 （插件不需要把主工程作为依赖安装；运行时 `desktop-pet` 由沙箱提供）。
 
-内置示例：
+### 8.5 随包的插件：待办清单（`plugins/todo-plugin`）
 
-| 插件 | 作用 |
+第一个真插件，也是**唯一的随包插件**（`plugins.json` 里就它一条，`enabled: true`）。
+它是"插件系统够不够用"的活证据 —— **主程序一行没改**，全靠 `PluginContext`：
+
+| 需求 | 用了哪个接口 |
 | --- | --- |
-| `hello-plugin` | 监听 `pet:click` / `animation:end` / `state:change`，统计点击数（持久化），每 5 次点击请求播放 `talk` |
-| `random-action-plugin` | 定时在空闲时随机请求一个动画（走 `actions.execute`），验证 Action Pipeline 与优先级裁决 |
+| 输入**时间 + 事件** | `ui.registerPanel`：`data-plugin-field="text"` + `<input type="datetime-local">`，外加「15 分钟后 / 1 小时后 / 3 小时后 / 不设提醒」快捷按钮 |
+| 到点**提醒** | `timers.after`（**主进程计时**，窗口隐藏也不降频）→ `ui.say` 冒泡说话 + `notify.send` 系统通知 + `animations.play('remind')`（动画被仲裁拒绝也不影响前两者） |
+| 随时**打勾 / 删除** | 每行三个按钮：`完成 / 恢复`、`+10 分钟`、`删除` |
+| 记住清单 | `storage`（按插件命名空间隔离；停用/卸载后数据仍在，重新启用就回来） |
+| 入口 | `ui.registerMenuItem`（托盘「插件」子菜单，标签实时显示"N 条未完成"）+ 点系统通知 `notify.onClick` 打开面板 |
+| 导出 | `mail.send`：清单以 `todo.md` 附件投进「交互」收件箱 |
+
+已知边界（都是宿主/平台的取舍，不是缺接口）：
+
+- 面板是**声明式 HTML、没有脚本**：每次重画都按插件给的 HTML 重建，所以"没提交的输入框草稿"会在重画时丢；
+- 桌宠**没在运行**时到点不会响 —— 只能在运行期间提醒，并在下次启动时把"早就过点、还没提醒过"的补提醒一次；
+- 时间输入的粒度是**分钟**（`datetime-local` 本身如此）。
+
+> 计划中的另外几个（课程表 / GitHub / 论文 / 网页搜索 / 新闻 / Python / 番茄钟）
+> 还没写：接口核实结论、权限清单、面板协议，以及"已经留出但还没实现"的能力
+> （`context.fs` / `context.secrets`）见 [`docs/plugins.md`](docs/plugins.md)。
 
 ---
 
 ## 9. 鼠标互动
 
-- **命中区域**：`InteractionManager` 把归一化坐标映射为 `head / face / ear / body / belly / skirt / legs / tail / outside`，可通过 `regions` 参数调整分区；
-- **点击** → `pet:click` 事件 + Action（按区域选择动画：头部 `cute`、耳朵/尾巴 `fawning`、身体/腿 `stroke`）；
-- **双击** → `pet:double-click` → `play`；
-- **右键** → 原生上下文菜单（显示当前区域、当前动画、插件列表、显示/隐藏、暂停行为、重载插件、打开配置目录、设置、退出）；
+- **命中区域**：`InteractionManager` 把归一化坐标映射为 `head / face / ear / body / belly / skirt / legs / tail / outside`，可通过 `regions` 参数调整分区（**仅用于命中判定与右键菜单展示**）；
+- **点击** → `pet:click` 事件 + Action（**不再按区域区分动画**：从 `cute` / `fawning` / `stroke` 里随机挑一条，且会避开正在冷却的那条）；
+- **双击** → `pet:double-click`（**不再触发动画**：它仍算一次互动，但没有可等的互动动画）；
+- **右键** → 原生上下文菜单（与托盘菜单**完全相同**：属性读数（心情与饱腹各占一行）、显示/隐藏、收起（贴边）、交互、播放动画（测试）、插件、设置、退出）；
 - **拖动** → 超过 5px 阈值才判定为拖动，通过 IPC 移动窗口；长按（>900ms）不视为点击；窗口位置会被约束至少保留 60px 可见。
 
 ---
 
-## 10. 行为系统（随机动画池）
+## 10. 行为系统（随机池 + 随机小动作）
 
 `BehaviorManager` **只产生 Action Request**，绝不直接播放视频：
 
 ```ts
 { type: 'animation', animationId: 'roll', reason: 'random-pool:normal-random', source: 'behavior' }
 ```
+
+它管两种**不同**的自动行为（都由 `assets/config/behavior.json` 驱动）：
+
+| | 随机池 `pools` | 随机小动作 `fidget` |
+| --- | --- | --- |
+| 何时发生 | 她**空闲**（没有动画在播）时 | **默认姿势正在循环**的过程中 |
+| 做什么 | 挑一条自己播，播完回默认 | 打断默认姿势（先播它的 `end`），播 N 轮小动作，**回到同一个默认姿势** |
+| 现状 | 正常状态 25–60 秒 | 下方收起：`sleep` 中插 `lie`；右侧收起：`watch` 中插 `peek`（3–8 分钟随机） |
 
 ### 10.1 池 + 显示状态（数据驱动）
 
@@ -748,23 +951,103 @@ export default definePlugin({
 
 | 显示状态 | 默认动画 | 随机池 | 间隔 |
 | --- | --- | --- | --- |
-| 正常 `normal` | idle | roll / hot / bomb / lie / play / shake / sing / spin / swim（9 个） | 25–60 秒 |
-| 下方收起 `docked-bottom` | lie | sleep（只有 1 个） | 3–8 分钟 |
-| 右侧收起 `docked-right` | watch | peek（只有 1 个） | 3–8 分钟 |
+| 正常 `normal` | idle | roll / hot / bomb / play / play_tail / shake / sing / spin / swim（9 个） | 25–60 秒 |
+| 下方收起 `docked-bottom` | sleep | **无池** —— 见 §10.2 的 `fidget` | — |
+| 右侧收起 `docked-right` | watch | **无池** —— 见 §10.2 的 `fidget` | — |
 | 隐藏 `hidden` | 不播 | 无 | — |
 
-收起状态的间隔刻意做成正常状态的 5~10 倍（需求："收起宠物的随机动画分别只有一个，
-随机时间触发，注意触发时间要比正常状态下的时间长"）。
+> 心情 `<= 25` 时，正常状态的池子内容会被整体换成 `sad`（见 §10.3）——间隔与收起状态都不变。
+
+### 10.4 用户习惯：从统计到"她眼里的你"
+
+感知层会顺手学你的作息（3.6），产出**两层**东西：
+
+| 层 | 内容 | 落盘 | 触发 |
+| --- | --- | --- | --- |
+| **统计** | `平日/周末 × 小时 × 场景 -> 看到它的日期` + 主要应用 | `data/perception/habits.json` | 每次认出来的观察（默认 30s） |
+| **模型** | 把统计归纳成一段话 + 一句能说出口的话 | `data/perception/habit-model.json` | 每天 `habitModelHour`（默认 22 点）后一次，或点「立刻建模」 |
+
+统计口径的四条规矩（都是"她学到的必须是你**现在**的习惯"）：
+
+- **按天计数**：同一天同一小时同一场景只记一次日期（所以"这个点通常…"至少要跨 3 天才说）；
+- **遗忘 = 21 个使用日的滑动窗口**：按"运行过的日子"算 —— **没启动的日子不占名额**，出差回来习惯不会丢；
+- **作息可回落**：「通常几点在线」取最近 21 个使用日的**中位数**，不是历史极值；
+- **分平日/周末 + 记应用**：`工作日 10 点 → 写代码（Code）`，旧数据落在"平时"这一档。
+
+**习惯模型会调用大模型**（没配密钥 / 关掉对话开关时退回本地模板，并在面板写明原因）。
+分工是刻意划死的：**条目（几点、在做什么、几天）由本地纯函数算出，模型只负责措辞** ——
+这样它编不出数字。详细设计与已知限制见 [`docs/habit-learning.md`](docs/habit-learning.md)。
+
+收起状态没有随机池：她的"换姿势"由随机小动作负责（间隔刻意做成正常状态的 5~10 倍，
+需求："收起宠物的随机动画分别只有一个，随机时间触发，注意触发时间要比正常状态下的时间长"）。
+
+### 10.2 随机小动作（收起时的 `lie` / `peek`）
+
+需求：`lie` 要在 **sleep 过程中随机时刻**触发 —— 先播完 `sleep` 的 `end`，再播**随机数量**的
+`lie`，然后继续 `sleep`；`peek` 同理，但**只有 `watch` 阶段才能触发**。
+
+配置长在状态上（`behavior.json`）：
+
+```jsonc
+"docked-bottom": {
+  "defaultAnimation": "sleep",
+  "pools": [],
+  "fidget": { "animations": ["lie"], "intervalMs": [180000, 480000], "loopCountRange": [1, 3] }
+}
+```
+
+触发门槛写在 `BehaviorManager.tickFidget()` 里：**当前播的就是该状态的默认动画、且已经在 `loop` 段**。
+于是"`sleep` 过程中"与"`watch` 阶段"这两条语义是同一行代码，不需要靠状态机的巧合去表达。
+不在门槛内就把排期清零（下次真正进入默认姿势时**重新随机**一个时刻，不会"攒着"立刻插一段）。
+
+顺序完全靠既有的三段式仲裁实现，没有新增播放机制：
+
+```text
+sleep(loop) --fidget 到点--> sleep(end) --> lie ×N --> 回 IDLE --> resumeFallbackLoop --> sleep(loop)
+```
+
+`lie` / `peek` 是**三段式**动画，`loopCountRange` 决定"随机数量"（`resolvePlayLoopCount`）。
+播完能回到 `sleep` / `watch`，靠的是"动画结束 -> 回 IDLE -> 接回当前显示状态的默认动画"这条链路。
 
 三条实现约定：
 
 - **换状态就换池并重新排期**：收起时不该继承"正常状态已经等了一半"的计时
   （否则刚收起就蹦一下，很怪）；
-- **只在 `IDLE` 状态触发**（`onlyWhenIdle`）：她正在演反应/说话时不打断；
+- **只在 `IDLE` 状态触发**（池的 `onlyWhenIdle`）：她正在演反应/说话时不打断；
+  **随机小动作相反** —— 它本来就只在"默认姿势正在循环"时发生；
 - **全局冷却**（池的 `cooldownMs`）避免多个池在同一秒一起触发。
 
 想加随机动画：把 id 加进池的 `animations` 即可（清单里不存在的 id 会被过滤并告警）。
-托盘「暂停行为」会同步暂停整个随机池与插件的随机动作。
+想改收起时的"换姿势"：改对应状态的 `fidget`（同理会过滤不存在的 id）。
+托盘「行为暂停」（隐藏桌宠时自动进入）会同步暂停整个随机池、随机小动作与插件的随机动作。
+
+### 10.3 心情过低：随机池整体变成 `sad`
+
+需求："在心情低于阈值的时候，所有随机池的动画都变成 `sad`，高于阈值再变回来，
+收起状态的动画不受影响"。
+
+配置在 `behavior.json` 顶层：
+
+```jsonc
+"sadPool": { "enabled": true, "moodBelow": 25, "animation": "sad" }
+```
+
+| | 说明 |
+| --- | --- |
+| 判定 | `心情 <= moodBelow` 生效，`> moodBelow` **立刻**恢复（单一阈值，不做迟滞） |
+| 换什么 | 只换**池里挑出来的那条动画**；`intervalMs` / `cooldownMs` / `onlyWhenIdle` 全部照旧 |
+| 不换什么 | **默认姿势**（`idle`/`sleep`/`watch`）与**随机小动作**（`lie`/`peek`）—— 收起状态完全不受影响 |
+| 阈值为什么是 25 | 与 `pet-triggers.ts` 的 `SAD_MOOD_THRESHOLD` 同值（`moodLabel()` 的"很难过"那一档），否则会出现"UI 说她很难过、随机动作却还在打滚" |
+
+数据流：心情的真相在主进程（要持久化、按在场状态衰减），渲染层只缓存一个读数 ——
+`refreshAISurfaces()` 会把 AI 状态推给桌宠窗口，`Renderer.wireMoodMirror()` 收到后写入
+`this.mood`，`BehaviorManager` 每次 `rebuild()` / `tick()` 据此决定池子里放什么。
+跨过阈值时会**立刻重建**（而不是等下一个 25–60 秒的触发点）。
+
+`sad` 这条动画如果没在清单里（被删了），规则自动失效并记一条 warning ——
+不会留下一个"永远挑不出动画"的空池。
+
+端到端验证见 `tools/probe-sad-pool.cjs`（真写一份 `mood: 18` 的 `emotion.json` 再启动）。
 
 ### 关于「眨眼」（功能已整体移除）
 
@@ -785,6 +1068,13 @@ export default definePlugin({
 
 ## 11. 未来 AI Agent 接口
 
+> AI 认知层本身**已经落地**（聊天 / 日记 / 反思 / 小纸条 / 感知），细节见 §11.1、
+> [`docs/memory.md`](docs/memory.md)（记忆分层与保留期）、
+> [`docs/habit-learning.md`](docs/habit-learning.md)（用户习惯学习：学什么、怎么学、用在哪）与
+> [`docs/timeline-continuity.md`](docs/timeline-continuity.md)（「今天在做什么」为什么断断续续：
+> 真机数据对账、推理模型吃光 max_tokens 的根因、以及每日预算 vs 采样频率的取舍）。
+> 本节讲的是"AI 怎么驱动桌宠"的那条 Action 通道。
+
 架构已经就位，接入 AI 时**不需要改动桌宠核心**：
 
 ```text
@@ -804,6 +1094,59 @@ await context.actions.execute({ type: 'animation', animationId: 'coffee', priori
 // 注意：source 会被 PluginHost 强制改写成 plugin:<id>，防止伪造来源
 ```
 
+### 11.1 AI 认知层：数据放哪、记得什么、什么时候问模型
+
+**数据目录（重要）**：记忆、日记、小纸条、心情、感知、反思、AI 设置默认写在
+**项目目录下的 `data/`**，不再放 C 盘。解析顺序（`src/main/data-dir.ts`）：
+
+1. 环境变量 `DESKTOP_PET_AI_DATA_DIR`（验收/调试隔离用）；
+2. **`<appRoot>/data`**（默认）；
+3. `userData`（`%APPDATA%\DesktopPet`）—— 仅当项目目录不可写（Program Files、只读盘）时兜底，并记 warning。
+
+首次以"项目目录"启动时会把老的 `%APPDATA%\DesktopPet` 里的数据**一次性复制**过来
+（源文件保留作安全网，之后不再重复迁移）。`data/` 已在 `.gitignore` 里
+（里面含 `ai-settings.json`，有 API Key）。
+
+> `logs/` 与 Chromium 缓存仍留在 `userData`：它们是**诊断**而不是记忆。
+
+**什么时候调用大模型**（网络只发生在主进程，渲染进程 CSP `connect-src 'none'`）：
+
+| 时机 | 频率 | 用途 |
+| --- | --- | --- |
+| 用户发一条聊天 | 每条 | 回复；每 6 轮额外做一次"整理"（抽取事实 + 滚动摘要） |
+| **模型主动调用 `recall_memory`** | 由模型决定（每条聊天最多 2 轮） | 用户提到"上次/之前/那个项目"时，把记忆宫殿里命中的经历回传 |
+| 写日记 | 每天一次（`diaryHour` 后，启动补写） | 生成当天日记（有活动才写）——**只写 `diary/`，不再复制进小纸条** |
+| 反思 | 每天一次（`reflectionHour` 后） | 反馈统计 + 心情曲线 → 洞见 → 收紧感知频率 |
+| 感知的视觉判断 | 换了应用立刻一次；同一应用最多每 5 分钟一次（`modelRefreshMs`，可在设置里调）；中间的采样沿用上一次判断、**不花 token** | 截图的 base64（不落盘）交视觉模型判断"主人在干嘛" |
+| 小纸条「让她记一件」 | 手动触发 | 生成一条她自己记的纸条 |
+| 闲聊（她主动开口） | 受频率闸门 + 安静模式限制 | 问候 / 最近的事 / 你的习惯；**候选话头本地生成**，不是每次都问模型 |
+
+**记忆宫殿不再每轮注入提示词**：它作为工具 `recall_memory(query)` 暴露给模型
+（`src/main/ai/tools.ts`），本地用 bigram 打分检索（`src/shared/memory-recall.ts`），
+取命中的前 3 段回传；查不到就明确说"没有相关经历"，避免编造。
+模型/网关不认 `tools` 时（HTTP 400/404）会自动**去掉工具重试一次**，聊天不会整条失败。
+
+**推理模型的两个坑（都已处理，实测踩过）**：
+
+1. **`max_tokens` 会被思考吃光**。本机 `deepseek-flash` 每次回答前先写 600~1000 字
+   reasoning，而视觉那条只给了 360 token → 正文被截断或整段为空，
+   那一次采样**什么都没记下来**（时间线出现空洞，实测约 1/3 的采样）。
+   现在所有"短输出"调用都带 `reasoning_effort: 'none'`（视觉 53~57 token / 0.75s），
+   并且空内容时自动把预算放大 3 倍**重试一次**；服务商不认这个字段时也会去掉重试。
+2. **省钱靠"窗口没变就别重复问"**：一次视觉调用 1450~1700 token，
+   30 秒一次 ≈ 18 万 token/小时（200,000/天的预算一小时就见底）。
+   现在换了应用立刻问、同一应用最多每 5 分钟问一次，中间的采样
+   **沿用上一次的判断**（`mode: 'local'`、`tokens: 0`）但照样记观察 ——
+   时间线不断、预算够用一整天。设置 →「采样与频率」→「模型复核间隔」可调。
+
+> 时间线为什么断断续续、推理模型怎么把预算吃光、以及"没认出来"的桥接口径，
+> 有一份带真机数据的完整复盘：[`docs/timeline-continuity.md`](docs/timeline-continuity.md)。
+
+**保留期**：流水会按天清理，结论不会。`keepMemoryDays`（默认 180 天，`0` = 永久）
+控制 `memory/events-*.jsonl`、`memory/chat-*.jsonl`、`memory/memory-log.md`；
+`profile.json` 里沉淀下来的事实与摘要**不随流水删除**。
+感知明细走 `retentionDays`（默认 90 天），反思走 `keepReflectionDays`（默认 180 天）。
+
 ---
 
 ## 12. 日志
@@ -814,11 +1157,12 @@ await context.actions.execute({ type: 'animation', animationId: 'coffee', priori
 [12:31:20] [AnimationManager] play coffee
 [12:31:24] [AnimationManager] ended coffee
 [12:31:24] [StateMachine] PLAYING -> IDLE
-[12:31:30] [PluginManager] activated hello-plugin
+[12:31:30] [PluginManager] activated pomodoro-plugin
 ```
 
 - 级别：`debug` / `info` / `warn` / `error`，`--dev` 或 `--debug` 开启 debug；
 - Main 进程同时写入文件：`%APPDATA%\DesktopPet\logs\desktop-pet.log`（超过 1MB 自动轮转，保留 2 份）；
+  日志留在 `userData` 而**不跟着记忆搬去 `data/`**（它是诊断，不是记忆，见 §11.1）；
 - Renderer 日志通过 IPC 汇总到 Main，因此在同一个终端/文件里能看到完整时序；
 - **日志系统本身绝不抛异常**，写失败静默。
 
@@ -883,6 +1227,10 @@ webPreferences: {
 `appRoot` 由多路探测确定（`resolveAppRoot`），不依赖 `app.getAppPath()` ——
 后者取决于 Electron 的启动方式（`electron tools/xxx.cjs` 会得到 `tools/`），作为路径基准并不可靠。
 
+**AI 数据目录**另行解析（`src/main/data-dir.ts`）：`DESKTOP_PET_AI_DATA_DIR` >
+`<appRoot>/data` > `userData`（兜底）。项目目录不可写时自动退回并记 warning，
+所以放在 Program Files 或只读盘上也不会写失败。详见 §11.1。
+
 ---
 
 ## 15. 验收
@@ -894,13 +1242,13 @@ npm run build
 npm run acceptance          # 等价于 electron tools/acceptance.cjs
 ```
 
-结果写入 `build/acceptance.json`，当前覆盖 **275 项检查，全部通过**：
+结果写入 `build/acceptance.json`，当前覆盖 **391 项检查，全部通过**：
 
 | 分组 | 覆盖内容 |
 | --- | --- |
 | 窗口 | 创建、不可缩放、始终置顶、可见 |
 | 进程隔离 | 无 require / process / module / Buffer、未暴露 ipcRenderer 与通用 invoke、petAPI 与 bootstrap 已注入 |
-| 运行时状态 | petApp 挂载、idle 兜底在播、状态机 PLAYING、27 个动画注册、2 个插件加载 |
+| 运行时状态 | petApp 挂载、idle 兜底在播、状态机 PLAYING、28 个动画注册、**随包 1 个插件（待办清单）激活** |
 | 媒体与透明素材 | WebM 解码、正在播放、loop、自定义协议加载、视频层为可见主渲染层、**未使用混合模式抠图**、四角 alpha=0、**角色区域 44% 完全不透明**、存在半透明软边 |
 | 切换不闪烁 | 视频层使用双缓冲、切换动画期间 **0 个无纹理帧 / 0 个空画面帧 / 视频层不消失** |
 | idle 循环 | loop 属性、时间轴持续前进、**跨越片尾回到开头**、循环期间不触发 `animation:end` |
@@ -908,11 +1256,18 @@ npm run acceptance          # 等价于 electron tools/acceptance.cjs
 | 不变形 | 长按 1.5s 画面尺寸恒定、无 `transform` 形变、`object-fit: contain`、**眨眼叠加层已移除（台面只剩 2 video + 1 img）**、静态图片图层保留 |
 | 尺寸可调 | 读取设置、60% / 130% 生效、越界夹取（2.5 / 0.2）、恢复 100%、窗口实际尺寸随设置变化、置顶可读写 |
 | 设置窗口 | 可打开、滚动条为 `range` 且范围覆盖 20%–250%、已注入 `settingsAPI`、**拿不到桌宠 `petAPI`**、回显当前比例、拖动后比例写入 `settings.json` 且真实改变桌宠尺寸、置顶开关生效、关闭后桌宠存活、**验收结束自动还原用户设置** |
+| 时间线连续性 | 空内容自动加大 max_tokens 重试一次、请求里关掉推理、同一程序永远同一个显示名（`msedge` → `Microsoft Edge`）、窗口没变就不重复调模型（0 次调用但仍记观察）、同进程内"没认出来"桥接不切段 |
+| 交互（邮件式收件箱）/ 日记 | 旧格式能迁移不丢（单数 `file` → `files` 数组、`author` → `sender`）、用户不能留言、**写日记不进收件箱**、能删消息（连同附件）与单删附件、把消息字段与附件数组的 JSON 对比（**不写死时间戳**）、**拒绝对目录外的名字**、三个页签互斥可来回切、未归档文件单独归类、日记页能展开正文、插件投递（`mail`）落盘并可读、预览浮层平时不显示 |
+| 心情 / 随机池 | 池内容随心情切换（`<=25` 只剩 `sad`、`26` 立刻恢复、关掉开关或动画名写空都不生效）、只换池不动 fidget 与默认姿势、**心情推送真的更新了渲染层镜像** |
+| 习惯学习 | 按天去重、21 个**使用日**的窗口遗忘（没启动不计入）、作息可回落、平日/周末分档 + 记应用、v1→v2 迁移（含坏数据）、习惯建模（模型只写措辞 / 模板兜底 / token 记账） |
+| 用量记账 | 所有大模型调用（含视觉理解与反思）都进账；本次运行按用途分档（真截图 + 假网关跑一次视觉调用） |
+| 时间线口径 | 合并只看场景、合段间隔 150 秒、换段补时（采样间隔不丢）、账目自洽（跨度 = 活动 + 空闲 + 没认出来/没采样）、应用**身份**用进程名（模型给的名字只作显示） |
+| 托盘 | 菜单顶部属性信息（心情 / 饱腹 / token 本次与累计 / 感知 / 经历 / 未读纸条），且左右键菜单完全一致 |
 | 优先级 | 低优先级播放、高优先级抢占、同优先级拒绝、`interruptible:false` 拒绝抢占、冷却生效、**冷却期内手动播放仍可播放（bomb 可重复试放）而自动化来源被冷却拦住** |
 | Action Pipeline | animation / state / event 三类走通、重复状态与非法状态被拒绝、未注册动画与非法 Action 被拒绝 |
-| 状态机 | 动画开始联动 PLAYING、动画结束自动回 IDLE、5 个状态、白名单迁移、拒绝未知状态、迁移历史 |
+| 状态机 | 动画开始联动 PLAYING、动画结束自动回 IDLE、**4 个内置状态**、白名单迁移、拒绝未知状态、迁移历史 |
 | EventBus | on / off / once、同步与异步监听器异常隔离 |
-| 插件 | 两个示例插件激活、插件监听事件（点击计数持久化）、插件请求动画、activate 抛错隔离、handler 抛错隔离、异常后主程序存活 |
+| 插件 | 随包的待办插件激活、事件监听（点击计数持久化）、插件请求动画、activate 抛错隔离、handler 抛错隔离、异常后主程序存活、安装器装进来的探针插件立刻激活、**卸载等于干净消失**（清存储与 `data/plugins/<id>/`） |
 | 系统集成 | 托盘创建、右键菜单调用 |
 
 手动验证清单（无法自动断言的部分）：
@@ -924,7 +1279,13 @@ npm run acceptance          # 等价于 electron tools/acceptance.cjs
 - [ ] 重启程序后尺寸设置被记住；
 - [ ] 拖动桌宠跟手，且拖到屏幕边缘不会完全消失；
 - [ ] 托盘图标显示正常，菜单项点击有反应；
-- [ ] 右键菜单显示正确的「点击区域 / 当前动画」；
+- [ ] 右键菜单能弹出且各项可用（属性读数（心情/饱腹各一行） / 交互 / 播放动画 / 插件 / 显示隐藏 / 设置 / 退出；**没有** AI 子菜单与「查看记忆宫殿」）；
+- [ ] 设置窗口里能改大小、置顶、**拖到边缘自动收起**，能**安装/卸载/启停插件**、打开配置目录，能看记忆宫殿与日记；
+- [ ] 打开聊天窗口 →「日记」页签 →「写今天的日记」能写出当天一篇，点「看正文」能看到全文；
+- [ ] 托盘 →「插件」→「看待办清单…」能打开面板：写一件事 + 选时间 → 到点她**冒泡提醒**（还带系统通知与 remind 动作），打勾 / 恢复 / +10 分钟 / 删除都生效；
+- [ ] 打开聊天窗口 →「交互」→「收纳文件…」能弹出系统选择框，选完那条消息带着附件出现在收件箱里；
+- [ ] 点文件的「查看」：文本/图片能直接在窗口里显示；点「打开」能用系统程序打开；删掉后列表里消失；
+- [ ] 点某张纸条的「删除」：确认框写明"文件不会被删除"，删完纸条少了、文件还在；
 - [ ] 关闭窗口后程序仍在托盘驻留，可从托盘退出。
 
 其他脚本（`tools/`，非产品代码）：
@@ -961,6 +1322,16 @@ npm run acceptance          # 等价于 electron tools/acceptance.cjs
 | `probe-offline-overheat.cjs` | 断网与 GPU 过热：真 `nvidia-smi` 温度 + 真连不上的地址 -> `offline:network` |
 | `probe-sad-hungry.cjs` | 心情低与饿：真情绪状态（mood 18 / 预算用光）-> 真的演 sad 与 hungry |
 | `probe-triggers.cjs` | 没配密钥时启动就该演一次 offline，且正常心情/饿不会误触发 |
+| `probe-fidget.cjs` | 收起时的小动作：在 watch 状态下真的演出 `sleep → end → lie×N → sleep`（不是随机池） |
+| `probe-note-views.cjs` | 聊天窗口三个页签（聊天 / 交互 / 日记）互相切换时**只有一个可见**（计算样式级断言，防"叠在一起"回归） |
+| `probe-note-files.cjs` | 收件箱的附件真能看真能收：附件行画出三颗按钮、文本进 `<pre>`、图片真的解码（`naturalWidth > 0`）、点「删除」那一行消失、「收纳文件…」把选中的文件**复制**进来并记一条消息（源文件不动） |
+| `rebuild-timeline.mjs` | 用**产品里的同一份纯函数**重放 `observations-<日期>.jsonl` 重写 `timeline-<日期>.json`（修历史数据的碎片/漏时；观察记录不动） |
+| `probe-sad-pool.cjs` | 心情过低（真写一份 `mood: 18` 的 `emotion.json` 再启动）：正常状态的池子只剩 `sad`、间隔照旧；**收起后没有池、fidget 仍是 `sleep → lie`**，并且最终真的回到 `sleep` |
+| `probe-habit-model.cjs` | 习惯建模全链路（真机）：真写一份**旧格式** `habits.json` 再启动，断言迁移后条目落在"平时"档、一次真实模型调用被解析并落盘、token 记进预算（迁移本身的确定性断言在验收里） |
+| `probe-terminal-no-model.cjs` | 终端窗口里不调用大模型（隐私边界回归） |
+| `probe-timeline.cjs` | 「每天在做什么」端到端：周期观察 → 时间线区间 → `timeline-*.json` / `daily-*.md` 落盘（用本地假模型） |
+| `probe-palace-compress.cjs` | 记忆宫殿超期折叠归档 |
+| `probe-scene-unrecognized.cjs` | 无法识别场景时不自作主张 |
 | `diag-anim-system.cjs` | 动画系统 10 步诊断（分类、随机轮数、池、贴边、点击锁） |
 | `diag-perception-ui.cjs` | 感知面板 11 步诊断（开关、授权、日志、过热阈值、保留期落盘） |
 
@@ -1108,6 +1479,14 @@ release/win-unpacked/
     ├── plugins/          插件源码（可现场新增插件目录）
     └── build/            托盘与应用图标（必须在 asar 之外，nativeImage 读不到 asar 内的图片）
 ```
+
+**她的记忆 / 日记 / 小纸条存在哪？想清空重来怎么办？**
+
+默认在**项目目录的 `data/`**（首次启动会从 `%APPDATA%\DesktopPet` 一次性复制过来）。
+想完全重来：删掉 `data/` 即可 —— 迁移只会在 `userData` 里**没有** `.migrated-to-project`
+标记时发生，所以不会"删了又被复活"。
+只想清流水、不想丢事实：把「记忆保留天数」调小（或点面板里的强制清理），
+`memory/profile.json` 里的长期事实与摘要不会被删。
 
 **桌宠显示成黑色方块？**
 说明素材还是「预乘黑底」的原始版本，没有经过 alpha 烘焙。执行：

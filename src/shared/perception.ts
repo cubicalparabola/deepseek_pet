@@ -19,6 +19,7 @@
 
 import type {
   BehaviorSnapshot,
+  HabitDayEntry,
   HabitProfile,
   PerceptionSettings,
   SceneKind,
@@ -69,6 +70,96 @@ export const SCENE_LABELS: Readonly<Record<SceneKind, string>> = {
 
 export function sceneLabel(scene: SceneKind): string {
   return SCENE_LABELS[scene] ?? SCENE_LABELS.other;
+}
+
+/**
+ * 已知进程名 -> 稳定友好名（全部小写、不含 `.exe`）。
+ *
+ * 为什么需要这张表：观察里存着**两个**名字 —— `app` 是进程名（稳定身份），
+ * `appLabel` 是模型读出来的友好名（自由文本）。只按"友好名优先"显示，
+ * 同一个 Edge 会在时间线里变成三个名字（实测：
+ * `msedge` / `Microsoft Edge` / `Edge` 各占一行），看起来像三件不同的事。
+ * 表里有的就一律用表里的名字，于是**同一程序永远同一个名字**；
+ * 表里没有的（小众软件）才回退到模型读出来的那个名字。
+ *
+ * 只收"确定不会认错"的常见程序；宁可漏，不要错。
+ *
+ * 后半段是**别名**：13:11 之前的历史观察里 `app` 存的是模型读出来的名字
+ * （`Microsoft Edge` / `Edge`），它们不是进程名，但也该归到同一个显示名，
+ * 否则同一份时间线里新旧数据依然两种写法。
+ */
+const APP_FRIENDLY_NAMES: Readonly<Record<string, string>> = {
+  msedge: 'Microsoft Edge',
+  chrome: 'Google Chrome',
+  firefox: 'Firefox',
+  brave: 'Brave',
+  opera: 'Opera',
+  vivaldi: 'Vivaldi',
+  code: 'VS Code',
+  'code - insiders': 'VS Code Insiders',
+  cursor: 'Cursor',
+  devenv: 'Visual Studio',
+  pycharm64: 'PyCharm',
+  idea64: 'IntelliJ IDEA',
+  typora: 'Typora',
+  obsidian: 'Obsidian',
+  notion: 'Notion',
+  winword: 'Word',
+  excel: 'Excel',
+  powerpnt: 'PowerPoint',
+  wps: 'WPS',
+  windowsterminal: 'Windows Terminal',
+  wt: 'Windows Terminal',
+  powershell: 'PowerShell',
+  pwsh: 'PowerShell',
+  cmd: '命令提示符',
+  conhost: '命令提示符',
+  explorer: '文件资源管理器',
+  steam: 'Steam',
+  yuanbao: '腾讯元宝',
+  wechat: '微信',
+  weixin: '微信',
+  qq: 'QQ',
+  dingtalk: '钉钉',
+  feishu: '飞书',
+  lark: '飞书',
+  telegram: 'Telegram',
+  potplayer: 'PotPlayer',
+  potplayermini64: 'PotPlayer',
+  vlc: 'VLC',
+  spotify: 'Spotify',
+  /* ---- 别名（模型读出来的写法，历史数据里会直接出现在 `app` 里） ---- */
+  'microsoft edge': 'Microsoft Edge',
+  'ms edge': 'Microsoft Edge',
+  microsoftedge: 'Microsoft Edge',
+  edge: 'Microsoft Edge',
+  'google chrome': 'Google Chrome',
+  'visual studio code': 'VS Code',
+  vscode: 'VS Code',
+  'vs code': 'VS Code',
+  'windows terminal': 'Windows Terminal',
+  'command prompt': '命令提示符',
+  'file explorer': '文件资源管理器',
+  'windows explorer': '文件资源管理器',
+};
+
+/** 进程名归一化：小写、去空白、去 `.exe`（表与判定都用它）。 */
+export function normalizeProcessName(app: string): string {
+  return app.trim().toLowerCase().replace(/\.exe$/, '').trim();
+}
+
+/**
+ * 界面上显示的程序名（时间线、日报、日记共用同一个函数）。
+ *
+ * 优先级：**已知进程名的固定名字** > 模型读出来的友好名 > 进程名本身。
+ */
+export function appDisplayName(app: string, appLabel?: string): string {
+  const identity = app.trim();
+  const mapped = APP_FRIENDLY_NAMES[normalizeProcessName(identity)];
+  if (mapped !== undefined) return mapped;
+  const friendly = (appLabel ?? '').trim();
+  if (friendly !== '') return friendly;
+  return identity;
 }
 
 /** 模型可能返回的近义词 -> 受控词表（脏数据不能进习惯统计）。 */
@@ -621,12 +712,12 @@ export function withoutOwnWindows<T extends { readonly title: string }>(windows:
 export type InterventionKind =
   | 'greeting'
   | 'long-session'
-  | 'late-night'
   | 'scene-change'
   | 'sensitive'
   | 'presence'
   | 'stranger'
   | 'habit'
+  | 'small-talk'
   | 'error-help';
 
 export interface InterventionGateInput {
@@ -696,17 +787,23 @@ export function gateIntervention(input: InterventionGateInput): InterventionDeci
  *
  * | 干预 | 归属开关 |
  * | --- | --- |
- * | 久坐 / 深夜 / 场景变化 | `behavior` |
+ * | 久坐 / 场景变化 | `behavior` |
  * | 习惯预测 | `habits` |
+ * | 日常闲聊（问候 / 今天的活动 / 最近的事） | `behavior` 或 `habits`（任一开着就能说） |
  * | 敏感内容 | `screen` 或 `camera`（要么没采，要么别提） |
  * | 在场 / 陌生人 | `camera` |
  */
 export function isPlanEnabled(kind: InterventionKind, settings: PerceptionSettings): boolean {
   switch (kind) {
     case 'long-session':
-    case 'late-night':
     case 'scene-change':
       return settings.behavior;
+    case 'habit':
+      return settings.habits;
+    case 'small-talk':
+      // 闲聊的候选里既有"习惯询问"（habits）也有问候/今日活动（behavior），
+      // 所以两个开关打开任意一个都应该能说 —— 具体候选由调用方按开关过滤。
+      return settings.behavior || settings.habits;
     case 'habit':
       return settings.habits;
     case 'sensitive':
@@ -736,13 +833,18 @@ export interface InterventionPlan {
  * 根据观察结果规划一次干预；返回 null 表示"这次不需要打扰"。
  *
  * 优先级（高 -> 低）：
- *   敏感内容 > 深夜提醒 > 连续使用过久 > 场景变化打招呼 > 习惯预测
+ *   敏感内容 > 连续使用过久 > 场景变化打招呼 > 日常闲聊
+ *
+ * ⚠️ "日常闲聊"这一档**不新增开口机会**：它就是原来"习惯询问"那一档，
+ * 只是内容由调用方（`pickSmallTalk`）在问候 / 今天的活动 / 最近的事 /
+ * 习惯询问之间轮换 —— 频率完全由 `gateIntervention` 决定。
  */
 export function planIntervention(input: {
   readonly observation: ScreenObservation | null;
   readonly behavior: BehaviorSnapshot;
   readonly settings: PerceptionSettings;
-  readonly habitText?: string | null;
+  /** 这一次要说的日常闲聊（由 `buildSmallTalk` + `pickSmallTalk` 产出）。 */
+  readonly smallTalk?: { readonly kind: string; readonly text: string } | null;
   /** 上一个场景（用于判断"变化"）。 */
   readonly previousScene: SceneKind | null;
 }): InterventionPlan | null {
@@ -760,19 +862,7 @@ export function planIntervention(input: {
     };
   }
 
-  // 2) 深夜还在电脑前
-  //    注意：这一条**不需要模型**（只看本地时间），所以没有观察结果时也要能触发 ——
-  //    没配密钥的用户同样应该被提醒"该睡了"。
-  if (behavior.lateNight && (observation === null || observation.scene !== 'idle')) {
-    return {
-      kind: 'late-night',
-      text: `已经 ${behavior.hour} 点啦……我有点困了，你也早点休息吧。`,
-      animation: 'sleep',
-      hide: false,
-    };
-  }
-
-  // 3) 连续使用过久
+  // 2) 连续使用过久
   if (behavior.sessionMinutes >= settings.longSessionMinutes && behavior.idleSeconds < IDLE_THRESHOLDS.idle) {
     const hours = (behavior.sessionMinutes / 60).toFixed(1);
     return {
@@ -783,7 +873,7 @@ export function planIntervention(input: {
     };
   }
 
-  // 4) 场景变化：只在"从别的事换到新的事"且是新场景时打招呼
+  // 3) 场景变化：只在"从别的事换到新的事"且是新场景时打招呼
   if (
     observation &&
     input.previousScene !== null &&
@@ -799,12 +889,12 @@ export function planIntervention(input: {
     };
   }
 
-  // 5) 习惯预测（3.6）：只在她真的学到东西、且和"上一件事"不同的时候说
-  if (input.habitText) {
-    return { kind: 'habit', text: input.habitText, animation: 'talk', hide: false };
+  // 4) 日常闲聊（问候 / 今天的活动 / 最近的事 / 习惯询问 —— 轮换着说）
+  if (input.smallTalk) {
+    return { kind: 'small-talk', text: input.smallTalk.text, animation: 'talk', hide: false };
   }
 
-  // 6) 用户在做事时报错求助（3.2）：模型给了 suggestion 才说
+  // 5) 用户在做事时报错求助（3.2）：模型给了 suggestion 才说
   if (observation?.suggestion) {
     return {
       kind: 'error-help',
@@ -821,9 +911,68 @@ export function planIntervention(input: {
 /* 五、习惯学习（3.6）                                                         */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * 「不分平日/周末」这一档。
+ *
+ * 两个用途：
+ * 1. **旧数据迁移**：v1 的画像不知道那天是星期几，全部落到这一档；
+ * 2. **读取兜底**：查某个小时时先看当前档（weekday/weekend），没有再退回 `*`
+ *    —— 所以第一周（周末档还很薄）也不至于什么都说不出。
+ */
+export const HABIT_KIND_ANY = '*';
+
+/** 习惯桶的"日子类型"。 */
+export type HabitDayKind = 'weekday' | 'weekend' | typeof HABIT_KIND_ANY;
+
+/**
+ * 习惯窗口：保留最近这么多个**运行过的日子**。
+ *
+ * ⚠️ 单位是"她运行过的天数"，**不是日历天**：没启动程序的日子不占窗口名额，
+ * 所以出差一周回来，她学到的东西一点都不会少（需求："没启动则不会计入天数"）。
+ * 反过来说，遗忘只由"你还用不用它"驱动 —— 用得越多，旧作息被挤掉得越快。
+ *
+ * 这是"遗忘"的实现 —— **窗口滑动**，而不是给计数乘一个衰减系数。
+ * 两个理由：
+ *   1. 精确：先试过指数衰减（×0.95/天），结果"连续 3 天"的权重只有 2.85，
+ *      **任何按"天"表达的门槛都会被它搞错**；
+ *   2. 可解释：面板上写的是"最近 21 个使用日里有 6 天在工作日 10 点写代码"，
+ *      小数权重没法向用户交代。
+ *
+ * 同一个窗口既管"每个时段在哪几天被看到"，也管"通常几点在线"（`daily`）。
+ */
+export const HABIT_WINDOW_DAYS = 21;
+
+/** 该小时至少要有几天的数据，才允许开口说"按你平时的习惯…"。 */
+export const HABIT_MIN_DAYS = 3;
+/** 该小时里最多的那个场景至少要有几天，才算"稳定"，而不是"凑巧两次"。 */
+export const HABIT_MIN_SCENE_DAYS = 2;
+
+/** 习惯桶的 key：`"<weekday|weekend|*>|<小时>"`。 */
+export function habitBucketKey(kind: HabitDayKind, hour: number): string {
+  return `${kind}|${((Math.trunc(hour) % 24) + 24) % 24}`;
+}
+
+/** 某一天属于工作日还是周末（本地时区）。 */
+export function habitDayKindOf(at: Date | string | number = new Date()): HabitDayKind {
+  const date = at instanceof Date ? at : new Date(at);
+  if (Number.isNaN(date.getTime())) return HABIT_KIND_ANY;
+  const day = date.getDay();
+  return day === 0 || day === 6 ? 'weekend' : 'weekday';
+}
+
+/** `YYYY-MM-DD`（本地）。刻意不用 `toISOString()`：那会把晚上算到第二天。 */
+export function habitDayKey(at: Date | string | number = new Date()): string {
+  const date = at instanceof Date ? at : new Date(at);
+  if (Number.isNaN(date.getTime())) return '';
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
 export function emptyHabitProfile(now: string = new Date().toISOString()): HabitProfile {
   return {
-    hours: {},
+    version: 2,
+    seen: {},
+    apps: {},
+    daily: {},
     observedHours: 0,
     samples: 0,
     activeDays: 0,
@@ -834,13 +983,128 @@ export function emptyHabitProfile(now: string = new Date().toISOString()): Habit
   };
 }
 
+/** 中位数（偶数个取中间两个的平均后四舍五入）。 */
+function median(values: readonly number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 1) return sorted[mid] ?? null;
+  const a = sorted[mid - 1] ?? 0;
+  const b = sorted[mid] ?? 0;
+  return Math.round((a + b) / 2);
+}
+
+/** 两个日期之间差几天（本地口径，至少 0）。 */
+export function habitDaysBetween(from: string, to: string): number {
+  const a = Date.parse(`${from}T00:00:00`);
+  const b = Date.parse(`${to}T00:00:00`);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return 0;
+  return Math.max(0, Math.round((b - a) / 86400000));
+}
+
+/** 从某个日期往前推 n 天（`YYYY-MM-DD`）。 */
+export function habitDayKeyBefore(day: string, days: number): string {
+  const base = Date.parse(`${day}T00:00:00`);
+  if (!Number.isFinite(base)) return day;
+  return habitDayKey(new Date(base - days * 86400000));
+}
+
+/**
+ * 画像里"**她真的运行过**"的日子（倒序去重）。
+ *
+ * 三处日期合起来算：每个时段在哪几天被看到（`seen`）、应用（`apps`）、
+ * 每天的作息窗口（`daily`）。
+ *
+ * 为什么需要它：窗口的衡量单位是**有使用的天数**，不是日历天 ——
+ * 详见 `HABIT_WINDOW_DAYS`。
+ */
+export function habitActiveDays(profile: HabitProfile): string[] {
+  const days = new Set<string>();
+  for (const table of [profile.seen, profile.apps]) {
+    for (const bucket of Object.values(table)) {
+      for (const dates of Object.values(bucket)) {
+        for (const day of dates) if (day !== '') days.add(day);
+      }
+    }
+  }
+  for (const day of Object.keys(profile.daily)) if (day !== '') days.add(day);
+  return [...days].sort().reverse();
+}
+
+/**
+ * 窗口的**下界**：只保留最近 `HABIT_WINDOW_DAYS` 个"运行过的日子"。
+ *
+ * @returns 需要保留的最早日期；画像里还没有那么多天时返回 `''`（= 不裁）
+ */
+export function habitWindowCutoff(profile: HabitProfile, extraDay = ''): string {
+  const days = habitActiveDays(profile);
+  if (extraDay !== '' && !days.includes(extraDay)) days.unshift(extraDay);
+  // days 已经是倒序；第 HABIT_WINDOW_DAYS 个（下标 -1）就是下界
+  const sorted = [...new Set(days)].sort().reverse();
+  if (sorted.length <= HABIT_WINDOW_DAYS) return '';
+  return sorted[HABIT_WINDOW_DAYS - 1] ?? '';
+}
+
+/**
+ * 把"日期表"裁到窗口内：只保留 `keepFrom`（含）之后的日期。
+ *
+ * 表里全是空数组时整条 key 删掉 —— 否则 `habits.json` 会随着时间越积越多
+ * 只剩空壳的桶。
+ */
+function trimDateTable(
+  table: Readonly<Record<string, Record<string, readonly string[]>>>,
+  keepFrom: string,
+): Record<string, Record<string, readonly string[]>> {
+  if (keepFrom === '') return { ...table };
+  const out: Record<string, Record<string, readonly string[]>> = {};
+  for (const [key, bucket] of Object.entries(table)) {
+    const next: Record<string, readonly string[]> = {};
+    for (const [name, dates] of Object.entries(bucket)) {
+      const kept = dates.filter((day) => day >= keepFrom).sort();
+      if (kept.length > 0) next[name] = kept;
+    }
+    if (Object.keys(next).length > 0) out[key] = next;
+  }
+  return out;
+}
+
+/** 只保留窗口内的作息（同样按"运行过的日子"裁剪）。 */
+function trimDaily(daily: Readonly<Record<string, HabitDayEntry>>, keepFrom: string): Record<string, HabitDayEntry> {
+  if (keepFrom === '') return { ...daily };
+  const out: Record<string, HabitDayEntry> = {};
+  for (const [day, entry] of Object.entries(daily)) {
+    if (day >= keepFrom) out[day] = entry;
+  }
+  return out;
+}
+
+/**
+ * 某个桶里每个场景各有多少天（= 窗口内的观察日期数）。
+ *
+ * 为什么要有这个函数：`seen` 里存的是日期数组，"天数"必须**由窗口规则算出**。
+ * 直接 `.length` 在窗口裁剪之后其实也等于天数，但把口径集中在这里，
+ * 将来改窗口规则（例如按权重）只用改一处。
+ */
+export function habitCounts(profile: HabitProfile, bucketKey: string): Record<string, number> {
+  const bucket = profile.seen[bucketKey] ?? {};
+  const out: Record<string, number> = {};
+  for (const [scene, dates] of Object.entries(bucket)) out[scene] = dates.length;
+  return out;
+}
+
 /**
  * 把一次观察并入习惯画像（**纯函数**，返回新的 profile）。
  *
- * 这里只做"时间序列统计"里最朴素的一层：按小时直方图。
- * 需求里提到的强化学习 / Contextual Bandit 属于"要做成个性化推荐系统"的路径，
- * 当前版本刻意停在**可解释的统计模型**上：用户能看懂"她学会了我 10 点在写代码"，
- * 也才敢让它影响行为。（见文档"已知限制"）
+ * 四件事，顺序不能乱：
+ * 1. **剪窗口**（遗忘）：早于 `今天 - HABIT_WINDOW_DAYS + 1` 的日期全部丢掉；
+ * 2. **按天去重**：同一天、同一小时、同一场景只加一次日期 ——
+ *    所以"天数"是真实天数，盯着一格看两小时也刷不成铁证；
+ * 3. **分工作日/周末**：桶 key 带 `habitDayKindOf()`；
+ * 4. **作息窗口**：把今天的最早/最晚小时写进 `daily`，再按中位数重算
+ *    `earliestActiveHour` / `latestActiveHour`（**因此它们会回落**：
+ *    连续两周早睡之后，21 天窗口里的中位数自然就跟着移过去了）。
+ *
+ * `idle` / `sensitive` / 没认出来的场景一律不学（见"当作没看见"）。
  */
 export function learnHabit(profile: HabitProfile, observation: ScreenObservation): HabitProfile {
   const at = new Date(observation.at);
@@ -849,51 +1113,184 @@ export function learnHabit(profile: HabitProfile, observation: ScreenObservation
   // 没认出来的场景**当作没看见**：不进统计，否则她会学到"这个点一般在没认出来"
   if (!isRecognizedScene(observation.scene)) return profile;
 
-  const hour = String(at.getHours());
-  const dateKey = observation.at.slice(0, 10);
-  const hours: Record<string, Record<string, number>> = { ...profile.hours };
-  const bucket: Record<string, number> = { ...(hours[hour] ?? {}) };
-  bucket[observation.scene] = (bucket[observation.scene] ?? 0) + 1;
-  hours[hour] = bucket;
-
-  const observedHours = Object.keys(hours).length;
+  const dateKey = habitDayKey(at);
+  if (dateKey === '') return profile;
+  const kind = habitDayKindOf(at);
+  const hour = at.getHours();
+  const bucketKey = habitBucketKey(kind, hour);
   const newDay = profile.lastActiveDate !== dateKey;
-  const activeDays = newDay && profile.lastActiveDate !== '' ? profile.activeDays + 1 : profile.lastActiveDate === '' ? 1 : profile.activeDays;
 
-  const hourNumber = at.getHours();
-  const latestActiveHour = profile.latestActiveHour === null ? hourNumber : Math.max(profile.latestActiveHour, hourNumber);
-  const earliestActiveHour = profile.earliestActiveHour === null ? hourNumber : Math.min(profile.earliestActiveHour, hourNumber);
+  /*
+   * 先把今天写进去（**不裁剪**），再算窗口下界 —— 顺序不能反：
+   * 裁剪的依据是"运行过的日子"，而今天也算一个，得先入账。
+   */
+  const seen = { ...profile.seen };
+  const apps = { ...profile.apps };
+  const addDate = (
+    table: Record<string, Record<string, readonly string[]>>,
+    name: string,
+  ): void => {
+    const bucket = { ...(table[bucketKey] ?? {}) };
+    const dates = bucket[name] ?? [];
+    if (!dates.includes(dateKey)) bucket[name] = [...dates, dateKey].sort();
+    table[bucketKey] = bucket;
+  };
+
+  addDate(seen, observation.scene);
+  const app = (observation.app ?? '').trim().slice(0, 60);
+  if (app !== '') addDate(apps, app);
+
+  const previousDay = profile.daily[dateKey];
+  const dayEntry: HabitDayEntry = previousDay
+    ? { latestHour: Math.max(previousDay.latestHour, hour), earliestHour: Math.min(previousDay.earliestHour, hour) }
+    : { latestHour: hour, earliestHour: hour };
+  const dailyUncut = { ...profile.daily, [dateKey]: dayEntry };
+
+  /*
+   * 窗口下界 = 最近 HABIT_WINDOW_DAYS 个"运行过的日子"（含今天）。
+   * 日历上过了多久**不影响**它 —— 这是需求"没启动则不会计入天数"的落点。
+   */
+  const keepFrom = habitWindowCutoff({ ...profile, seen, apps, daily: dailyUncut });
+  const trimmedSeen = trimDateTable(seen, keepFrom);
+  const trimmedApps = trimDateTable(apps, keepFrom);
+  const daily = trimDaily(dailyUncut, keepFrom);
+
+  const activeDays = newDay ? (profile.lastActiveDate === '' ? 1 : profile.activeDays + 1) : Math.max(1, profile.activeDays);
+  const observedHours = new Set(Object.keys(trimmedSeen).map((key) => key.split('|')[1] ?? '')).size;
 
   return {
-    hours,
+    ...profile,
+    version: 2,
+    seen: trimmedSeen,
+    apps: trimmedApps,
+    daily,
     observedHours,
     samples: profile.samples + 1,
     activeDays,
-    latestActiveHour,
-    earliestActiveHour,
+    latestActiveHour: median(Object.values(daily).map((entry) => entry.latestHour)),
+    earliestActiveHour: median(Object.values(daily).map((entry) => entry.earliestHour)),
     lastActiveDate: dateKey,
     updatedAt: new Date().toISOString(),
   };
 }
 
-/** 某小时最常做的事（样本太少时返回 null）。 */
-export function topSceneAtHour(profile: HabitProfile, hour: number, minSamples = 2): SceneKind | null {
-  const bucket = profile.hours[String(hour)];
-  if (!bucket) return null;
-  let best: { scene: string; count: number } | null = null;
-  let total = 0;
-  for (const [scene, count] of Object.entries(bucket)) {
-    /*
-     * "没认出来"那一类**不参与**：老画像文件里已经存了 `other` 的计数，
-     * 光靠 `learnHabit` 不再写入是不够的 —— 这里也必须跳过，
-     * 否则用户升级后照样会听到"这个点一般在其他（没认出来）"。
+/** 某一小时的习惯读数（"这个点通常做什么 + 用什么"）。 */
+export interface HabitHourReading {
+  readonly scene: SceneKind;
+  /** 学到的主要应用名（没学到 = 空串）。 */
+  readonly app: string;
+  /** 这个场景在窗口内攒了多少天。 */
+  readonly days: number;
+  /** 该小时所有已识别场景的天数合计。 */
+  readonly totalDays: number;
+  /** 命中数据的那一档（`weekday` / `weekend` / `*`）。 */
+  readonly kind: HabitDayKind;
+}
+
+/**
+ * 某个小时"通常在做什么"。
+ *
+ * 三条规则，缺一不可（都是为了避免"装懂"）：
+ *   - 先查当前档（weekday/weekend），没有再退回 `*` 档（旧数据）；
+ *   - 该小时总天数 ≥ `minDays`（默认 3）；
+ *   - 最多的那个场景 ≥ `minSceneDays`（默认 2）—— 只有一天做过，不算习惯。
+ *
+ * 没认出来的场景**不参与**：老画像文件里已经存了 `other` 的计数，
+ * 光靠 `learnHabit` 不再写入是不够的 —— 这里也必须跳过，
+ * 否则用户升级后照样会听到"这个点一般在其他（没认出来）"。
+ */
+export function describeHour(
+  profile: HabitProfile,
+  hour: number,
+  options: {
+    readonly kind?: HabitDayKind;
+    readonly minDays?: number;
+    readonly minSceneDays?: number;
+    /**
+     * 当前档没数据时，要不要退回 `*` 档（默认 true）。
+     *
+     * 什么时候要关掉它：**区分平日/周末的场合**（面板读数、习惯条目、给模型的统计文本）。
+     * 因为 `*` 档是"不知道那天是星期几"的旧数据，退回它会同时点亮工作日与周末两格 ——
+     * 看起来像"周末也在写代码"的证据，其实我们并不知道。（实测：探针里出现过四条
+     * 两两重复的时段。）"她此刻该说什么"仍然开着这个兜底：宁可说一句保守的，
+     * 也比什么都不说好。
      */
-    if (!isRecognizedScene(normalizeScene(scene))) continue;
-    total += count;
-    if (!best || count > best.count) best = { scene, count };
+    readonly allowAnyFallback?: boolean;
+  } = {},
+): HabitHourReading | null {
+  const requested = options.kind;
+  const minDays = options.minDays ?? HABIT_MIN_DAYS;
+  const minSceneDays = options.minSceneDays ?? HABIT_MIN_SCENE_DAYS;
+  const allowAny = options.allowAnyFallback !== false;
+
+  /*
+   * 不指定档位（`kind` 省略或 `*`）= "这个小时**总的来说**在做什么"：
+   * 把三档合并起来看。为什么不只看 `*`：`*` 只有 v1 迁移过来的旧数据，
+   * 新装的用户会得到"永远没有结论"，而这个默认值本来该是最宽松的那个查询。
+   */
+  if (requested === undefined || requested === HABIT_KIND_ANY) {
+    const merged: Record<string, number> = {};
+    for (const kind of ['weekday', 'weekend', HABIT_KIND_ANY] as const) {
+      const counts = habitCounts(profile, habitBucketKey(kind, hour));
+      for (const [scene, days] of Object.entries(counts)) {
+        merged[scene] = (merged[scene] ?? 0) + days;
+      }
+    }
+    return pickFromBucket(profile, hour, merged, HABIT_KIND_ANY, minDays, minSceneDays);
   }
-  if (!best || total < minSamples) return null;
-  return normalizeScene(best.scene);
+
+  const candidates: HabitDayKind[] = allowAny ? [requested, HABIT_KIND_ANY] : [requested];
+  for (const candidate of candidates) {
+    const counts = habitCounts(profile, habitBucketKey(candidate, hour));
+    if (Object.keys(counts).length === 0) continue;
+    const reading = pickFromBucket(profile, hour, counts, candidate, minDays, minSceneDays);
+    if (reading) return reading;
+  }
+  return null;
+}
+
+/** 从一个桶里挑出主场景（并附上主要应用）。挑不出来 = null。 */
+function pickFromBucket(
+  profile: HabitProfile,
+  hour: number,
+  bucket: Readonly<Record<string, number>>,
+  kind: HabitDayKind,
+  minDays: number,
+  minSceneDays: number,
+): HabitHourReading | null {
+  let best: { scene: SceneKind; days: number } | null = null;
+  let total = 0;
+  for (const [scene, days] of Object.entries(bucket)) {
+    const normalized = normalizeScene(scene);
+    if (!isRecognizedScene(normalized)) continue;
+    total += days;
+    if (!best || days > best.days) best = { scene: normalized, days };
+  }
+  if (!best || total < minDays || best.days < minSceneDays) return null;
+
+  /*
+   * 应用只在"当前这一档"里找：`*` 档没有应用数据（v1 根本没记），
+   * 而 `weekday` 的应用不该被拿去解释 `weekend` 的读数。
+   */
+  const appBucket = profile.apps[habitBucketKey(kind, hour)] ?? {};
+  let app = '';
+  let appDays = 0;
+  for (const [name, dates] of Object.entries(appBucket)) {
+    if (dates.length > appDays) {
+      app = name;
+      appDays = dates.length;
+    }
+  }
+  return { scene: best.scene, app, days: best.days, totalDays: total, kind };
+}
+
+/** 兼容旧签名：只回答"这个小时最常做的事"（样本不够返回 null）。 */
+export function topSceneAtHour(
+  profile: HabitProfile,
+  hour: number,
+  options: { readonly kind?: HabitDayKind; readonly minDays?: number; readonly minSceneDays?: number } = {},
+): SceneKind | null {
+  return describeHour(profile, hour, options)?.scene ?? null;
 }
 
 /**
@@ -907,20 +1304,26 @@ export function habitPredictionText(input: {
   readonly settings: PerceptionSettings;
   readonly behavior: BehaviorSnapshot;
 }): string | null {
-  const hour = new Date(input.now).getHours();
-  const typical = topSceneAtHour(input.profile, hour);
-  if (!typical) return null;
+  const at = new Date(input.now);
+  const hour = at.getHours();
+  const reading = describeHour(input.profile, hour, { kind: habitDayKindOf(at) });
+  if (!reading) return null;
 
-  // 深夜：拿"平时最晚几点还在"对比（3.6 的原例）
+  // 深夜：拿"平时最晚几点还在"对比（3.6 的原例）。中位数口径，所以作息改了它会跟着回落。
   if (input.behavior.lateNight && input.profile.latestActiveHour !== null) {
     const over = hour - input.profile.latestActiveHour;
     if (over >= 2) return `今天已经比你平时睡觉的时间晚 ${over} 个小时了……`;
   }
 
-  if (typical === 'idle') return null;
+  if (reading.scene === 'idle') return null;
   // 兜底：认不出来的场景**不当成"她在做什么"**（用户要求"当作没看见"）
-  if (!isRecognizedScene(typical)) return null;
-  return `按你平时的习惯，这个点一般在${sceneLabel(typical)}，今天也是吗？`;
+  if (!isRecognizedScene(reading.scene)) return null;
+  /*
+   * 有稳定的应用名就带上（"一般在写代码（Code）"）——
+   * 这是 8.4"也不看应用"那条缺口的落点：只有这个应用也攒够了天数才提。
+   */
+  const appText = reading.app !== '' ? `（${reading.app}）` : '';
+  return `按你平时的习惯，这个点一般在${sceneLabel(reading.scene)}${appText}，今天也是吗？`;
 }
 
 /** 画像的一句话摘要（设置界面展示）。 */
@@ -932,9 +1335,215 @@ export function describeHabits(profile: HabitProfile): string {
     `活跃 ${profile.activeDays} 天`,
   ];
   if (profile.earliestActiveHour !== null && profile.latestActiveHour !== null) {
-    parts.push(`通常 ${profile.earliestActiveHour}:00 – ${profile.latestActiveHour}:00 在线`);
+    parts.push(`最近通常 ${profile.earliestActiveHour}:00 – ${profile.latestActiveHour}:00 在线`);
   }
   return parts.join(' · ');
+}
+
+/**
+ * 把画像摊平成"给模型看的统计文本"（习惯建模的输入）。
+ *
+ * 为什么不直接把 `habits.json` 丢给模型：
+ *   - 原始 JSON 里全是 `weekday|14` 这种 key 与浮点数，又长又难读；
+ *   - 模型需要的是"结论形态的事实"（哪天、几点、在做什么、用什么、多少天），
+ *     这里把中位数/天数/占比都算好，它只需要归纳成句子。
+ *
+ * 每行都是**真实统计**，不带任何推测 —— 提示词里也要求它不要编。
+ */
+export function habitStatsLines(profile: HabitProfile): string[] {
+  const lines: string[] = [];
+  lines.push(
+    `样本：观察 ${profile.samples} 次 · 活跃 ${profile.activeDays} 天 · 覆盖 ${profile.observedHours} 个整点`,
+  );
+  if (profile.earliestActiveHour !== null && profile.latestActiveHour !== null) {
+    lines.push(`最近 ${HABIT_WINDOW_DAYS} 天：通常 ${profile.earliestActiveHour}:00 开始、${profile.latestActiveHour}:00 前后还在`);
+  }
+  const kindLabel: Record<string, string> = { weekday: '工作日', weekend: '周末', [HABIT_KIND_ANY]: '（不分平日周末）' };
+  for (const kind of ['weekday', 'weekend', HABIT_KIND_ANY] as const) {
+    const rows: string[] = [];
+    for (let hour = 0; hour < 24; hour += 1) {
+      /*
+       * `allowAnyFallback: false`：`*` 档只在自己那一轮出现。
+       * 否则旧数据会被同时算进工作日与周末，模型会照着写出"周末也在写代码"。
+       */
+      const reading = describeHour(profile, hour, { kind, minDays: 1, minSceneDays: 1, allowAnyFallback: false });
+      if (!reading) continue;
+      const app = reading.app === '' ? '' : `，多用 ${reading.app}`;
+      rows.push(`${String(hour).padStart(2, '0')}:00 ${sceneLabel(reading.scene)}${app}（${Math.round(reading.days)} 天）`);
+    }
+    if (rows.length === 0) continue;
+    lines.push(`${kindLabel[kind]}的常见时段：${rows.join('；')}`);
+  }
+  return lines;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 五点五、画像迁移（读盘时把**任意历史版本**收敛成当前结构）                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 画像清洗 + **版本迁移**（永不抛异常：坏文件退回空画像）。
+ *
+ * 两代结构：
+ * - **v1**：`hours["10"]["coding"] = 27` —— key 只有小时，值是**观察次数**，
+ *   没有平日/周末、没有应用、没有每日作息窗口；
+ * - **v2**：桶是 `"weekday|10"`，值是**观察到的日期数组**（天数 = 数组长度，
+ *   窗口外的会被剪掉）。
+ *
+ * 迁移策略（**不丢数据**）：
+ *   1. v1 的计数按 `activeDays` 截断 —— 27 次观察分布在 4 个活跃日里，
+ *      最多也就是 4 天，取 `min(27, 4)` 才是诚实的换算；
+ *   2. 在 `lastActiveDate` 之前**合成**同样多的日期（v2 存的是日期），
+ *      于是"天数"这个口径自然成立、窗口裁剪也照常工作；
+ *   3. 不知道那天是星期几，因此全部装进 `*`（不分平日周末）这一档 ——
+ *      `describeHour()` 读的时候会先查具体档、再退回 `*` 档，所以旧数据照样能用；
+ *   4. 老的 `latest/earliestActiveHour` 作为"那一天"的作息塞进 `daily`。
+ *
+ * 放在 shared 层（而不是存储层）的原因：它是**纯数据变换**，
+ * 因此验收可以直接喂一份 v1 JSON 进来断言，不必依赖"写文件 -> 重启 -> 再读"的时序。
+ *
+ * ⚠️ 它**不依赖"现在几点"**：窗口按"运行过的日子"算，所以迁移结果只由数据本身决定
+ * （早期版本用"今天往前 21 天"裁，于是同一份文件在不同日期会得到不同结果，
+ * 验收也只能靠注入 `now` 才稳定 —— 现在这个参数已经不需要了）。
+ *
+ * @param raw 磁盘上的原始 JSON（任意形状都行）
+ */
+export function migrateHabitProfile(raw: unknown): HabitProfile {
+  if (typeof raw !== 'object' || raw === null) return emptyHabitProfile();
+  const record = raw as Record<string, unknown>;
+  const version = typeof record.version === 'number' && record.version >= 2 ? 2 : 1;
+  const activeDays = typeof record.activeDays === 'number' && record.activeDays > 0 ? Math.round(record.activeDays) : 0;
+  const lastActiveDate = typeof record.lastActiveDate === 'string' ? record.lastActiveDate : '';
+
+  const seen: Record<string, Record<string, readonly string[]>> = {};
+  if (version === 2) {
+    const rawSeen = isPlainRecord(record.seen) ? record.seen : {};
+    for (const [key, bucket] of Object.entries(rawSeen)) {
+      const bucketKey = sanitizeBucketKey(key);
+      if (bucketKey === null || !isPlainRecord(bucket)) continue;
+      const clean: Record<string, readonly string[]> = {};
+      for (const [scene, dates] of Object.entries(bucket)) {
+        const list = sanitizeDates(dates);
+        if (list.length > 0) clean[scene.slice(0, 24)] = list;
+      }
+      if (Object.keys(clean).length > 0) seen[bucketKey] = clean;
+    }
+  } else {
+    // v1：次数 -> 合成日期（从 lastActiveDate 往前一天一个）
+    const rawHours = isPlainRecord(record.hours) ? record.hours : {};
+    for (const [key, bucket] of Object.entries(rawHours)) {
+      const bucketKey = legacyBucketKey(key);
+      if (bucketKey === null || !isPlainRecord(bucket) || lastActiveDate === '') continue;
+      const clean: Record<string, readonly string[]> = {};
+      for (const [scene, count] of Object.entries(bucket)) {
+        if (typeof count !== 'number' || !Number.isFinite(count) || count <= 0) continue;
+        const days = Math.min(Math.round(count), Math.max(1, activeDays));
+        const dates: string[] = [];
+        for (let i = 0; i < days; i += 1) dates.unshift(habitDayKeyBefore(lastActiveDate, i));
+        clean[scene.slice(0, 24)] = dates;
+      }
+      if (Object.keys(clean).length > 0) seen[bucketKey] = clean;
+    }
+  }
+
+  const apps: Record<string, Record<string, readonly string[]>> = {};
+  const rawApps = isPlainRecord(record.apps) ? record.apps : {};
+  for (const [key, bucket] of Object.entries(rawApps)) {
+    const bucketKey = sanitizeBucketKey(key);
+    if (bucketKey === null || !isPlainRecord(bucket)) continue;
+    const clean: Record<string, readonly string[]> = {};
+    for (const [app, dates] of Object.entries(bucket)) {
+      const list = sanitizeDates(dates);
+      if (list.length > 0) clean[app.slice(0, 60)] = list;
+    }
+    if (Object.keys(clean).length > 0) apps[bucketKey] = clean;
+  }
+
+  const daily: Record<string, HabitDayEntry> = {};
+  const rawDaily = isPlainRecord(record.daily) ? record.daily : {};
+  for (const [day, entry] of Object.entries(rawDaily)) {
+    if (!isPlainRecord(entry)) continue;
+    const latest = hourOrNull(entry.latestHour);
+    const earliest = hourOrNull(entry.earliestHour);
+    if (latest === null || earliest === null) continue;
+    daily[day.slice(0, 10)] = { latestHour: latest, earliestHour: earliest };
+  }
+
+  const latestActiveHour = numberOrNull(record.latestActiveHour);
+  const earliestActiveHour = numberOrNull(record.earliestActiveHour);
+  // v1：把"历史最晚/最早"当作那一天的作息，让滚动窗口有个起点（之后被真实数据替换）
+  if (version === 1 && lastActiveDate !== '' && latestActiveHour !== null && earliestActiveHour !== null) {
+    daily[lastActiveDate] = { latestHour: latestActiveHour, earliestHour: earliestActiveHour };
+  }
+
+  /*
+   * 按"运行过的日子"裁一次（**不是**按日历天）：只保留最近 HABIT_WINDOW_DAYS 个。
+   * 老用户的 `lastActiveDate` 可能已经是几个月前，但那些日子**确实用过**，
+   * 所以它们照旧留着 —— 时间流逝本身不该让她忘掉你（需求："没启动则不会计入天数"）。
+   */
+  const keepFrom = habitWindowCutoff({ ...emptyHabitProfile(), seen, apps, daily });
+  const trimmedSeen = trimDateTable(seen, keepFrom);
+  const trimmedApps = trimDateTable(apps, keepFrom);
+  const trimmedDaily = trimDaily(daily, keepFrom);
+
+  return {
+    version: 2,
+    seen: trimmedSeen,
+    apps: trimmedApps,
+    daily: trimmedDaily,
+    observedHours: typeof record.observedHours === 'number' && record.observedHours > 0
+      ? Math.round(record.observedHours)
+      : new Set(Object.keys(trimmedSeen).map((key) => key.split('|')[1] ?? '')).size,
+    samples: typeof record.samples === 'number' && record.samples > 0 ? Math.round(record.samples) : 0,
+    activeDays,
+    // 作息一律以 `daily` 窗口为准（v1 的旧值已塞进 daily）
+    latestActiveHour: median(Object.values(trimmedDaily).map((entry) => entry.latestHour)) ?? latestActiveHour,
+    earliestActiveHour: median(Object.values(trimmedDaily).map((entry) => entry.earliestHour)) ?? earliestActiveHour,
+    lastActiveDate,
+    updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : '',
+  };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** 日期数组清洗：只认 `YYYY-MM-DD`、去重、升序。 */
+function sanitizeDates(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out = new Set<string>();
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const day = item.slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(day)) out.add(day);
+  }
+  return [...out].sort();
+}
+
+/** 只保留 v2 形状的桶 key（`"weekday|10"`）。 */
+function sanitizeBucketKey(key: string): string | null {
+  const [kind, hour] = key.split('|');
+  if (kind !== 'weekday' && kind !== 'weekend' && kind !== HABIT_KIND_ANY) return null;
+  const hourNumber = Number(hour);
+  if (!Number.isInteger(hourNumber) || hourNumber < 0 || hourNumber > 23) return null;
+  return habitBucketKey(kind, hourNumber);
+}
+
+/** v1 的小时键（`"10"`）-> `*|10`。 */
+function legacyBucketKey(key: string): string | null {
+  const hourNumber = Number(key);
+  if (!Number.isInteger(hourNumber) || hourNumber < 0 || hourNumber > 23) return null;
+  return habitBucketKey(HABIT_KIND_ANY, hourNumber);
+}
+
+function hourOrNull(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  const hour = Math.round(value);
+  return hour >= 0 && hour <= 23 ? hour : null;
+}
+
+function numberOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : null;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1062,7 +1671,17 @@ export function formatLogTimestamp(iso: string | number): string {
  */
 export function formatObservationLogLine(observation: ScreenObservation): string {
   const parts: string[] = [];
-  parts.push(`${sceneLabel(observation.scene)}${observation.app.trim() === '' ? '' : `（${observation.app.trim()}）`}`);
+  /*
+   * 日志里显示**友好名**（模型读到的那个），但把稳定身份也带上：
+   * 复盘时"她当时以为在用什么"（可能读错）与"到底是哪个程序"是两件事，
+   * 少了后者就没法解释"为什么同一个游戏在时间线里是一行、在日志里是三个名字"。
+   */
+  const identity = observation.app.trim();
+  const friendly = (observation.appLabel ?? '').trim();
+  const appText = friendly !== '' && friendly !== identity
+    ? `（${friendly}${identity === '' ? '' : ` / ${identity}`}）`
+    : identity === '' ? '' : `（${identity}）`;
+  parts.push(`${sceneLabel(observation.scene)}${appText}`);
   if (observation.activity.trim() !== '') parts.push(observation.activity.trim());
   if ((observation.url ?? '') !== '') parts.push(observation.url as string);
   if ((observation.windowTitle ?? '') !== '') parts.push(`窗口 ${observation.windowTitle}`);

@@ -108,6 +108,68 @@ body {
   overflow: hidden;
 }
 
+/* ------------------------------- 页签 ------------------------------- */
+
+/*
+ * 聊天 / 小纸条两个视图共用这一个窗口：页签是"我在看哪一栏"的唯一指示。
+ * 用下划线而不是按钮底色 —— 顶部已经有一个面板底色，再加底色会显得很重。
+ */
+.tabs {
+  display: flex;
+  flex-shrink: 0;
+  gap: 2px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.tab {
+  position: relative;
+  padding: 8px 12px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+
+.tab:hover { color: var(--text); }
+.tab-active { color: var(--text); border-bottom-color: var(--accent); }
+
+/* 未读徽标：她留了纸条，不打开窗口也该看得见 */
+.badge-count {
+  display: inline-block;
+  min-width: 16px;
+  margin-left: 4px;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10.5px;
+  line-height: 16px;
+  text-align: center;
+}
+
+/* 同 .view：`display: inline-block` 会让 `badge.hidden = true` 失效，未读徽标永远显示 */
+.badge-count[hidden] { display: none; }
+
+/* 视图容器：两个视图各自满高 flex，滚动交给内部的列表 */
+.view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/*
+ * ⚠️ `display: flex` 会覆盖 [hidden] 自带的 `display: none`（作者样式优先于 UA 样式），
+ * 于是 `viewChat.hidden = true` 完全不起作用 —— 两个视图会**同时显示**，
+ * 页签看起来"点了没反应"。必须像 #empty-hint 那样显式写回来。
+ */
+.view[hidden] { display: none; }
+
 /* ------------------------------- 消息区 ------------------------------- */
 
 .messages {
@@ -215,6 +277,533 @@ body {
 }
 
 .error-bar[hidden] { display: none; }
+
+/* ------------------------------ 小纸条 ------------------------------ */
+
+/*
+ * 视觉上刻意像"纸"：浅底、直角偏硬、左侧一条便利贴色带。
+ * 这是她的收纳夹 —— 每条一张纸，带附件的会多出一行"📎 文件名 · 大小"。
+ */
+.notes-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11.5px;
+}
+
+.notes-head-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.notes-head-actions button { padding: 3px 8px; font-size: 11.5px; }
+
+.notes {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  outline: none;
+}
+
+.notes-empty {
+  margin: auto;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+  line-height: 1.8;
+}
+
+.note {
+  position: relative;
+  padding: 8px 11px 9px 13px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.18);
+}
+
+/* 左侧色带：她的东西统一用强调色（不再是"她/你"两侧） */
+.note::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  border-radius: 4px 0 0 4px;
+  background: var(--accent);
+}
+
+/* 未归档文件那封"虚拟邮件"：换一种色带，和真实消息区分开 */
+.note-orphans::before { background: var(--muted); }
+
+.note-unread { border-color: var(--accent); }
+
+.note-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * 发件人（邮件模型里最重要的一列）：她 / 某个插件 / 系统。
+ *
+ * 用强调色 + 稍粗，是因为合并成邮件之后"这条是谁给的"必须在扫一眼时就能分辨
+ * （插件投递的文件与她自己记的事，处理方式完全不同）。
+ */
+.note-from {
+  padding: 0 6px;
+  border-radius: 8px;
+  background: rgba(89, 169, 255, 0.16);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.note-kind { opacity: 0.9; }
+
+.note-title {
+  margin-bottom: 3px;
+  font-size: 13px;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.note-text {
+  /* 纸条也要能复制（她的记录可能有用） */
+  user-select: text;
+  cursor: text;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+/* 附件行：文件就在收纳夹里，点「查看」读内容、点「打开」交给系统默认程序 */
+.note-file {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 7px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--line);
+}
+
+.note-file-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.note-file-open { padding: 2px 8px; font-size: 11.5px; flex-shrink: 0; }
+
+/* 删附件：与「查看/打开」同档，但危险色（删的是收纳夹里那份副本） */
+.note-file-delete:hover {
+  color: #ff9c9c;
+  border-color: rgba(255, 120, 120, 0.55);
+}
+
+/* 消息右下角的「删除」（邮件语义：连同附件一起删） */
+.note-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.note-delete { padding: 2px 8px; font-size: 11.5px; }
+
+.note-delete:hover {
+  color: #ff9c9c;
+  border-color: rgba(255, 120, 120, 0.55);
+}
+
+.notes-tip { font-size: 11.5px; line-height: 1.6; }
+
+/* ---------------------------- 日记（视图三） ---------------------------- */
+
+/*
+ * 日记条目复用纸条卡片的观感（`.note`），只补三处差异：
+ * - 清单是"最新在前"，不是"往下翻"；
+ * - 「看正文」按钮沿用纸条上「删除」那档幽灵按钮的尺寸；
+ * - 正文展开区是**独立**的滚动区，长日记不会把清单顶出去。
+ */
+.diary-item { cursor: default; }
+
+.diary-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 12px 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  max-height: 46%;
+  min-height: 0;
+}
+
+.diary-detail[hidden] { display: none; }
+
+.diary-detail-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.diary-detail-head strong { font-size: 12.5px; }
+.diary-detail-head #diary-detail-meta { font-size: 10.5px; flex-shrink: 0; }
+.diary-detail-head button { padding: 2px 8px; font-size: 11.5px; flex-shrink: 0; }
+
+.diary-detail-body {
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text);
+}
+
+/* ------------------------------ 插件面板 ------------------------------ */
+
+/*
+ * 插件（TODO / 课程表 / 番茄钟…）的界面。
+ *
+ * 插件只交来一段"裸标签"的 HTML —— 它不知道聊天窗口长什么样，也不该知道，
+ * 所以打扮成这个主题的一部分是宿主的责任：表格（课程表）、复选框列表（TODO）、
+ * 输入框 + 按钮（加一条 TODO）、大数字读数（番茄钟倒计时）都按这里统一处理。
+ * 类名统一 `plugin-` 前缀：这些是宿主给的，不会和插件自己写的 class 撞。
+ *
+ * 注意：面板里的标签**没有** `id`（净化器会剔掉 `id` / `for`），所以这里只能用
+ * 元素选择器与 `.plugin-` 类，不能指望插件带上任何标记。
+ */
+.plugin-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.plugin-head strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 「来自插件：x」：面板是插件说的话，署名必须一直在，不能让人以为是桌宠自己写的 */
+.plugin-from {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+/*
+ * 插件页签：文字是 `${插件名} · ${面板名}`，可能很长 ——
+ * 截断而不是把页签栏撑爆（`title` 里有完整名字，悬停可见）。
+ */
+.plugin-tab {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugin-body {
+  flex: 1;
+  min-height: 0;
+  padding: 12px 14px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  outline: none;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+  /* 面板里是插件排的数据（TODO 文本、课表、链接）——要能选中复制，
+     抵消 body 上的全局 user-select:none */
+  user-select: text;
+  cursor: default;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.plugin-body::-webkit-scrollbar { width: 8px; }
+.plugin-body::-webkit-scrollbar-track { background: transparent; }
+.plugin-body::-webkit-scrollbar-thumb { border-radius: 4px; background: var(--line); }
+.plugin-body::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+/* 普通段落与分隔线：插件不会自己管外边距，这里给一套克制的默认值 */
+.plugin-body p { margin: 4px 0; }
+.plugin-body hr { margin: 8px 0; border: none; border-top: 1px solid var(--line); }
+.plugin-body blockquote {
+  margin: 6px 0;
+  padding-left: 10px;
+  border-left: 3px solid var(--line);
+  color: var(--muted);
+}
+
+/* 标题在面板里通常当"读数"用（番茄钟的剩余时间）：等宽数字，跳秒时不会左右抖 */
+.plugin-body h1,
+.plugin-body h2 {
+  margin: 2px 0 6px;
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
+}
+
+.plugin-body h3,
+.plugin-body h4 { margin: 4px 0; font-size: 13.5px; font-weight: 600; }
+
+/* 列表（TODO）：缩进浅一点，勾选框与文字在同一行基线上 */
+.plugin-body ul,
+.plugin-body ol { padding-left: 18px; }
+.plugin-body li { margin: 2px 0; }
+.plugin-body li::marker { color: var(--muted); }
+
+/* 表格（课程表）：等宽数字 + 行线，单元格留白紧凑但不挤 */
+.plugin-body table {
+  width: 100%;
+  margin: 4px 0;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.plugin-body th,
+.plugin-body td {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  /* 中文课程名可能很长：断词而不是把表格撑出横向滚动条 */
+  word-break: break-word;
+}
+
+.plugin-body th {
+  color: var(--muted);
+  font-weight: 600;
+  border-bottom-color: var(--muted);
+}
+
+.plugin-body tr:last-child td { border-bottom: none; }
+
+/* 代码 / 快捷键：面板里贴 issue 号、命令时用得上 */
+.plugin-body code,
+.plugin-body kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  font-size: 11.5px;
+}
+
+.plugin-body pre {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  font-size: 11.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* `<pre><code>` 不要双份边框与底色 */
+.plugin-body pre code { padding: 0; border: none; background: none; }
+
+/* 图片：净化器只允许 data: 图，这里保证不撑破面板宽度 */
+.plugin-body img { max-width: 100%; height: auto; border-radius: 4px; }
+
+/*
+ * 链接：点一下由主进程用系统浏览器打开（页面自己不许联网）。
+ * 只给**带 href** 的 `<a>` 上色与手型 —— 净化器会把 `javascript:` 这类 href 删掉，
+ * 剩下的空 `<a>` 只是文字，不该看起来能点。
+ */
+.plugin-body a[href] { color: var(--accent); text-decoration: none; cursor: pointer; }
+.plugin-body a[href]:hover { text-decoration: underline; }
+
+/* 输入控件：TODO 的"加一条"、番茄钟的任务名都长这样 */
+.plugin-body input:not([type='checkbox']):not([type='radio']),
+.plugin-body textarea,
+.plugin-body select {
+  margin: 2px 0;
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  user-select: text;
+}
+
+.plugin-body input:not([type='checkbox']):not([type='radio']):focus,
+.plugin-body textarea:focus,
+.plugin-body select:focus { outline: none; border-color: var(--accent); }
+
+.plugin-body input::placeholder,
+.plugin-body textarea::placeholder { color: var(--muted); opacity: 0.75; }
+
+.plugin-body input[type='checkbox'],
+.plugin-body input[type='radio'] {
+  width: 14px;
+  height: 14px;
+  margin-right: 4px;
+  /* accent-color 让原生勾选框跟着主题走，不必用伪元素重画一个 */
+  accent-color: var(--accent);
+  vertical-align: -2px;
+}
+
+.plugin-body label { cursor: pointer; }
+
+/* 面板里的按钮比窗口自己的按钮小一号：面板里按钮多，占地要克制 */
+.plugin-body button { padding: 3px 9px; font-size: 11.5px; }
+/* 键盘焦点框沿用全局规则，但补上面板里的输入控件 */
+.plugin-body input:focus-visible,
+.plugin-body select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/*
+ * 进度条 helper：插件写
+ *   <div class="plugin-progress"><div style="width:42%"></div></div>
+ * 内联 `width:` 是净化器允许的（`url()` / `expression()` 才被剔除），
+ * 所以填充宽度由插件给，轨道与配色由这里统一 —— 番茄钟/今日完成度都用得上。
+ */
+.plugin-progress {
+  height: 8px;
+  margin: 6px 0;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.plugin-progress > div,
+.plugin-progress > span {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+/* 系统里关掉动画时就别做宽度过渡 */
+@media (prefers-reduced-motion: reduce) {
+  .plugin-progress > div,
+  .plugin-progress > span { transition: none; }
+}
+
+/* 面板底部的说明行：内容来自插件、点了会发生什么，必须写清楚 */
+.plugin-hint {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+/* ------------------------------- 预览浮层 ------------------------------ */
+
+.preview {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 22px;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+/* 作者样式会盖掉 UA 的 [hidden]，所以必须显式写一条（踩过一次） */
+.preview[hidden] { display: none; }
+
+.preview-box {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 720px;
+  max-height: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.preview-head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-head #preview-meta { flex-shrink: 0; font-size: 10.5px; }
+.preview-spacer { flex: 1; }
+.preview-head button { padding: 2px 8px; font-size: 11.5px; flex-shrink: 0; }
+
+.preview-body {
+  flex: 1;
+  min-height: 60px;
+  padding: 12px;
+  overflow: auto;
+}
+
+.preview-text {
+  margin: 0;
+  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.preview-image {
+  display: block;
+  max-width: 100%;
+  max-height: 62vh;
+  margin: 0 auto;
+  border-radius: 4px;
+}
+
+.preview-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.8;
+  text-align: center;
+}
 
 /* ------------------------------- 输入区 ------------------------------- */
 

@@ -3,7 +3,8 @@
  *
  * `<userData>/perception/` 下：
  *   observations-YYYY-MM-DD.jsonl   每次屏幕观察的结构化结果（场景/应用/摘要）
- *   habits.json                     3.6 的习惯画像（按小时直方图）
+ *   habits.json                     3.6 的习惯画像（按小时直方图，v2：按天计数 + 衰减 + 平日/周末）
+ *   habit-model.json                3.6 的习惯模型（把统计归纳成一段话；模型或模板产出）
  *   perception-log.md               **可审计的感知日志**：她看见了什么、为什么开口
  *
  * 为什么坚持"图像不落盘"：
@@ -19,8 +20,14 @@ import type {
   PerceptionLogItem,
   ScreenObservation,
 } from '../../shared/perception-types';
+import type { HabitModel } from '../../shared/habit-model';
 import type { DayTimeline } from '../../shared/timeline-types';
-import { emptyHabitProfile, formatLogTimestamp, formatObservationLogLine } from '../../shared/perception';
+import {
+  emptyHabitProfile,
+  formatLogTimestamp,
+  formatObservationLogLine,
+  migrateHabitProfile,
+} from '../../shared/perception';
 import { formatArchiveLine, selectExpiredDays, summarizeDay } from '../../shared/timeline';
 import type { Logger } from '../../shared/logger';
 import { describeError } from '../../shared/errors';
@@ -35,6 +42,7 @@ export class ObservationStore {
   private readonly logger: Logger;
   private readonly dir: string;
   private readonly habitsFile: string;
+  private readonly habitModelFile: string;
   private readonly logFile: string;
   private habits: HabitProfile = emptyHabitProfile();
 
@@ -42,6 +50,7 @@ export class ObservationStore {
     this.logger = options.logger;
     this.dir = join(options.dataDir, 'perception');
     this.habitsFile = join(this.dir, 'habits.json');
+    this.habitModelFile = join(this.dir, 'habit-model.json');
     this.logFile = join(this.dir, 'perception-log.md');
   }
 
@@ -61,7 +70,7 @@ export class ObservationStore {
     }
     try {
       const parsed: unknown = JSON.parse(readFileSync(this.habitsFile, 'utf8'));
-      this.habits = sanitizeHabits(parsed);
+      this.habits = migrateHabitProfile(parsed);
       this.logger.info('habit profile loaded', {
         data: { samples: this.habits.samples, hours: this.habits.observedHours, days: this.habits.activeDays },
       });
@@ -112,6 +121,59 @@ export class ObservationStore {
       renameSync(temp, this.habitsFile);
     } catch (error) {
       this.logger.warn('habit profile save failed', { error: describeError(error) });
+    }
+  }
+
+  /**
+   * 读「习惯模型」（大模型/模板归纳出来的那段话）。
+   *
+   * 与 `habits.json` 分开存：前者是**统计**（每次采样都写），
+   * 后者是**结论**（每天最多一次、还可能被手工删掉重来）。
+   * 文件坏了就当没建模过（下次建模会重写），不影响统计。
+   */
+  public loadHabitModel(): HabitModel | null {
+    if (!existsSync(this.habitModelFile)) return null;
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(this.habitModelFile, 'utf8'));
+      if (typeof parsed !== 'object' || parsed === null) return null;
+      const record = parsed as Record<string, unknown>;
+      const summary = typeof record.summary === 'string' ? record.summary : '';
+      if (summary.trim() === '') return null;
+      return {
+        summary,
+        line: typeof record.line === 'string' ? record.line : '',
+        routines: Array.isArray(record.routines)
+          ? record.routines
+              .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+              .map((item) => ({
+                when: typeof item.when === 'string' ? item.when : '',
+                what: typeof item.what === 'string' ? item.what : '',
+                app: typeof item.app === 'string' ? item.app : '',
+                days: typeof item.days === 'number' && Number.isFinite(item.days) ? Math.max(0, Math.round(item.days)) : 0,
+              }))
+              .filter((item) => item.when !== '' && item.what !== '')
+          : [],
+        source: record.source === 'llm' ? 'llm' : 'template',
+        tokens: typeof record.tokens === 'number' && record.tokens > 0 ? Math.round(record.tokens) : 0,
+        updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : '',
+        samples: typeof record.samples === 'number' && record.samples > 0 ? Math.round(record.samples) : 0,
+        activeDays: typeof record.activeDays === 'number' && record.activeDays > 0 ? Math.round(record.activeDays) : 0,
+        error: typeof record.error === 'string' ? record.error : '',
+      };
+    } catch (error) {
+      this.logger.warn('habit model parse failed; ignoring', { error: describeError(error) });
+      return null;
+    }
+  }
+
+  public saveHabitModel(model: HabitModel): void {
+    try {
+      this.ensureDir();
+      const temp = `${this.habitModelFile}.tmp`;
+      writeFileSync(temp, `${JSON.stringify(model, null, 2)}\n`, 'utf8');
+      renameSync(temp, this.habitModelFile);
+    } catch (error) {
+      this.logger.warn('habit model save failed', { error: describeError(error) });
     }
   }
 
@@ -317,7 +379,8 @@ export class ObservationStore {
   }
 
   /** 清空（隐私要求：用户可以一键抹掉她观察到的一切）。 */
-  public clear(): void {    try {
+  public clear(): void {
+    try {
       for (const file of readdirSync(this.dir)) {
         if (file === 'perception-log.md') continue;
         try {
@@ -326,6 +389,11 @@ export class ObservationStore {
           /* 单个文件失败就跳过 */
         }
       }
+      /*
+       * 习惯模型**删掉而不是留空文件**：空文件在下次启动时会被当成"解析失败"，
+       * 白记一条 warn 日志，也会让面板一时分不清"没建模过"和"文件坏了"。
+       */
+      rmSync(this.habitModelFile, { force: true });
     } catch (error) {
       this.logger.warn('clearing observations failed', { error: describeError(error) });
     }
@@ -357,32 +425,4 @@ export function localDay(now: Date = new Date()): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 }
 
-/** 画像清洗：只保留合法的小时键与非负计数。 */
-function sanitizeHabits(raw: unknown): HabitProfile {
-  if (typeof raw !== 'object' || raw === null) return emptyHabitProfile();
-  const record = raw as Record<string, unknown>;
-  const hours: Record<string, Record<string, number>> = {};
-  const rawHours = typeof record.hours === 'object' && record.hours !== null ? (record.hours as Record<string, unknown>) : {};
-  for (const [hour, bucket] of Object.entries(rawHours)) {
-    const hourNumber = Number(hour);
-    if (!Number.isInteger(hourNumber) || hourNumber < 0 || hourNumber > 23) continue;
-    if (typeof bucket !== 'object' || bucket === null) continue;
-    const clean: Record<string, number> = {};
-    for (const [scene, count] of Object.entries(bucket as Record<string, unknown>)) {
-      if (typeof count === 'number' && Number.isFinite(count) && count > 0) clean[scene.slice(0, 24)] = Math.round(count);
-    }
-    if (Object.keys(clean).length > 0) hours[hour] = clean;
-  }
-  const numberOrNull = (value: unknown): number | null =>
-    typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : null;
-  return {
-    hours,
-    observedHours: Object.keys(hours).length,
-    samples: typeof record.samples === 'number' && record.samples > 0 ? Math.round(record.samples) : 0,
-    activeDays: typeof record.activeDays === 'number' && record.activeDays > 0 ? Math.round(record.activeDays) : 0,
-    latestActiveHour: numberOrNull(record.latestActiveHour),
-    earliestActiveHour: numberOrNull(record.earliestActiveHour),
-    lastActiveDate: typeof record.lastActiveDate === 'string' ? record.lastActiveDate : '',
-    updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : '',
-  };
-}
+

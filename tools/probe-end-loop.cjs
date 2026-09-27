@@ -120,15 +120,15 @@ app.whenReady().then(async () => {
   result.steady = await sample(`/* 不请求任何动画 */`, 6000);
 
   /*
-   * D) 反方向：收起状态的**随机池动画（peek）必须仍然允许**
-   *    （需求：收起时有一个随机动画、随机时间触发），
+   * D) 反方向：收起状态的**随机小动作（peek）必须仍然允许**
+   *    （需求：peek 只在 watch 阶段触发，且不受"安静白名单"误伤），
    *    而 idle 这种"收起状态不该有的动画"必须被拒。
    */
   result.dockD = await dockRight();
   result.poolAllowed = await run(`(async () => {
     const anim = window.petDebug.anim;
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-    const peek = await anim.play('peek', { interrupt: 'auto', reason: 'random-pool:docked-right-random', source: 'behavior' });
+    const peek = await anim.play('peek', { interrupt: 'auto', reason: 'fidget:docked-right', source: 'behavior' });
     await wait(400);
     const afterPeek = anim.getCurrentAnimation();
     const idle = await anim.play('idle', { interrupt: 'force', reason: 'probe-idle', source: 'system' });

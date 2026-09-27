@@ -21,13 +21,34 @@ import type {
   PetBootstrap,
   PetBridge,
   PluginCodePayload,
+  PluginEnabledPayload,
+  PluginPanelActionPayload,
   PluginStatePayload,
+  PluginTimerPayload,
+  PluginTimerTickPayload,
+  PluginUIContributionPayload,
   RuntimeInfo,
   StateChangedPayload,
   TrayStatePayload,
   TriggerAnimationPayload,
   WindowPosition,
 } from '../shared/ipc';
+import type {
+  DiscoveredPlugin,
+  PluginInstallResult,
+  PluginMailRequest,
+  PluginMailResult,
+  PluginNetRequest,
+  PluginNetResponse,
+  PluginNotificationRequest,
+  PluginPanelView,
+  PluginProcessRequest,
+  PluginProcessResult,
+  PluginPythonInfo,
+  PluginPythonRequest,
+  PluginRecord,
+  PluginUIEvent,
+} from '../shared/plugin-types';
 import type { PetDisplayState } from '../shared/behavior-config';
 import { DEFAULT_BEHAVIOR_CONFIG, DEFAULT_DISPLAY_STATE } from '../shared/behavior-config';
 import type { PetAction, ActionResult } from '../shared/action-types';
@@ -45,8 +66,7 @@ import type {
   InteractionKind,
   MemorySnapshot,
   PetPresence,
-} from '../shared/ai-types';
-import { createDefaultAIStatus } from '../shared/ai-types';
+} from '../shared/ai-types';import { createDefaultAIStatus } from '../shared/ai-types';
 import type { GrowthAPI, PerceptionAPI } from '../shared/ipc';
 import type {
   GrowthSettingsPatch,
@@ -67,15 +87,19 @@ import { ASSET_HOST, ASSET_SCHEME } from '../shared/protocol';
 import {
   SETTINGS_BOOTSTRAP_FLAG,
   SETTINGS_WINDOW_FLAG,
+  type SettingsPluginAPI,
   type SettingsWindowBootstrap,
   type SettingsWindowBridge,
 } from '../shared/settings-window';
 import {
   CHAT_BOOTSTRAP_FLAG,
   CHAT_WINDOW_FLAG,
+  type ChatView,
   type ChatWindowBootstrap,
   type ChatWindowBridge,
+  type PluginPanelTarget,
 } from '../shared/chat-window';
+import type { NoteBox, NoteFileEntry, NotePreview } from '../shared/notes';
 
 /* -------------------------------------------------------------------------- */
 /* 启动数据                                                                    */
@@ -182,6 +206,8 @@ function buildAIAPI(): AIAPI {
       ipcRenderer.invoke(IpcChannels.AIChatHistory) as Promise<readonly ChatTurn[]>,
     memory: (): Promise<MemorySnapshot> => ipcRenderer.invoke(IpcChannels.AIMemoryGet) as Promise<MemorySnapshot>,
     clearMemory: (): Promise<MemorySnapshot> => ipcRenderer.invoke(IpcChannels.AIMemoryClear) as Promise<MemorySnapshot>,
+    pruneMemory: (): Promise<{ readonly days: number; readonly logSections: number }> =>
+      ipcRenderer.invoke(IpcChannels.AIMemoryPrune) as Promise<{ readonly days: number; readonly logSections: number }>,
     openMemoryLog: (): Promise<boolean> => ipcRenderer.invoke(IpcChannels.AIMemoryOpenLog) as Promise<boolean>,
     diary: (): Promise<DiarySnapshot> => ipcRenderer.invoke(IpcChannels.AIDiaryList) as Promise<DiarySnapshot>,
     diaryGet: (date: string): Promise<DiaryEntry | null> =>
@@ -192,6 +218,26 @@ function buildAIAPI(): AIAPI {
     refreshBalance: (): Promise<AIStatusView> =>
       ipcRenderer.invoke(IpcChannels.AIBalanceRefresh) as Promise<AIStatusView>,
     notifyInteraction: (kind: InteractionKind): void => send(IpcChannels.AIInteraction, kind),
+    notifyInteractionSettled: (kind: InteractionKind): void => send(IpcChannels.AIInteractionSettled, kind),
+    notes: (): Promise<NoteBox> => ipcRenderer.invoke(IpcChannels.AINoteList) as Promise<NoteBox>,
+    composeNote: (): Promise<NoteBox> => ipcRenderer.invoke(IpcChannels.AINoteCompose) as Promise<NoteBox>,
+    markNotesRead: (): Promise<NoteBox> => ipcRenderer.invoke(IpcChannels.AINoteRead) as Promise<NoteBox>,
+    clearNotes: (): Promise<NoteBox> => ipcRenderer.invoke(IpcChannels.AINoteClear) as Promise<NoteBox>,
+    deleteNote: (id: string): Promise<NoteBox> =>
+      ipcRenderer.invoke(IpcChannels.AINoteDelete, id) as Promise<NoteBox>,
+    openNoteFile: (id: string, fileIndex?: number): Promise<boolean> =>
+      ipcRenderer.invoke(IpcChannels.AINoteOpenFile, { id, fileIndex }) as Promise<boolean>,
+    openNotesDir: (): Promise<boolean> => ipcRenderer.invoke(IpcChannels.AINoteOpenDir) as Promise<boolean>,
+    noteFiles: (): Promise<readonly NoteFileEntry[]> =>
+      ipcRenderer.invoke(IpcChannels.AINoteFiles) as Promise<readonly NoteFileEntry[]>,
+    previewNoteFile: (name: string): Promise<NotePreview> =>
+      ipcRenderer.invoke(IpcChannels.AINoteFilePreview, name) as Promise<NotePreview>,
+    openNoteFileByName: (name: string): Promise<boolean> =>
+      ipcRenderer.invoke(IpcChannels.AINoteFileOpen, name) as Promise<boolean>,
+    deleteNoteFile: (name: string): Promise<{ readonly ok: boolean; readonly reason?: string }> =>
+      ipcRenderer.invoke(IpcChannels.AINoteFileDelete, name) as Promise<{ readonly ok: boolean; readonly reason?: string }>,
+    importNoteFile: (): Promise<NoteBox | null> =>
+      ipcRenderer.invoke(IpcChannels.AINoteFileImport) as Promise<NoteBox | null>,
     resetEmotion: (): Promise<AIStatusView> => ipcRenderer.invoke(IpcChannels.AIResetEmotion) as Promise<AIStatusView>,
     setPresence: (presence: PetPresence): Promise<AIStatusView> =>
       ipcRenderer.invoke(IpcChannels.AISetPresence, presence) as Promise<AIStatusView>,
@@ -219,6 +265,8 @@ function buildPerceptionAPI(): PerceptionAPI {
     authorizeCamera: (authorized: boolean): Promise<PerceptionStatus> =>
       ipcRenderer.invoke(IpcChannels.PerceptionCameraAuthorize, authorized) as Promise<PerceptionStatus>,
     clearData: (): Promise<PerceptionStatus> => ipcRenderer.invoke(IpcChannels.PerceptionClearData) as Promise<PerceptionStatus>,
+    modelHabits: (): Promise<PerceptionStatus> =>
+      ipcRenderer.invoke(IpcChannels.PerceptionModelHabits) as Promise<PerceptionStatus>,
     openLog: (): Promise<boolean> => ipcRenderer.invoke(IpcChannels.PerceptionOpenLog) as Promise<boolean>,
     sampleNow: (): Promise<PerceptionStatus> => ipcRenderer.invoke(IpcChannels.PerceptionSampleNow) as Promise<PerceptionStatus>,
     timeline: (date?: string): Promise<TimelineTextResult> =>
@@ -293,6 +341,7 @@ const settingsFallback: SettingsWindowBootstrap = {
   ai: createDefaultAIStatus(),
   perception: createDefaultPerceptionStatus(),
   growth: createDefaultGrowthStatus(),
+  plugins: [],
 };
 
 /** 成长状态的兜底值（preload 早于主进程数据就绪时使用）。 */
@@ -326,15 +375,51 @@ function createDefaultPerceptionStatus(): PerceptionStatus {
     lastObservation: null,
     behavior: { idleSeconds: 0, sessionMinutes: 0, switchesLastHour: 0, hour: new Date().getHours(), lateNight: false, userState: 'unknown' },
     presence: { present: true, source: 'unknown', at: '' },
-    habits: { samples: 0, activeDays: 0, latestActiveHour: null, earliestActiveHour: null, typicalNow: null },
+    habits: {
+      samples: 0,
+      activeDays: 0,
+      latestActiveHour: null,
+      earliestActiveHour: null,
+      typicalNow: null,
+      typicalKind: '*',
+      recentDays: 0,
+      windowDays: 21,
+      model: null,
+    },
     lastIntervention: null,
     interventionsToday: 0,
     cameraReady: false,
     windowContext: { count: 0, foregroundTitle: '', foregroundProcess: '', sample: [], backingOff: false },
-    timeline: { date: '', activeMinutes: 0, idleMinutes: 0, byScene: [], byApp: [], recent: [], narrative: '' },
+    timeline: { date: '', activeMinutes: 0, idleMinutes: 0, unaccountedMinutes: 0, byScene: [], byApp: [], recent: [], narrative: '' },
     retention: { days: 0, lastPrunedAt: '', lastPrunedDays: 0 },
     dataDir: '',
     lastError: '',
+  };
+}
+
+/**
+ * 设置窗口的插件管理面。
+ *
+ * 这里只给四个方法（列出 / 启停 / 重载 / 订阅变化）：插件本身的能力
+ * （联网、起进程、发通知、注册面板）**一个都不在设置窗口暴露** ——
+ * 设置窗口是"管插件的地方"，不是"插件运行的地方"。
+ */
+function buildSettingsPluginAPI(): SettingsPluginAPI {
+  return {
+    list: (): Promise<readonly PluginRecord[]> =>
+      ipcRenderer.invoke(IpcChannels.PluginList) as Promise<readonly PluginRecord[]>,
+    setEnabled: (id: string, enabled: boolean): Promise<readonly PluginRecord[]> =>
+      ipcRenderer.invoke(IpcChannels.SettingsWindowSetPluginEnabled, { id, enabled }) as Promise<
+        readonly PluginRecord[]
+      >,
+    reload: (): Promise<number> =>
+      ipcRenderer.invoke(IpcChannels.SettingsWindowReloadPlugins) as Promise<number>,
+    onChanged: (handler: (records: readonly PluginRecord[]) => void): Unsubscribe =>
+      subscribe<readonly PluginRecord[]>(IpcChannels.CommandPluginsChanged, handler),
+    install: (directory?: string): Promise<PluginInstallResult> =>
+      ipcRenderer.invoke(IpcChannels.PluginInstall, { directory }) as Promise<PluginInstallResult>,
+    uninstall: (id: string): Promise<PluginInstallResult> =>
+      ipcRenderer.invoke(IpcChannels.PluginUninstall, { id }) as Promise<PluginInstallResult>,
   };
 }
 
@@ -345,6 +430,10 @@ function buildSettingsBridge(): SettingsWindowBridge {
       ipcRenderer.invoke(IpcChannels.SettingsWindowSetScale, scale) as Promise<PetSettingsState>,
     setAlwaysOnTop: (value: boolean): Promise<PetSettingsState> =>
       ipcRenderer.invoke(IpcChannels.SettingsWindowSetAlwaysOnTop, value) as Promise<PetSettingsState>,
+    setDockOnEdge: (value: boolean): Promise<PetSettingsState> =>
+      ipcRenderer.invoke(IpcChannels.SettingsWindowSetDockOnEdge, value) as Promise<PetSettingsState>,
+    reloadPlugins: (): Promise<number> =>
+      ipcRenderer.invoke(IpcChannels.SettingsWindowReloadPlugins) as Promise<number>,
     openConfigFolder: (): Promise<boolean> =>
       ipcRenderer.invoke(IpcChannels.SettingsWindowOpenConfig) as Promise<boolean>,
     close: (): Promise<void> => ipcRenderer.invoke(IpcChannels.SettingsWindowClose) as Promise<void>,
@@ -353,6 +442,7 @@ function buildSettingsBridge(): SettingsWindowBridge {
     ai: buildAIAPI(),
     perception: buildPerceptionAPI(),
     growth: buildGrowthAPI(),
+    plugins: buildSettingsPluginAPI(),
   };
 }
 
@@ -363,6 +453,10 @@ function buildSettingsBridge(): SettingsWindowBridge {
 const chatFallback: ChatWindowBootstrap = {
   history: [],
   status: createDefaultAIStatus(),
+  notes: { notes: [], unread: 0, dataDir: '', filesDir: '', orphans: [] },
+  diary: { items: [], dataDir: '', todayWritten: false, diaryHour: 22 },
+  view: 'chat',
+  panels: [],
 };
 
 function buildChatBridge(): ChatWindowBridge {
@@ -373,12 +467,57 @@ function buildChatBridge(): ChatWindowBridge {
     history: (): Promise<readonly ChatTurn[]> =>
       ipcRenderer.invoke(IpcChannels.AIChatHistory) as Promise<readonly ChatTurn[]>,
     status: (): Promise<AIStatusView> => ipcRenderer.invoke(IpcChannels.AIStatusGet) as Promise<AIStatusView>,
+    notes: (): Promise<NoteBox> => ipcRenderer.invoke(IpcChannels.AINoteList) as Promise<NoteBox>,
+    composeNote: (): Promise<NoteBox> => ipcRenderer.invoke(IpcChannels.AINoteCompose) as Promise<NoteBox>,
+    markNotesRead: (): Promise<NoteBox> => ipcRenderer.invoke(IpcChannels.AINoteRead) as Promise<NoteBox>,
+    clearNotes: (): Promise<NoteBox> => ipcRenderer.invoke(IpcChannels.AINoteClear) as Promise<NoteBox>,
+    deleteNote: (id: string): Promise<NoteBox> =>
+      ipcRenderer.invoke(IpcChannels.AINoteDelete, id) as Promise<NoteBox>,
+    openNoteFile: (id: string, fileIndex?: number): Promise<boolean> =>
+      ipcRenderer.invoke(IpcChannels.AINoteOpenFile, { id, fileIndex }) as Promise<boolean>,
+    openNotesDir: (): Promise<boolean> => ipcRenderer.invoke(IpcChannels.AINoteOpenDir) as Promise<boolean>,
+    noteFiles: (): Promise<readonly NoteFileEntry[]> =>
+      ipcRenderer.invoke(IpcChannels.AINoteFiles) as Promise<readonly NoteFileEntry[]>,
+    previewNoteFile: (name: string): Promise<NotePreview> =>
+      ipcRenderer.invoke(IpcChannels.AINoteFilePreview, name) as Promise<NotePreview>,
+    openNoteFileByName: (name: string): Promise<boolean> =>
+      ipcRenderer.invoke(IpcChannels.AINoteFileOpen, name) as Promise<boolean>,
+    deleteNoteFile: (name: string): Promise<{ readonly ok: boolean; readonly reason?: string }> =>
+      ipcRenderer.invoke(IpcChannels.AINoteFileDelete, name) as Promise<{ readonly ok: boolean; readonly reason?: string }>,
+    importNoteFile: (): Promise<NoteBox | null> =>
+      ipcRenderer.invoke(IpcChannels.AINoteFileImport) as Promise<NoteBox | null>,
+    /* 日记：与设置窗口的 AI 面板共用同一批 IPC，两边看到的永远是同一份 */
+    diary: (): Promise<DiarySnapshot> => ipcRenderer.invoke(IpcChannels.AIDiaryList) as Promise<DiarySnapshot>,
+    diaryGet: (date: string): Promise<DiaryEntry | null> =>
+      ipcRenderer.invoke(IpcChannels.AIDiaryGet, date) as Promise<DiaryEntry | null>,
+    writeDiary: (): Promise<DiaryEntry> => ipcRenderer.invoke(IpcChannels.AIDiaryWriteNow) as Promise<DiaryEntry>,
+    openDiaryDir: (): Promise<boolean> => ipcRenderer.invoke(IpcChannels.AIDiaryOpenDir) as Promise<boolean>,
+    onDiary: (handler: (snapshot: DiarySnapshot) => void): Unsubscribe =>
+      subscribe<DiarySnapshot>(IpcChannels.CommandDiary, handler),
     onMessage: (handler: (message: ChatMessagePush) => void): Unsubscribe =>
       subscribe<ChatMessagePush>(IpcChannels.CommandChatMessage, handler),
     onStatus: (handler: (status: AIStatusView) => void): Unsubscribe =>
       subscribe<AIStatusView>(IpcChannels.CommandAIStatus, handler),
+    onNotes: (handler: (box: NoteBox) => void): Unsubscribe =>
+      subscribe<NoteBox>(IpcChannels.CommandNotes, handler),
+    onView: (handler: (view: ChatView) => void): Unsubscribe =>
+      subscribe<ChatView>(IpcChannels.CommandChatView, handler),
     openSettings: (): Promise<boolean> => ipcRenderer.invoke(IpcChannels.SettingsWindowShow) as Promise<boolean>,
     close: (): Promise<void> => ipcRenderer.invoke(IpcChannels.ChatWindowClose) as Promise<void>,
+    /*
+     * 插件面板（TODO / 课程表 / 番茄钟画在这里）。
+     *
+     * 注意方向：**面板内容是插件推过来的，用户点击是往回传的**。
+     * 这个窗口自己不认识任何插件，它只是"把净化后的 HTML 画出来 +
+     * 把 `data-plugin-action` 的点击原样送回主进程"。
+     */
+    panels: (): Promise<readonly PluginPanelView[]> =>
+      ipcRenderer.invoke(IpcChannels.ChatWindowPanelsGet) as Promise<readonly PluginPanelView[]>,
+    panelAction: (action: PluginPanelActionPayload): void => send(IpcChannels.PluginPanelAction, action),
+    onPanels: (handler: (panels: readonly PluginPanelView[]) => void): Unsubscribe =>
+      subscribe<readonly PluginPanelView[]>(IpcChannels.CommandPluginPanels, handler),
+    onPanelRequest: (handler: (target: PluginPanelTarget) => void): Unsubscribe =>
+      subscribe<PluginPanelTarget>(IpcChannels.CommandChatPanel, handler),
   };
 }
 
@@ -417,8 +556,7 @@ function buildPetBridge(): PetBridge {
     },
 
     menu: {
-      showContextMenu: (context: { region?: string; animationId?: string | null }): void =>
-        send(IpcChannels.ContextMenuShow, context),
+      showContextMenu: (): void => send(IpcChannels.ContextMenuShow),
     },
 
     tray: {
@@ -436,6 +574,8 @@ function buildPetBridge(): PetBridge {
 
     plugins: {
       list: () => ipcRenderer.invoke(IpcChannels.PluginList),
+      discover: (): Promise<readonly DiscoveredPlugin[]> =>
+        ipcRenderer.invoke(IpcChannels.PluginDiscover) as Promise<readonly DiscoveredPlugin[]>,
       fetchCode: (id: string): Promise<PluginCodePayload | null> =>
         ipcRenderer.invoke(IpcChannels.PluginFetchCode, id) as Promise<PluginCodePayload | null>,
       reload: (id: string): Promise<void> => ipcRenderer.invoke(IpcChannels.PluginReload, id) as Promise<void>,
@@ -445,6 +585,54 @@ function buildPetBridge(): PetBridge {
         send(IpcChannels.PluginError, payload),
       onReloadRequested: (handler: () => void): Unsubscribe =>
         subscribe(IpcChannels.CommandReloadPlugins, () => handler()),
+
+      /* --------------------- 运行期启停（"插件可随时关闭"） --------------------- */
+      setEnabled: (id: string, enabled: boolean) =>
+        ipcRenderer.invoke(IpcChannels.PluginSetEnabled, { id, enabled }),
+      onEnabled: (handler: (payload: PluginEnabledPayload) => void): Unsubscribe =>
+        subscribe<PluginEnabledPayload>(IpcChannels.CommandPluginEnabled, handler),
+
+      /* --------------------------- 安装 / 卸载 --------------------------- */
+      install: (directory?: string): Promise<PluginInstallResult> =>
+        ipcRenderer.invoke(IpcChannels.PluginInstall, { directory }) as Promise<PluginInstallResult>,
+      uninstall: (id: string): Promise<PluginInstallResult> =>
+        ipcRenderer.invoke(IpcChannels.PluginUninstall, { id }) as Promise<PluginInstallResult>,
+      onRemoved: (handler: (payload: { id: string }) => void): Unsubscribe =>
+        subscribe<{ id: string }>(IpcChannels.CommandPluginRemoved, handler),
+
+      /* --------------------- 受权限约束的系统能力（执法在 Main） --------------------- */
+      net: (pluginId: string, request: PluginNetRequest): Promise<PluginNetResponse> =>
+        ipcRenderer.invoke(IpcChannels.PluginNet, { pluginId, request }) as Promise<PluginNetResponse>,
+      process: (pluginId: string, request: PluginProcessRequest): Promise<PluginProcessResult> =>
+        ipcRenderer.invoke(IpcChannels.PluginProcess, { pluginId, action: 'run', request }) as Promise<PluginProcessResult>,
+      which: (pluginId: string, command: string): Promise<string | null> =>
+        ipcRenderer.invoke(IpcChannels.PluginProcess, {
+          pluginId,
+          action: 'which',
+          request: { command },
+        }) as Promise<string | null>,
+      pythonInfo: (pluginId: string): Promise<PluginPythonInfo> =>
+        ipcRenderer.invoke(IpcChannels.PluginPython, { pluginId, action: 'info' }) as Promise<PluginPythonInfo>,
+      pythonRun: (pluginId: string, request: PluginPythonRequest): Promise<PluginProcessResult> =>
+        ipcRenderer.invoke(IpcChannels.PluginPython, { pluginId, action: 'run', request }) as Promise<PluginProcessResult>,
+      notify: (pluginId: string, request: PluginNotificationRequest): Promise<boolean> =>
+        ipcRenderer.invoke(IpcChannels.PluginNotify, { pluginId, request }) as Promise<boolean>,
+      mail: (pluginId: string, request: PluginMailRequest): Promise<PluginMailResult> =>
+        ipcRenderer.invoke(IpcChannels.PluginMailSend, { pluginId, request }) as Promise<PluginMailResult>,
+      openExternal: (pluginId: string, url: string): Promise<boolean> =>
+        ipcRenderer.invoke(IpcChannels.PluginOpenExternal, { pluginId, url }) as Promise<boolean>,
+      startTimer: (pluginId: string, timer: Omit<PluginTimerPayload, 'pluginId'>): Promise<boolean> =>
+        ipcRenderer.invoke(IpcChannels.PluginTimer, { pluginId, action: 'start', ...timer }) as Promise<boolean>,
+      cancelTimer: (pluginId: string, timerId: string): Promise<boolean> =>
+        ipcRenderer.invoke(IpcChannels.PluginTimer, { pluginId, timerId, action: 'cancel' }) as Promise<boolean>,
+      contributeUI: (contribution: PluginUIContributionPayload): void =>
+        send(IpcChannels.PluginUIContribute, contribution),
+      openPanel: (pluginId: string, panelId: string): Promise<boolean> =>
+        ipcRenderer.invoke(IpcChannels.PluginOpenPanel, { pluginId, panelId }) as Promise<boolean>,
+      onUIEvent: (handler: (payload: PluginUIEvent) => void): Unsubscribe =>
+        subscribe<PluginUIEvent>(IpcChannels.CommandPluginUIEvent, handler),
+      onTimer: (handler: (payload: PluginTimerTickPayload) => void): Unsubscribe =>
+        subscribe<PluginTimerTickPayload>(IpcChannels.CommandPluginTimer, handler),
     },
 
     commands: {

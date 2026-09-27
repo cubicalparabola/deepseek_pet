@@ -1,14 +1,9 @@
 {
-  "_comment": "插件开关清单：enabled=false 即停用，path 为相对 plugins/ 的目录（默认与 id 同名）。核心程序无需修改。",
+  "_comment": "插件开关清单：enabled=false 即停用，path 为相对 plugins/ 的目录（默认与 id 同名）。装插件不用手改这里 —— 设置窗口的「插件」面板有「安装插件…」。",
   "plugins": [
     {
-      "id": "hello-plugin",
-      "path": "examples/hello-plugin",
-      "enabled": true
-    },
-    {
-      "id": "random-action-plugin",
-      "path": "examples/random-action-plugin",
+      "id": "todo-plugin",
+      "path": "todo-plugin",
       "enabled": true
     }
   ]

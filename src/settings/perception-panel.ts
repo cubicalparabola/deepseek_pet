@@ -24,7 +24,7 @@ import type {
   PerceptionViewResult,
   UserState,
 } from '../shared/perception-types';
-import { isQuietHour, sceneLabel } from '../shared/perception';
+import { appDisplayName, isQuietHour, sceneLabel } from '../shared/perception';
 import { formatDuration } from '../shared/timeline';
 import type { PerceptionAPI } from '../shared/ipc';
 
@@ -143,6 +143,13 @@ function formatClock(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return '--:--';
   return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+/** 时间戳 -> `M 月 D 日 HH:MM`（"最近一次建模"用）。 */
+function formatDateTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '未知时间';
+  return `${date.getMonth() + 1} 月 ${date.getDate()} 日 ${formatClock(iso)}`;
 }
 
 /** 一行 "start:00 – end:00"；没学到就用文字占位，绝不显示 null。 */
@@ -307,6 +314,20 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   samplingSection.appendChild(fieldRow('perception-capture-interval-ms', '屏幕采样间隔（毫秒）', intervalInput,
     '默认 30000，越小越费 token。'));
 
+  /*
+   * 模型复核间隔：**省 token 的关键开关**。
+   *
+   * 一次视觉调用约 1450~1700 token，30 秒一次就是约 18 万 token/小时 ——
+   * 200,000/天的预算一小时就见底。而屏幕上的场景并不会 30 秒变一次，
+   * 所以中间的采样沿用上一次的模型判断（仍然每 30 秒记一条观察，时间线不断）。
+   */
+  const modelRefreshInput = makeInput('number', 'perception-model-refresh-ms', '模型复核间隔（毫秒）');
+  modelRefreshInput.min = '30000';
+  modelRefreshInput.step = '30000';
+  samplingSection.appendChild(fieldRow('perception-model-refresh-ms', '模型复核间隔（毫秒）', modelRefreshInput,
+    '默认 300000（5 分钟）：换了应用立刻调模型，否则最多 5 分钟才调一次，'
+    + '中间的采样沿用上一次的判断。调小 = 更细但更费 token；调到采样间隔就是"每次都调模型"。'));
+
   const widthInput = makeInput('number', 'perception-capture-width', '截图宽度');
   widthInput.min = '160';
   widthInput.max = '1920';
@@ -402,12 +423,13 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   samplingSection.appendChild(fieldRow('perception-long-session-minutes', '连续使用提醒（分钟）', longSessionInput,
     '连续坐满这么久就提醒你起来活动一下。'));
 
-  const lateNightInput = makeInput('number', 'perception-late-night-hour', '深夜提醒起点');
+  const lateNightInput = makeInput('number', 'perception-late-night-hour', '深夜起点');
   lateNightInput.min = '0';
   lateNightInput.max = '6';
   lateNightInput.step = '1';
-  samplingSection.appendChild(fieldRow('perception-late-night-hour', '深夜提醒起点（0~6 点）', lateNightInput,
-    '默认 1 点；判定区间是「起点 ~ 凌晨 5 点」。'));
+  samplingSection.appendChild(fieldRow('perception-late-night-hour', '深夜起点（0~6 点）', lateNightInput,
+    '默认 1 点；判定区间是「起点 ~ 凌晨 5 点」。'
+    + '它决定"现在算不算深夜"，用于习惯预测里的那句「今天已经比你平时睡觉的时间晚 N 个小时了」。'));
 
   const overheatInput = makeInput('number', 'perception-overheat-threshold-c', 'GPU 过热阈值（℃）');
   overheatInput.min = '40';
@@ -416,6 +438,14 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   samplingSection.appendChild(fieldRow('perception-overheat-threshold-c', 'GPU 过热阈值（℃）', overheatInput,
     '用 nvidia-smi 读到 GPU 温度达到这个值就演一次「过热」（默认 80）。'
     + '读不到温度（没有 N 卡 / 没有 nvidia-smi）时不触发，也不会瞎报。'));
+
+  const habitModelHourInput = makeInput('number', 'perception-habit-model-hour', '习惯建模时刻');
+  habitModelHourInput.min = '0';
+  habitModelHourInput.max = '23';
+  habitModelHourInput.step = '1';
+  samplingSection.appendChild(fieldRow('perception-habit-model-hour', '习惯建模时刻（0~23 点）', habitModelHourInput,
+    '每天到这个点之后的第一次采样，她会把当天的习惯统计归纳成一段话（默认 22 点，每天最多一次）。'
+    + '不必等它 —— 下面的「习惯模型」里有「立刻建模」。'));
 
   const quietStartInput = makeInput('number', 'perception-quiet-start', '免打扰开始小时');
   quietStartInput.min = '0';
@@ -449,15 +479,33 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   cameraHint.textContent = '摄像头画面只在内存里分析一次，永不写盘；未授权时不会打开摄像头，也不会发出任何取帧请求。';
   cameraSection.append(cameraNotice, actionRow(cameraButton), cameraHint);
 
-  /* 六、3.6 习惯画像 */
+  /* 六、3.6 习惯画像 + 习惯模型 */
 
   const habitsSection = makeSection('习惯画像（3.6）');
   const habitsReadout = makeReadout('学到了');
   const habitsTypicalReadout = makeReadout('这个点通常');
-  habitsSection.append(habitsReadout.row, habitsTypicalReadout.row);
+  const habitsDecayReadout = makeReadout('记忆衰减');
+  habitsSection.append(habitsReadout.row, habitsTypicalReadout.row, habitsDecayReadout.row);
   const habitsHint = el('p', 'perception-hint');
-  habitsHint.textContent = '习惯统计只存文本观察记录，不含任何截图；数据不够时她不会装懂（宁可不提）。';
+  habitsHint.textContent = '习惯统计只存文本观察记录，不含任何截图；数据不够时她不会装懂（宁可不提）。'
+    + '同一时段每天只记一次，并且会按天遗忘 —— 所以她学到的是你"现在"的作息，换了作息它会自己跟上。';
   habitsSection.appendChild(habitsHint);
+
+  /*
+   * 习惯模型：把上面的统计归纳成一段话。
+   *
+   * 为什么单独一块、还带一个"立刻建模"按钮：
+   * - 它每天只做一次（`habitModelHour` 之后），用户想马上看到结果需要一个入口；
+   * - 它会调用大模型，因此必须让用户看得见"这次是模型写的还是本地模板拼的、花了多少 token"。
+   */
+  const modelReadout = makeReadout('她眼里的你');
+  const modelMeta = el('p', 'perception-hint');
+  modelMeta.id = 'perception-habit-model-meta';
+  modelMeta.textContent = '还没有建模过。';
+  const modelList = el('ul', 'perception-habit-model-list');
+  modelList.id = 'perception-habit-model-list';
+  const modelButton = makeButton('perception-habit-model-now', '立刻建模', 'ghost');
+  habitsSection.append(modelReadout.row, modelMeta, modelList, actionRow(modelButton));
 
   /* 七、3.2 按需看屏幕 */
 
@@ -505,7 +553,14 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   logList.id = 'perception-log-list';
   logList.setAttribute('role', 'list');
   const logRefresh = makeButton('perception-log-refresh', '刷新日志', 'ghost');
-  logSection.append(logList, actionRow(logRefresh));
+  /*
+   * 「立刻采样一次」：从托盘菜单搬来的（菜单现在只放日常动作，感知的开关与
+   * 调试入口全部收进这个面板）。语义与菜单里那条**完全相同** ——
+   * 强制采样、不受采样节流影响（`sampleNow` -> `tick(now, true)`），
+   * 否则用户点一下没反应，只有行为数字悄悄动了一下。
+   */
+  const logSample = makeButton('perception-sample-now', '立刻采样一次', 'ghost');
+  logSection.append(logList, actionRow(logSample, logRefresh));
 
   panel.append(statusSection, switchesSection, privacySection, samplingSection,
     cameraSection, habitsSection, timelineSection, viewSection, logSection);
@@ -645,7 +700,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
       observationReadout.value.textContent = '还没有观察记录';
       observationReadout.value.className = 'perception-readout-value perception-value-muted';
     } else {
-      const parts = [formatClock(observation.at), sceneLabel(observation.scene), observation.app, observation.activity]
+      const parts = [formatClock(observation.at), sceneLabel(observation.scene), observation.appLabel ?? observation.app, observation.activity]
         .filter((part) => part.trim() !== '');
       const text = parts.join(' · ');
       observationReadout.value.textContent = observation.sensitive ? `${text}（私人内容）` : text;
@@ -722,14 +777,65 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
    * 没有 `observedHours` / `hours` 字段，硬凑一个 HabitProfile 传进去等于伪造数据。
    * 这里按 describeHabits 的同样口径拼装，只展示状态里真实存在的量。
    */
+  /**
+   * 习惯画像。
+   *
+   * 刻意不直接调 `describeHabits()`：`PerceptionStatus.habits` 是**摘要视图**，
+   * 没有 `observedHours` / `hours` 字段，硬凑一个 HabitProfile 传进去等于伪造数据。
+   * 这里按 describeHabits 的同样口径拼装，只展示状态里真实存在的量。
+   */
   function renderHabits(status: PerceptionStatus): void {
     const { habits } = status;
     habitsReadout.value.textContent = habits.samples === 0
       ? '还没学到东西（打开感知后我会慢慢记）'
-      : `采样 ${habits.samples} 次 · 活跃 ${habits.activeDays} 天`
+      : `采样 ${habits.samples} 次 · 活跃 ${habits.activeDays} 天 · 最近 ${habits.recentDays} 天有数据`
         + ` · 通常 ${hourRange(habits.earliestActiveHour, habits.latestActiveHour)} 在线`;
+    const kindLabel = habits.typicalKind === 'weekend' ? '周末' : habits.typicalKind === 'weekday' ? '工作日' : '平时';
     habitsTypicalReadout.value.textContent = habits.typicalNow === null
-      ? '还看不出来（样本不够）' : sceneLabel(habits.typicalNow);
+      ? `还看不出来（${kindLabel}这个点的数据还不够）`
+      : `${sceneLabel(habits.typicalNow)}（按${kindLabel}统计）`;
+    // 遗忘 = 窗口滑动：直说"只看最近 N 天"，比"每天衰减多少"好懂得多
+    habitsDecayReadout.value.textContent = habits.windowDays > 0
+      ? `只看最近 ${habits.windowDays} 天（更早的观察到点就忘）`
+      : '不遗忘（永久累积）';
+
+    /* 习惯模型：模型写的那段 + 本地算出的条目（条目才是"事实"，模型只负责措辞） */
+    const model = habits.model;
+    if (!model) {
+      modelReadout.value.textContent = '还没有建模过（到「习惯建模时刻」会自动做一次，也可以点下面的按钮）';
+      modelReadout.value.className = 'perception-readout-value perception-value-muted';
+    } else {
+      modelReadout.value.textContent = model.summary;
+      modelReadout.value.className = 'perception-readout-value';
+    }
+    if (model) {
+      const when = model.updatedAt === '' ? '未知时间' : formatDateTime(model.updatedAt);
+      const sourceLabel = model.source === 'llm' ? '大模型' : '本地模板';
+      modelMeta.textContent = `最近一次：${when} · ${sourceLabel}`
+        + ` · 基于 ${model.samples} 次观察 / ${model.activeDays} 天`
+        + (model.tokens > 0 ? ` · ${model.tokens} token` : '')
+        + (model.error === '' ? '' : ` · ${model.error}`);
+    } else {
+      modelMeta.textContent = '还没有建模过。';
+    }
+    modelList.textContent = '';
+    const routines = model?.routines ?? [];
+    if (routines.length === 0) {
+      const empty = el('li', 'perception-empty');
+      empty.textContent = model
+        ? '还没有稳定到能下结论的时段（每天按时段只记一次，攒几天就会出现）。'
+        : '—';
+      modelList.appendChild(empty);
+    } else {
+      for (const routine of routines) {
+        const item = el('li', 'perception-habit-model-item');
+        // 条目全部来自本地统计，天数是真的 —— 模型编不出这种数字
+        item.textContent = `${routine.when}：${routine.what}`
+          + (routine.app === '' ? '' : `（${routine.app}）`)
+          + ` · ${routine.days} 天`;
+        modelList.appendChild(item);
+      }
+    }
   }
 
   /**
@@ -743,6 +849,10 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     const hasData = timeline.activeMinutes > 0 || timeline.idleMinutes > 0;
     timelineTotals.value.textContent = hasData
       ? `在电脑前 ${formatDuration(timeline.activeMinutes)} · 离开/没动 ${formatDuration(timeline.idleMinutes)}`
+        + (timeline.unaccountedMinutes >= 1
+          // 把差额写明：否则"在线 8 小时、活动 20 分钟"看起来就像统计错了
+          ? ` · 没认出来/没采样 ${formatDuration(timeline.unaccountedMinutes)}`
+          : '')
       : '今天还没有记录';
     timelineTotals.value.className = hasData
       ? 'perception-readout-value' : 'perception-readout-value perception-value-muted';
@@ -753,7 +863,8 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
           .join('、');
     timelineApps.value.textContent = timeline.byApp.length === 0
       ? '—'
-      : timeline.byApp.slice(0, 3).map((item) => `${item.app} ${formatDuration(item.minutes)}`).join('、');
+      // 聚合的 key 是稳定身份（进程名），显示时统一走固定名字表
+      : timeline.byApp.slice(0, 3).map((item) => `${appDisplayName(item.app)} ${formatDuration(item.minutes)}`).join('、');
 
     timelineList.textContent = '';
     if (timeline.recent.length === 0) {
@@ -769,7 +880,12 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
         scene.textContent = sceneLabel(segment.scene);
         const text = el('span', 'perception-log-text');
         const minutes = Math.max(0, (new Date(segment.end).getTime() - new Date(segment.start).getTime()) / 60000);
-        text.textContent = `${segment.app.trim() === '' ? '（未知程序）' : segment.app.trim()} · ${formatDuration(minutes)}`;
+        // 已知程序用固定名字（同一个 Edge 不许叫三个名字），其余才用模型读出来的友好名
+        const appName = appDisplayName(segment.app, segment.appLabel);
+        // 桥接进来的"没认出来"要写明次数：这段时长里有多少是推断，用户有权知道
+        const bridged = segment.unrecognizedSamples ?? 0;
+        const note = bridged > 0 ? `（其中 ${bridged} 次没认出来）` : '';
+        text.textContent = `${appName === '' ? '（未知程序）' : appName} · ${formatDuration(minutes)}${note}`;
         item.append(time, scene, text);
         timelineList.appendChild(item);
       }
@@ -820,6 +936,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     }
 
     setValue(intervalInput, String(settings.captureIntervalMs));
+    setValue(modelRefreshInput, String(settings.modelRefreshMs));
     setValue(widthInput, String(settings.captureWidth));
     setValue(urlWidthInput, String(settings.urlCaptureWidth));
     if (!editing(captureUrlInput)) captureUrlInput.checked = settings.captureUrl;
@@ -833,6 +950,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     setValue(proactiveMaxInput, String(settings.proactiveMaxPerHour));
     setValue(longSessionInput, String(settings.longSessionMinutes));
     setValue(lateNightInput, String(settings.lateNightHour));
+    setValue(habitModelHourInput, String(settings.habitModelHour));
     setValue(overheatInput, String(settings.overheatThresholdC));
     setValue(quietStartInput, String(settings.quietHours.start));
     setValue(quietEndInput, String(settings.quietHours.end));
@@ -937,7 +1055,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
   function buildSamplingPatch(): PerceptionSettingsPatch | null {
     // 先读一遍只用来判断"有没有空/非数字"，错误提示要具体到这一步
     const fields = [
-      numberValue(intervalInput), numberValue(widthInput), numberValue(urlWidthInput), numberValue(cameraIntervalInput),
+      numberValue(intervalInput), numberValue(modelRefreshInput), numberValue(widthInput), numberValue(urlWidthInput), numberValue(cameraIntervalInput),
       numberValue(retentionInput),
       numberValue(proactiveMinInput), numberValue(proactiveMaxInput), numberValue(longSessionInput),
       numberValue(lateNightInput), numberValue(overheatInput),
@@ -950,6 +1068,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     // 已确认全部非 null：逐项落到具名常量收窄类型（strict + noUncheckedIndexedAccess 下
     // 数组解构仍会带 undefined，项目约定又不许用非空断言）
     const ms = numberValue(intervalInput) ?? 0;
+    const modelRefresh = numberValue(modelRefreshInput) ?? 0;
     const px = numberValue(widthInput) ?? 0;
     const urlPx = numberValue(urlWidthInput) ?? 0;
     const winLimit = numberValue(windowLimitInput) ?? 0;
@@ -960,11 +1079,13 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     const proactiveMax = numberValue(proactiveMaxInput) ?? 0;
     const longMin = numberValue(longSessionInput) ?? 0;
     const late = numberValue(lateNightInput) ?? 0;
+    const modelHour = numberValue(habitModelHourInput) ?? 0;
     const overheat = numberValue(overheatInput) ?? 0;
     const qStart = numberValue(quietStartInput) ?? 0;
     const qEnd = numberValue(quietEndInput) ?? 0;
     return {
       captureIntervalMs: clampInt(ms, 5000, 3600000),
+      modelRefreshMs: clampInt(modelRefresh, 30000, 86400000),
       captureWidth: clampInt(px, 160, 1920),
       captureUrl: captureUrlInput.checked,
       urlCaptureWidth: clampInt(urlPx, 640, 3840),
@@ -978,6 +1099,7 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
       proactiveMaxPerHour: clampInt(proactiveMax, 0, 60),
       longSessionMinutes: clampInt(longMin, 10, 1440),
       lateNightHour: clampInt(late, 0, 6),
+      habitModelHour: clampInt(modelHour, 0, 23),
       overheatThresholdC: clampInt(overheat, 40, 110),
       quietHours: { start: clampInt(qStart, 0, 23), end: clampInt(qEnd, 0, 23) },
     };
@@ -1040,6 +1162,20 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
     });
   });
 
+  /* 立刻采样一次：成功与否都刷新状态与日志，用户能立刻看到"这一次采到了什么"。 */
+  logSample.addEventListener('click', () => {
+    withBusy(logSample, async () => {
+      try {
+        const status = await api.sampleNow();
+        renderStatus(status);
+        refreshLog();
+        setPanelNote(status.capturing ? '已采样一次' : `没采到（${status.pausedReason || '感知未开启'}）`);
+      } catch (error) {
+        setPanelError(error instanceof Error ? error.message : String(error));
+      }
+    });
+  });
+
   /*
    * 「让模型总结今天」：把当天的时间线交给模型写一段"她记得的今天"。
    * 这是本模块里**唯一一处按需的额外模型调用**（需求明确要"每天再让模型写一段叙述"），
@@ -1066,13 +1202,29 @@ export function mountPerceptionPanel(root: HTMLElement, api: PerceptionAPI, init
 
   clearDataButton.addEventListener('click', () => {
     // 清空观察记录与习惯画像不可撤销，必须二次确认（window.confirm 不是 eval，CSP 下可用）
-    if (!window.confirm('确定要清空感知数据吗？观察记录与习惯画像都会被删除，且无法恢复（截图从来没有落过盘）。')) return;
+    if (!window.confirm('确定要清空感知数据吗？观察记录、习惯画像与习惯模型都会被删除，且无法恢复（截图从来没有落过盘）。')) return;
     withBusy(clearDataButton, async () => {
       const status = await api.clearData();
       renderStatus(status);
       syncInputs(status, 'sampling');
       flashNote('感知数据已清空');
       refreshLogThrottled(true);
+    });
+  });
+
+  /*
+   * 「立刻建模」：会调用大模型，所以要给出明确的忙碌态与结果反馈
+   * （按钮文案变"建模中…"，结束后把新模型画进面板）。
+   * 这是唯一一处"用户手动触发一次 LLM 调用"的感知入口，另一个是时间线叙述。
+   */
+  modelButton.addEventListener('click', () => {
+    withBusy(modelButton, async () => {
+      const status = await api.modelHabits();
+      renderStatus(status);
+      const model = status.habits.model;
+      flashNote(model === null
+        ? '还没有可建模的数据'
+        : (model.source === 'llm' ? '习惯模型已更新（大模型）' : '习惯模型已更新（本地模板）'));
     });
   });
 

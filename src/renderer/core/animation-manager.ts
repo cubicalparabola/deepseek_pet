@@ -48,7 +48,7 @@ export interface AnimationManagerOptions {
    * 其它自动来源（system / behavior / plugin / ai）的请求一律拒 `'docked'`。
    * **用户明确点的**（`source: 'user'`）不受限。
    *
-   * 为什么必须在这一层拦（实测真 bug）：收起状态的默认姿势是 watch / lie（三段式）。
+   * 为什么必须在这一层拦（实测真 bug）：收起状态的默认姿势是 watch / sleep（三段式）。
    * 只要有别的动画被请求（例如自愈链路硬编码回 idle、插件、AI），
    * 就会 `watch -> end -> 别的动画`；而那条动画若自己循环（idle 就是），
    * 她就停在"没收起的样子"，再被 `resumeFallbackLoop` 接回默认又是一次 end ——
@@ -81,7 +81,7 @@ interface ActivePlayback {
   /**
    * 这次播放用的 loop 标志（`PlayOptions.loop` 覆盖优先）。
    *
-   * 用途：状态的**默认动画**要把一条"一次性"素材循环起来（例如"下方收起"的 lie），
+   * 用途：状态的**默认动画**要把一条"一次性"素材循环起来（例如"下方收起"的 sleep），
    * 而同一个 id 在随机池里又只该播一遍 —— 循环与否由播放参数决定，不由定义决定。
    */
   loop: boolean;
@@ -130,6 +130,13 @@ export class AnimationManager {
   private queue: QueuedRequest | null = null;
   /** "等持续动画收尾段播完再播"的挂起请求（见 requestAnimation 第 5 步）。 */
   private pendingAfterEnd: PendingRequest | null = null;
+  /**
+   * `pendingAfterEnd` / 排队项**已经排期但还没开始**的这段窗口（见 `isHandoverPending`）。
+   *
+   * 只在 `finishActive` 里"派发 animation:end 之前置真、派发之后置假"，
+   * 因此它描述的是"这次 end 之后马上有新动画接上"，不会跨事件残留。
+   */
+  private handoverPending = false;
   /**
    * 收尾段抖动看门狗：`animationId -> 最近几次进入 end 段的时间戳`。
    *
@@ -284,13 +291,12 @@ export class AnimationManager {
     // 唯一的例外是 bypassCooldown：它代表"用户明确点了这一条动画"（托盘 / 右键菜单），
     // 用户的主动操作不该被防刷屏逻辑吞掉（bomb 冷却 5 分钟，被挡时看起来像"只能播一次"）。
     if (definition.cooldown > 0) {
-      const last = this.lastPlayedAt.get(animationId);
-      const remaining = last === undefined ? 0 : definition.cooldown - (Date.now() - last);
-      if (last !== undefined && remaining > 0 && options.bypassCooldown !== true) {
+      const remaining = this.cooldownRemainingMs(animationId);
+      if (remaining > 0 && options.bypassCooldown !== true) {
         this.reject(animationId, 'cooldown', options, `冷却中（剩余 ${remaining}ms）`);
         return { accepted: false, animationId, reason: 'cooldown' };
       }
-      if (last !== undefined && remaining > 0) {
+      if (remaining > 0) {
         this.logger.info('manual play bypasses cooldown', {
           data: { animationId, remaining, source: options.source ?? 'system' },
         });
@@ -546,6 +552,36 @@ export class AnimationManager {
   /** 是否有"等收尾段播完就播"的挂起请求。 */
   public hasPendingAfterEnd(): boolean {
     return this.pendingAfterEnd !== null;
+  }
+
+  /**
+   * 是否有"马上要接上的下一条"（收尾段挂起 / 排队项）仍在路上。
+   *
+   * 为什么需要这个标志：抢占持续动画时，`flushPendingAfterEnd()` 会把新请求
+   * 排到 `setTimeout(0)`，**在它真正开始之前**就同步发出了 `animation:end`。
+   * 此刻 `getCurrentAnimation()` 已经是 null，渲染层只凭它就判断"没有动画了"
+   * → 迁 IDLE → 接回默认动画 → 刚接回就被挂起项顶掉，视觉上多出一段
+   * `默认 -> 默认 end -> 目标`，也就是"她刚趴下又要爬起来"。
+   *
+   * 这个标志只在**那一次 `animation:end` 的同步派发期间**为真（见 `finishActive`），
+   * 因此不可能跨事件残留。
+   */
+  public isHandoverPending(): boolean {
+    return this.handoverPending;
+  }
+
+  /** 某条动画当前是否在冷却里（渲染层挑"点击反应"时要避开正在冷却的那条）。 */
+  public isOnCooldown(animationId: string): boolean {
+    return this.cooldownRemainingMs(animationId) > 0;
+  }
+
+  /** 冷却剩余毫秒（0 = 不在冷却 / 没有冷却配置）。 */
+  private cooldownRemainingMs(animationId: string): number {
+    const definition = this.registry.get(animationId);
+    if (!definition || definition.cooldown <= 0) return 0;
+    const last = this.lastPlayedAt.get(animationId);
+    if (last === undefined) return 0;
+    return Math.max(0, definition.cooldown - (Date.now() - last));
   }
 
   /**
@@ -1352,14 +1388,21 @@ export class AnimationManager {
      * 它会在新动画结束时由下一次 finishActive 回放（否则新动画刚起就被排队项顶掉）。
      */
     const resumed = this.flushPendingAfterEnd();
-    if (!resumed) this.flushQueue();
+    const queued = resumed ? false : this.flushQueue();
 
+    /*
+     * 派发 `animation:end` 之前把"马上有新动画接上"这件事告诉渲染层
+     * （两条挂起路径都会置真，见 `isHandoverPending` 的注释），
+     * 派发之后立刻复位 —— 于是这个标志的寿命严格等于这一次同步派发。
+     */
+    this.handoverPending = resumed || queued;
     this.eventBus.emit(PetEvents.AnimationEnd, {
       animationId: active.animation.id,
       completed,
       reason,
       source: active.source,
     });
+    this.handoverPending = false;
   }
 
   /**
@@ -1380,14 +1423,15 @@ export class AnimationManager {
     return true;
   }
 
-  private flushQueue(): void {
+  private flushQueue(): boolean {
     const queued = this.queue;
-    if (!queued) return;
+    if (!queued) return false;
     this.queue = null;
     this.logger.info('playing queued animation', { data: { animationId: queued.animationId } });
     window.setTimeout(() => {
       void this.requestAnimation(queued.animationId, { ...queued.options, interrupt: 'auto' });
     }, 0);
+    return true;
   }
 
   /**
@@ -1476,6 +1520,7 @@ export class AnimationManager {
     this.active = null;
     this.queue = null;
     this.pendingAfterEnd = null;
+    this.handoverPending = false;
   }
 }
 

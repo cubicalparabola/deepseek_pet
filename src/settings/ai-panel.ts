@@ -200,6 +200,27 @@ function activityKey(status: AIStatusView): string {
   return `${status.calls}:${status.tokensUsed}`;
 }
 
+/** 用量用途 -> 中文（面板上那一行"本次运行"用）。 */
+function purposeLabel(purpose: string): string {
+  const LABELS: Readonly<Record<string, string>> = {
+    chat: '聊天',
+    'chat-tools': '聊天（查记忆）',
+    'speak-up': '主动开口',
+    diary: '日记',
+    note: '小纸条',
+    summary: '前情摘要',
+    facts: '事实整理',
+    vision: '看屏幕',
+    camera: '摄像头',
+    'view-screen': '按需看屏幕',
+    reflection: '自我反思',
+    timeline: '今天在做什么',
+    'habit-model': '习惯建模',
+    other: '其它',
+  };
+  return LABELS[purpose] ?? purpose;
+}
+
 /* -------------------------------------------------------------------------- */
 /* 面板                                                                        */
 /* -------------------------------------------------------------------------- */
@@ -230,9 +251,10 @@ export function mountAIPanel(root: HTMLElement, api: AIAPI, initial: AIStatusVie
   const satietyReadout = makeReadout('饱腹');
   const callsReadout = makeReadout('调用次数');
   const tokensReadout = makeReadout('累计 token');
+  const sessionReadout = makeReadout('本次运行');
   const lastErrorReadout = makeReadout('最近错误');
   const dataDirReadout = makeReadout('数据目录');
-  for (const readout of [modeReadout, presenceReadout, moodReadout, satietyReadout, callsReadout, tokensReadout, lastErrorReadout, dataDirReadout]) {
+  for (const readout of [modeReadout, presenceReadout, moodReadout, satietyReadout, callsReadout, tokensReadout, sessionReadout, lastErrorReadout, dataDirReadout]) {
     overview.appendChild(readout.row);
   }
   dataDirReadout.value.classList.add('ai-small');
@@ -281,6 +303,20 @@ export function mountAIPanel(root: HTMLElement, api: AIAPI, initial: AIStatusVie
       '整理间隔（轮）',
       consolidateInput,
       '每 N 轮对话让模型整理一次长期记忆；0 = 不自动整理，只在写日记时整理。',
+    ),
+  );
+
+  const keepMemoryInput = makeInput('number', 'ai-keep-memory-days', '记忆保留天数');
+  keepMemoryInput.min = '0';
+  keepMemoryInput.max = '3650';
+  keepMemoryInput.step = '1';
+  switches.appendChild(
+    fieldRow(
+      'ai-keep-memory-days',
+      '记忆保留天数',
+      keepMemoryInput,
+      '明细流水（events/chat/memory-log）超过这个天数就清掉，默认 180；0 = 永久保留。'
+      + '长期事实与记忆宫殿不受影响。',
     ),
   );
 
@@ -685,6 +721,20 @@ export function mountAIPanel(root: HTMLElement, api: AIAPI, initial: AIStatusVie
     tokensReadout.value.textContent = settings.budget.budget > 0
       ? `${status.tokensUsed} / ${settings.budget.budget}`
       : String(status.tokensUsed);
+    /*
+     * 「本次运行」：把这一轮开着花掉的 token 按用途摊开。
+     * 为什么单列：总账是跨重启的累计，看不出"刚刚发生了什么"；
+     * 而每分钟一次的视觉理解与每天的反思曾经完全不进账，正是这里能暴露的东西。
+     */
+    sessionReadout.value.textContent = status.sessionTokens === 0
+      ? '还没调用过大模型'
+      : `${status.sessionTokens} token · ` +
+        (status.sessionUsage.length === 0
+          ? '—'
+          : status.sessionUsage
+              .slice(0, 4)
+              .map((item) => `${purposeLabel(item.purpose)} ${item.tokens}`)
+              .join(' · '));
 
     // lastError 非空才标红：空串显示"无"，避免一整条红字吓人
     lastErrorReadout.value.textContent = status.lastError === '' ? '无' : status.lastError;
@@ -728,6 +778,7 @@ export function mountAIPanel(root: HTMLElement, api: AIAPI, initial: AIStatusVie
       setChecked(diaryInput, settings.diary);
       setValue(diaryHourInput, String(settings.diaryHour));
       setValue(consolidateInput, String(settings.consolidateEvery));
+      setValue(keepMemoryInput, String(settings.keepMemoryDays));
       return;
     }
 
@@ -940,11 +991,20 @@ export function mountAIPanel(root: HTMLElement, api: AIAPI, initial: AIStatusVie
   function buildSwitchesPatch(): AISettingsPatch | null {
     const hour = numberValue(diaryHourInput);
     const every = numberValue(consolidateInput);
-    if (hour === null || every === null) {
-      setPanelError('「写日记时刻」和「整理间隔」都必须填数字。');
+    const keepDays = numberValue(keepMemoryInput);
+    if (hour === null || every === null || keepDays === null) {
+      setPanelError('「写日记时刻」「整理间隔」「记忆保留天数」都必须填数字。');
       return null;
     }
-    return { diaryHour: clampInt(hour, 0, 23), consolidateEvery: clampInt(every, 0, 100) };
+    if (keepDays < 0) {
+      setPanelError('记忆保留天数不能是负数（0 = 永久保留）。');
+      return null;
+    }
+    return {
+      diaryHour: clampInt(hour, 0, 23),
+      consolidateEvery: clampInt(every, 0, 100),
+      keepMemoryDays: clampInt(keepDays, 0, 3650),
+    };
   }
 
   function buildProviderPatch(): AISettingsPatch | null {

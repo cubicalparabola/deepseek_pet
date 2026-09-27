@@ -14,6 +14,12 @@ build/
 # 运行期用户设置（首次运行时自动生成，不应提交）
 assets/config/settings.json
 
+# 她的记忆（默认落在项目目录下，见 src/main/data-dir.ts）：
+#   memory/ diary/ notes/ mood/ reflection/ perception/  —— 记忆、日记、小纸条、感知明细
+#   ai-settings.json —— **含 API Key**，漏提交就是泄漏密钥
+# 数据跟代码放在一起方便查看/备份，但绝不能进版本库。
+data/
+
 *.log
 
 .DS_Store

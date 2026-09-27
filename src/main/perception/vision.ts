@@ -125,15 +125,40 @@ export class VisionAnalyzer {
           text: `另外，这是系统层面的窗口信息（比你从像素里猜的更可靠，请优先参考它来判断 app 与 scene）：\n${windowContext}`,
         });
       }
-      const result = await client.complete({
+      /*
+       * 一次完整的"看图 → 受控 JSON"。**关掉推理**（`reasoning_effort: 'none'`）：
+       * 实测（build/vision-probe*.mjs，同一张图打多次）带推理时 completion 169~341 token、
+       * finish_reason 时不时是 `length` —— JSON 被从中间截断，
+       * 解析失败后这一次采样要么整条丢掉（空内容）、要么退化成"没认出来"，
+       * 两种都会让时间线出现空洞（实测约 1/3 的采样）。关掉推理后同一张图：
+       * 53~57 token、0.75s、JSON 完整。
+       */
+      const ask = (maxTokens: number) => client.complete({
         messages: [
           { role: 'system', content: SCENE_SYSTEM },
           { role: 'user', content: parts },
         ],
         temperature: 0.2,
-        maxTokens: 360,
+        maxTokens,
+        reasoningEffort: 'none',
+        purpose: 'vision',
       });
-      const parsed = parseJsonObject(result.text);
+      let result = await ask(560);
+      let parsed = parseJsonObject(result.text);
+      /*
+       * JSON 解析不出来时**加预算再要一次**。
+       *
+       * 什么时候会走到这里：服务商不认 `reasoning_effort`（那就会照旧先推理），
+       * 或者正文很长被截断。这一次重试很值 —— 相比"整条观察丢掉、时间线断一截"，
+       * 多花一次 token 完全划算（而且失败的那次本来就已经花了钱）。
+       */
+      if (parsed === null) {
+        this.logger.warn('scene analysis returned unparsable text; retrying with a larger budget', {
+          data: { finish: result.finishReason, tokens: result.totalTokens, textLength: result.text.length },
+        });
+        result = await ask(1400);
+        parsed = parseJsonObject(result.text);
+      }
       const keywords = this.options.getSensitiveKeywords();
       const app = stringOr(parsed?.app, '');
       const activity = stringOr(parsed?.activity, '');
@@ -165,10 +190,22 @@ export class VisionAnalyzer {
        */
       const storedUrl = urlLike === '' ? '' : this.options.storeFullUrl() ? urlLike.slice(0, 300) : safeHost(urlLike);
       const foreground = this.options.getForegroundWindow();
+      /*
+       * `app` 存**稳定身份**：优先用最上层窗口的进程名，模型给的名字退居 `appLabel`。
+       *
+       * 为什么不能用模型给的名字当身份：它读的是窗口标题，而同一个程序会给出
+       * 完全不同的字符串（实测同一个游戏被读成 `PVZ Universe` /
+       * `Plants Vs. Zombies Universe` / `植物大战僵尸 Universe`）。
+       * 身份抖动 → 时间线被切碎、`byApp` 列成好几行、"今天用了什么"彻底散架。
+       * 进程名（`msedge` / `Code` / `PlantsVsZombies.exe`）不随界面语言变。
+       */
+      const processName = (foreground?.process ?? '').trim();
+      const identity = (processName !== '' ? processName : app).slice(0, 60);
       const observation: ScreenObservation = {
         at: new Date().toISOString(),
         scene: refined.scene,
-        app: app.slice(0, 60),
+        app: identity,
+        ...(app.trim() !== '' && app.trim() !== identity ? { appLabel: app.trim().slice(0, 60) } : {}),
         ...(storedUrl !== '' ? { url: storedUrl } : {}),
         // 只把"最上层窗口"存进观察记录（整份窗口列表只进提示词，不落盘）
         ...(foreground && foreground.title !== '' ? { windowTitle: normalizeWindowTitle(foreground.title).slice(0, 120) } : {}),
@@ -257,7 +294,10 @@ export class VisionAnalyzer {
           { role: 'user', content: parts },
         ],
         temperature: 0.3,
-        maxTokens: 400,
+        maxTokens: 560,
+        // 只需要一句人话：推理会把 400 token 的预算吃光，直接关掉（见 analyzeScene 的说明）
+        reasoningEffort: 'none',
+        purpose: 'camera',
       });
       const text = result.text.trim();
       const privateHit = /私人的，我不看/.test(text);
@@ -320,7 +360,10 @@ export class VisionAnalyzer {
           { role: 'user', content: [{ type: 'text', text: '分析这一帧。' }, { type: 'image', mimeType, dataBase64: imageBase64 }] },
         ],
         temperature: 0.1,
-        maxTokens: 160,
+        maxTokens: 320,
+        // 4 个字段的短 JSON：160 token 连推理都不够，更别说正文（见 analyzeScene 的说明）
+        reasoningEffort: 'none',
+        purpose: 'view-screen',
       });
       const parsed = parseJsonObject(result.text);
       return {

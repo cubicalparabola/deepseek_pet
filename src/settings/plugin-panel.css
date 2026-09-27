@@ -1,0 +1,134 @@
+/*
+ * 「插件」设置面板样式。
+ *
+ * 面板挂在设置页面里，因此**不重复声明 settings.css 已有的令牌**（--bg/--panel/--line/--text/
+ * --muted/--accent/--ok 全部沿用），只补一个"危险色"。所有类名统一 `plugin-` 前缀，
+ * 避免与设置页现有样式互相污染；字号与控件尺寸与 AI / 感知 / 成长三个面板保持一致
+ * （12px 字号、6px 控件圆角、10px 卡片圆角）。
+ *
+ * 这一页的视觉重点是"一眼看清哪些插件还活着、它要碰什么"：卡片左侧的开关与状态胶囊
+ * 是主角，所以停用的卡片整卡压暗、失败的状态胶囊标红。
+ */
+
+:root {
+  /* 与 growth-panel.css 同款危险色：深浅色下都要够对比度 */
+  --plugin-danger: #ff8a8a;
+}
+
+@media (prefers-color-scheme: light) {
+  :root { --plugin-danger: #c8392f; }
+}
+
+.plugin-panel { display: flex; flex-direction: column; gap: 14px; padding-bottom: 12px; }
+
+/* ---------------------------- 分区 / 说明 / 动作 ---------------------------- */
+
+.plugin-section {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px 14px 14px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+}
+.plugin-section h2 { font-size: 13px; font-weight: 600; letter-spacing: 0.02em; }
+
+/* 一行"关掉会怎样"：这是本面板最重要的一句文案，用正文色而不是 muted */
+.plugin-intro { margin: 0; color: var(--text); font-size: 11.5px; line-height: 1.6; user-select: text; }
+
+.plugin-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 2px; }
+/* 幽灵（重新发现 / 安装）与危险（卸载）共用底座，只差颜色与边框 */
+.plugin-btn-ghost,
+.plugin-btn-danger {
+  font: inherit; font-size: 12px; padding: 5px 12px;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); color: var(--muted); cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, filter 0.15s ease, opacity 0.15s ease;
+}
+.plugin-btn-ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+/* 危险动作（卸载）：平时就带危险色，但不用实心红 —— 它不该比「启用」开关更抢眼 */
+.plugin-btn-danger { border-color: color-mix(in srgb, var(--plugin-danger) 35%, var(--line)); color: var(--plugin-danger); }
+.plugin-btn-danger:hover:not(:disabled) { border-color: var(--plugin-danger); color: var(--plugin-danger); filter: brightness(1.1); }
+.plugin-btn-ghost:disabled,
+.plugin-btn-danger:disabled { opacity: 0.5; cursor: default; }
+.plugin-btn-ghost:focus-visible,
+.plugin-btn-danger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.plugin-btn-danger:focus-visible { outline-color: var(--plugin-danger); }
+
+/* 动作回话行（重新发现 / 安装的结果）紧跟在按钮右边：位置固定，用户点完不用满屏找回音 */
+.plugin-reload-result { color: var(--muted); font-size: 11.5px; line-height: 1.5; word-break: break-word; user-select: text; }
+.plugin-reload-result:empty { display: none; }
+
+/* 卸载成功、安装被取消 / 失败都写在这里：最短 16px 保证出现时不把下面的卡片顶跳 */
+.plugin-status-line {
+  min-height: 16px; margin: 0; color: var(--muted); font-size: 11.5px;
+  line-height: 1.5; word-break: break-word; user-select: text;
+}
+.plugin-status-line:empty { display: none; }
+.plugin-status-line.plugin-status-error { color: var(--plugin-danger); }
+
+/* -------------------------------- 插件清单 -------------------------------- */
+
+.plugin-list { display: flex; flex-direction: column; gap: 8px; }
+.plugin-empty { margin: 0; padding: 8px 2px; color: var(--muted); font-size: 11.5px; line-height: 1.6; user-select: text; }
+
+.plugin-card {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 9px 11px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--bg);
+}
+/* 停用的插件压暗而不是隐藏：关掉的插件也要留在列表里，否则没法再打开 */
+.plugin-card-off { opacity: 0.72; }
+
+.plugin-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+/* min-width:0 是让长目录能换行而不是把开关挤出卡片（flex 子项默认不肯收缩） */
+.plugin-head-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.plugin-name { font-size: 12.5px; font-weight: 600; line-height: 1.4; word-break: break-word; }
+.plugin-dir {
+  color: var(--muted); font-size: 10.5px; line-height: 1.5;
+  word-break: break-all; user-select: text;
+}
+
+/* 开关：框 + 「启用」；整块可点，且不随卡片压暗而变得难点 */
+.plugin-switch { display: flex; flex-shrink: 0; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); cursor: pointer; }
+.plugin-switch-input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
+.plugin-switch-input:disabled { cursor: default; }
+
+/* ------------------------------ 状态 / 权限胶囊 ------------------------------ */
+
+.plugin-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.plugin-chip {
+  display: inline-block; padding: 1px 8px;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--panel);
+  color: var(--muted); font-size: 10.5px; line-height: 1.7;
+  word-break: break-word; user-select: text;
+}
+.plugin-status-ok { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); color: var(--ok); }
+.plugin-status-busy { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); color: var(--accent); }
+.plugin-status-muted { color: var(--muted); }
+.plugin-status-danger { border-color: color-mix(in srgb, var(--plugin-danger) 50%, var(--line)); color: var(--plugin-danger); }
+/* 内置示例（不可卸载）的说明：不是胶囊，就是一句灰色小字，别抢状态胶囊的注意力 */
+.plugin-builtin { color: var(--muted); font-size: 10.5px; font-style: italic; user-select: text; }
+
+.plugin-perms { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.plugin-perms-label { color: var(--muted); font-size: 10.5px; }
+.plugin-perms-none { color: var(--muted); font-size: 10.5px; font-style: italic; user-select: text; }
+/* 被收窄的权限用虚线框：和"已经给了"的实线胶囊一眼能分开 */
+.plugin-perm-narrowed { border-style: dashed; }
+
+/* 插件的报错：自己的颜色 + 等宽字体，和权限说明区分开 */
+.plugin-error {
+  margin: 0; padding: 4px 7px;
+  border-left: 2px solid var(--plugin-danger); border-radius: 4px; background: var(--panel);
+  color: var(--plugin-danger); font: 11px/1.55 Consolas, "Cascadia Mono", monospace;
+  white-space: pre-wrap; word-break: break-word; user-select: text;
+}
+
+/* 卡片底部的动作行（目前只有「卸载」）：右对齐，离右上角的「启用」开关远一点，减少误点 */
+.plugin-card-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ---------------------------- 窄窗口折叠 ---------------------------- */
+
+@media (max-width: 460px) {
+  /* 名字与开关竖排：窄窗口里长目录会把开关挤成一条细缝 */
+  .plugin-card-head { flex-direction: column; align-items: stretch; }
+  .plugin-switch { justify-content: flex-start; }
+}

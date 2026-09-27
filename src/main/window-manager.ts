@@ -172,6 +172,23 @@ export class WindowManager {
         data: { exitCode: details.exitCode },
       });
     });
+    /*
+     * 导航拦截（插件沙箱的兜底之一）。
+     *
+     * 桌宠窗口**永远不该**导航到别处：它只加载一次本地 renderer 页面。
+     * 插件代码与插件面板都拿不到 `window` / `document`（见 plugin-code-loader），
+     * 这里防的是"漏网"：无论是页面内的 `location.href=`，还是插件拼出来的链接，
+     * 都不允许把这个窗口带走（`window.open` 直接拒绝）。
+     */
+    window.webContents.on('will-navigate', (event, url) => {
+      if (url === window.webContents.getURL()) return;
+      this.logger.warn('blocked navigation from pet window', { data: { url } });
+      event.preventDefault();
+    });
+    window.webContents.setWindowOpenHandler(({ url }) => {
+      this.logger.warn('blocked window.open from pet window', { data: { url } });
+      return { action: 'deny' };
+    });
 
     this.window = window;
     /*

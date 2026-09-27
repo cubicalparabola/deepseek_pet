@@ -121,13 +121,51 @@ export class PluginCodeLoader {
       `  warn: (...args) => __consoleShim('warn', args),`,
       `  error: (...args) => __consoleShim('error', args),`,
       '};',
-      // 明确屏蔽 Node 全局（即使环境里有也拿不到）
-      'const process = undefined;',
-      'const global = undefined;',
-      'const Buffer = undefined;',
-      'const __filename = undefined;',
-      'const __dirname = undefined;',
+      /*
+       * 沙箱：用**块级作用域 + let** 遮住全局名。
+       *
+       * ⚠️ 为什么不能声明在模块顶层：`const/var globalThis = undefined` 会连
+       * **上面几行读取垫片**（`globalThis.__petPluginApiShim__`）一起挡掉 ——
+       * 实测报 `Cannot access 'globalThis' before initialization`，插件全部加载失败。
+       * 放进块里之后，垫片读取在块外完成，块内才遮蔽；用 `let` 而不是 `const`
+       * 是为了让"插件自己写了个同名变量"不会变成 Assignment to constant variable。
+       *
+       * 为什么要遮这些名字：插件跑在桌宠页面里，如果它能随手碰 `window.petAPI`，
+       * 那"权限声明"就是摆设（绕过 PluginContext 直接用桌宠的 IPC 面）。
+       * CSP 的 `script-src 'self' blob:`（无 unsafe-eval）已经堵死 eval / new Function
+       * 这类绕路，这里再遮住直接可用的全局名，插件的系统能力就只剩 PluginContext 一条路。
+       * 需要界面？那正是 `context.ui`（托盘菜单项 + 聊天窗口插件面板）存在的理由。
+       */
+      '{',
+      '  let process = undefined;',
+      '  let global = undefined;',
+      '  let Buffer = undefined;',
+      '  let __filename = undefined;',
+      '  let __dirname = undefined;',
+      '  let window = undefined;',
+      '  let self = undefined;',
+      '  let globalThis = undefined;',
+      '  let document = undefined;',
+      '  let navigator = undefined;',
+      '  let localStorage = undefined;',
+      '  let sessionStorage = undefined;',
+      '  let indexedDB = undefined;',
+      '  let fetch = undefined;',
+      '  let XMLHttpRequest = undefined;',
+      '  let WebSocket = undefined;',
+      '  let EventSource = undefined;',
+      '  let Worker = undefined;',
+      '  let SharedWorker = undefined;',
+      '  let importScripts = undefined;',
+      '  let postMessage = undefined;',
+      /*
+       * 有意**不**遮 `location` / `open` / `name` / `status` 这类名字：
+       * 它们既可能被插件当成普通变量名（课程表里的"地点"就叫 location），
+       * 又都被 Main 侧的导航拦截兜住了（`will-navigate` / `setWindowOpenHandler`）。
+       * 遮蔽列表只放"真正构成提权"的名字，避免把插件写崩在语法上。
+       */
       safeCode,
+      '}',
       'export default module.exports;',
       '',
     ].join('\n');

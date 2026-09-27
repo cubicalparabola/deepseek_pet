@@ -9,7 +9,7 @@
  *   4. Action Pipeline（animation / state / event）
  *   5. EventBus（on / off / once / 异常隔离）
  *   6. StateMachine
- *   7. PluginManager + 两个示例插件加载
+ *   7. PluginManager + 插件安装/启停/卸载（随包不带插件，验收自己装探针）
  *   8. 插件监听事件 / 插件请求动画
  *   9. 插件异常隔离
  *  10. 右键菜单 / 托盘
@@ -19,7 +19,7 @@
  * 结果：build/acceptance.json
  */
 const { app, BrowserWindow } = require('electron');
-const { writeFileSync, mkdirSync, readFileSync, rmSync, readdirSync, existsSync } = require('node:fs');
+const { writeFileSync, appendFileSync, mkdirSync, readFileSync, rmSync, readdirSync, existsSync } = require('node:fs');
 const { join } = require('node:path');
 const { tmpdir } = require('node:os');
 
@@ -83,6 +83,15 @@ function readSavedDockOnEdge() {
   }
 }
 
+/** 读取 `plugins.json` 的原始文本（收尾要写回，见 `originalPluginsJson` 的说明）。 */
+function readSavedPluginsJson() {
+  try {
+    return readFileSync(join(root, 'assets', 'config', 'plugins.json'), 'utf8');
+  } catch (error) {
+    return null;
+  }
+}
+
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
@@ -95,6 +104,15 @@ app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
  * 函数声明会提升，所以在 `require(main)` 之前就能调用。
  */
 const originalDockOnEdge = readSavedDockOnEdge();
+
+/**
+ * 验收开始前抄一份 `plugins.json`。
+ *
+ * 为什么需要：**验收自己会改这个文件**（安装探针插件、启停用例、卸载用例），
+ * 而它是**用户的配置**（不是隔离目录）。收尾时写回原始内容 ——
+ * 顺带也修掉了"上一次验收被中途掐断、把某个插件留在关闭状态"导致的连锁假红。
+ */
+const originalPluginsJson = readSavedPluginsJson();
 
 // 启动真实桌宠（dist 产物）
 require(join(root, 'dist', 'main', 'main.js'));
@@ -243,7 +261,7 @@ app.whenReady().then(async () => {
    *     看到的是 `catch_right`）。
    * 两条都属于"产品里本来就该发生"，测试要主动隔离：
    * `behaviors.pause()` 停渲染层随机池，`notifyBehaviorPaused(true)` 让主进程的
-   * 触发服务也安静（「暂停行为」的语义就是"别自己动"）。
+   * 触发服务也安静（"行为暂停"的语义就是"别自己动"）。
    * 感知/AI 段开始前会恢复（见下面的 resume）。
    */
   await run(`window.petAPI.perception.setSettings({ screen: false, behavior: false, habits: false, camera: false })`);
@@ -312,6 +330,14 @@ app.whenReady().then(async () => {
     await wait(100);
   }
 
+  /*
+   * 随包**只带一个**插件：待办清单（`plugins/todo-plugin`，需求"现在制作第一个插件：TO DO"）。
+   *
+   * 这条钉的是"没有别的插件也能正常起"：插件系统是可选能力，缺了不该影响桌宠本身。
+   * 其余插件相关的用例会在下面**自己安装**两个探针插件
+   * （`acceptance-click-probe` / `acceptance-plain-probe`），跑完再卸载 ——
+   * 这样验收既不依赖随包内容，又覆盖了真实的"安装 -> 启用 -> 停用 -> 卸载"链路。
+   */
   const state = await run(`(() => {
     const app = window.petApp;
     if (!app) return { error: 'petApp 未挂载' };
@@ -320,8 +346,8 @@ app.whenReady().then(async () => {
   record('petApp 已挂载', !state.error, JSON.stringify(state));
   record('兜底动画 idle 正在播放', state.animation === 'idle', `animation=${state.animation}`);
   record('状态机初始 PLAYING', state.state === 'PLAYING', `state=${state.state}`);
-  record('Manifest 注册了 27 个动画（四类：状态/随机/触发/点击）', state.animations === 27, `animations=${state.animations}`);
-  record('两个示例插件已加载', state.plugins === 2, `plugins=${state.plugins}`);
+  record('Manifest 注册了 28 个动画（四类：状态/随机/触发/点击）', state.animations === 28, `animations=${state.animations}`);
+  record('随包的待办插件已激活（只有一个随包插件）', state.plugins === 1, `plugins=${state.plugins}`);
 
   /* ------------------------- 媒体与透明素材 ------------------------- */
   const media = await run(`(() => {
@@ -455,6 +481,13 @@ app.whenReady().then(async () => {
         await window.petAPI.settings.setDockOnEdge(${settingsSnapshot.dockOnEdge});
         return true;
       })()`);
+      /*
+       * `plugins.json` 也一起还原：启停与安装/卸载用例都会改它，
+       * 而它是**用户的配置**（不是隔离目录）。写回原始文本 = 连格式与注释都不动。
+       */
+      if (originalPluginsJson !== null) {
+        writeFileSync(join(root, 'assets', 'config', 'plugins.json'), originalPluginsJson, 'utf8');
+      }
       return true;
     } catch (error) {
       return false;
@@ -516,6 +549,10 @@ app.whenReady().then(async () => {
         sliderMax: document.getElementById('scale-slider')?.max ?? null,
         sliderValue: document.getElementById('scale-slider')?.value ?? null,
         percentText: document.getElementById('scale-percent')?.textContent ?? null,
+        // 从托盘菜单搬进设置窗口的三个入口（需求）：调整大小=滚动条、打开配置目录、重载插件
+        hasOpenConfig: !!document.getElementById('open-config'),
+        hasReloadPlugins: !!document.getElementById('reload-plugins'),
+        hasDockOnEdge: !!document.getElementById('dock-on-edge'),
         hasPetAPI: typeof window.petAPI === 'object' && window.petAPI !== null,
         petApiKeys: typeof window.petAPI === 'object' && window.petAPI !== null ? Object.keys(window.petAPI) : null,
         settingsKeys: typeof window.settingsAPI === 'object' && window.settingsAPI !== null ? Object.keys(window.settingsAPI) : null,
@@ -528,6 +565,72 @@ app.whenReady().then(async () => {
   record('设置窗口已注入 settingsAPI', settingsDom?.hasBridge === true, '');
   record('设置窗口拿不到桌宠 petAPI（桥更小）', settingsDom?.hasPetAPI === false, JSON.stringify({ hasPetAPI: settingsDom?.hasPetAPI, petApiKeys: settingsDom?.petApiKeys, settingsKeys: settingsDom?.settingsKeys }));
   record('设置窗口回显当前比例', typeof settingsDom?.percentText === 'string' && settingsDom.percentText.endsWith('%'), `percent=${settingsDom?.percentText}`);
+  record(
+    '设置窗口里有从菜单搬来的三个入口（打开配置目录 / 重载插件 / 拖到边缘收起）',
+    settingsDom?.hasOpenConfig === true && settingsDom?.hasReloadPlugins === true && settingsDom?.hasDockOnEdge === true,
+    JSON.stringify({ config: settingsDom?.hasOpenConfig, reload: settingsDom?.hasReloadPlugins, dock: settingsDom?.hasDockOnEdge }),
+  );
+
+  /*
+   * 插件面板（"插件可随时关闭"的界面入口）。
+   *
+   * 断言分三层，缺一层都可能假绿：
+   *   1. 面板真的挂上了、卡片数量与清单一致（DOM 层）；
+   *   2. 权限是**画出来的**（用户得能看见"这插件能联网"）；
+   *   3. 真点一下开关，插件的 `enabled` 真的变了、并且能再点回来（通道层）。
+   * 最后一条最要紧：新加的 IPC 正是最容易"元素在、点了没反应"的地方。
+   */
+  const pluginPanelDom = settingsWin
+    ? await settingsWin.webContents.executeJavaScript(`(async () => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        await wait(800);
+        const root = document.getElementById('plugin-panel-root');
+        const cards = document.querySelectorAll('#plugin-list .plugin-card');
+        const switches = document.querySelectorAll('#plugin-list .plugin-switch-input');
+        return {
+          hasRoot: !!root,
+          hasSection: !!document.querySelector('.plugin-panel .plugin-section'),
+          cardCount: cards.length,
+          switchCount: switches.length,
+          permRows: document.querySelectorAll('#plugin-list .plugin-perms').length,
+          // 权限胶囊的文字（"联网（…）"/"往「交互」收件箱投递…"）——用户得能看见这插件能干什么
+          permLabels: [...document.querySelectorAll('#plugin-list .plugin-perms .plugin-chip')]
+            .map((chip) => chip.textContent.trim()),
+          hasReloadButton: !!document.getElementById('plugin-reload'),
+          hasInstallButton: !!document.getElementById('plugin-install'),
+          builtinNotes: document.querySelectorAll('#plugin-list .plugin-builtin').length,
+          uninstallButtons: document.querySelectorAll('#plugin-list .plugin-uninstall').length,
+          emptyHint: document.querySelector('#plugin-list .plugin-empty')?.textContent ?? '',
+          names: [...document.querySelectorAll('#plugin-list .plugin-name')].map((n) => n.textContent),
+        };
+      })()`, true)
+    : null;
+  /*
+   * 随包插件（待办清单）的**卡片**：一个开关、一行权限、一个卸载按钮。
+   *
+   * 空状态（"还没有插件…"）在这里看不到 —— 随包已经带了一个插件；
+   * 空状态本身由后面的"卸载探针"流程覆盖（清空后 `plugin-empty` 会出现）。
+   */
+  record(
+    '设置窗口「插件」面板：随包的待办插件渲染成卡片（开关 + 权限行 + 卸载）',
+    pluginPanelDom?.hasRoot === true &&
+      pluginPanelDom?.hasSection === true &&
+      pluginPanelDom?.cardCount === 1 &&
+      pluginPanelDom?.switchCount === 1 &&
+      pluginPanelDom?.permRows === 1 &&
+      pluginPanelDom?.hasReloadButton === true &&
+      pluginPanelDom?.hasInstallButton === true &&
+      pluginPanelDom?.uninstallButtons === 1,
+    JSON.stringify(pluginPanelDom),
+  );
+  record(
+    '设置窗口「插件」面板：待办插件的名字与它声明的权限都画出来了',
+    Array.isArray(pluginPanelDom?.names) &&
+      pluginPanelDom.names.some((name) => String(name).includes('待办清单')) &&
+      /联网|通知|投递/.test(String(pluginPanelDom.names).concat(String(pluginPanelDom.permLabels))),
+    JSON.stringify({ names: pluginPanelDom?.names, perms: pluginPanelDom?.permLabels }),
+  );
+
 
   // 模拟用户把滚动条拖到某个刻度：设置窗口内的 input 事件必须
   // (1) 真实改变桌宠窗口 (2) 立刻写入 settings.json
@@ -560,6 +663,64 @@ app.whenReady().then(async () => {
     : null;
   await wait(600);
   record('设置窗口的置顶开关生效', topToggle === false && win.isAlwaysOnTop() === false, `checked=${topToggle} alwaysOnTop=${win.isAlwaysOnTop()}`);
+
+  /*
+   * 「拖到边缘自动收起」：从托盘菜单搬进设置窗口的开关（需求）。
+   *
+   * 必须**真点 DOM 并读 settings.json** 才算数 —— 只断言"元素在"会漏掉
+   * 通道接错时"元素在、点了没反应"这种坏（新加的 IPC 正是最容易接错的地方）。
+   *
+   * ⚠️ 验收开头为了不让合成拖动触发贴边，特意把 `dockOnEdge` 关成了 false；
+   * 所以这里翻一下、断言、**再翻回去**，跑完仍是 false，
+   * 否则后面的拖动/点击类断言会开始偶发红（实测过：收起来的时间点每次不一样）。
+   */
+  const flipDockOnEdge = (value) => settingsWin
+    ? settingsWin.webContents.executeJavaScript(`(async () => {
+        const box = document.getElementById('dock-on-edge');
+        if (!box) return { ok: false };
+        box.checked = ${value ? 'true' : 'false'};
+        box.dispatchEvent(new Event('change', { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 700));
+        return { ok: true, checked: box.checked };
+      })()`)
+    : null;
+  const dockOn = await flipDockOnEdge(true);
+  await wait(500);
+  const savedDockOn = readSavedDockOnEdge();
+  const dockOff = await flipDockOnEdge(false);
+  await wait(500);
+  const savedDockOff = readSavedDockOnEdge();
+  record(
+    '设置窗口的「拖到边缘自动收起」开关真的生效并写盘（开→关都能对上）',
+    dockOn?.ok === true && dockOn.checked === true && savedDockOn === true &&
+      dockOff?.ok === true && dockOff.checked === false && savedDockOff === false,
+    JSON.stringify({ dockOn, savedDockOn, dockOff, savedDockOff }),
+  );
+
+  /*
+   * 「重载插件」：同样是搬进设置窗口的动作（以前只有托盘菜单里有）。
+   * 断言的是**点完之后有回音**：按钮恢复可用 + 状态行显示结果。
+   * 磁盘上没有插件时会显示"没有发现插件…"，那也是正确行为，所以只要求含「插件」二字。
+   */
+  const reloadPlugins = settingsWin
+    ? await settingsWin.webContents.executeJavaScript(`(async () => {
+        const button = document.getElementById('reload-plugins');
+        const status = document.getElementById('action-status');
+        if (!button) return { ok: false };
+        button.click();
+        await new Promise((r) => setTimeout(r, 900));
+        return {
+          ok: true,
+          disabled: button.disabled,
+          text: status ? (status.hidden ? '' : status.textContent || '') : '',
+        };
+      })()`)
+    : null;
+  record(
+    '设置窗口的「重载插件」按钮点得动且有回音',
+    reloadPlugins?.ok === true && reloadPlugins.disabled === false && /插件/.test(reloadPlugins.text || ''),
+    JSON.stringify(reloadPlugins),
+  );
 
   // 收尾：恢复 100% + 置顶，并关掉设置窗口（关闭 = 隐藏）
   await run(`(async () => {
@@ -641,8 +802,8 @@ app.whenReady().then(async () => {
     JSON.stringify(persistRows.map((r) => `${r.id}:${r.kind}:${r.seg ? `${r.seg.start ? 'S' : '-'}${r.seg.loop ? 'L' : '-'}${r.seg.end ? 'E' : '-'}${r.seg.range ? `[${r.seg.range.join('-')}]` : r.seg.loopCount === null ? '(inf)' : `(${r.seg.loopCount})`}` : 'none'}`)),
   );
   record(
-    '其余 20 条为一次性动画（无 segments）',
-    oneShotRows.length === 20 && oneShotRows.every((r) => r.kind === 'one-shot' && r.seg === null),
+    '其余 21 条为一次性动画（无 segments）',
+    oneShotRows.length === 21 && oneShotRows.every((r) => r.kind === 'one-shot' && r.seg === null),
     JSON.stringify({ count: oneShotRows.length, kinds: [...new Set(oneShotRows.map((r) => r.kind))] }),
   );
   record(
@@ -911,7 +1072,7 @@ app.whenReady().then(async () => {
     const enterEndMs = Date.now() - t0;
     const midAnimation = anim.getCurrentAnimation();
 
-    // 收尾段播完后应自动接上点击反应（body -> stroke）
+    // 收尾段播完后应自动接上点击反应（点击不再分区域：cute / fawning / stroke 随机一条）
     let reaction = null;
     const t1 = Date.now();
     while (Date.now() - t1 < 20000 && reaction === null) {
@@ -930,8 +1091,8 @@ app.whenReady().then(async () => {
     `enterEndMs=${clickDeferRun.enterEndMs} mid=${clickDeferRun.midAnimation}`,
   );
   record(
-    '点击持续动画：收尾段播完后自动接上点击反应',
-    clickDeferRun.reaction === 'stroke',
+    '点击持续动画：收尾段播完后自动接上点击反应（cute/fawning/stroke 之一）',
+    ['cute', 'fawning', 'stroke'].includes(clickDeferRun.reaction),
     `reaction=${clickDeferRun.reaction} afterMs=${clickDeferRun.reactionAfterMs}`,
   );
 
@@ -974,7 +1135,7 @@ app.whenReady().then(async () => {
   /* ==================================================================== */
 
   /*
-   * 清单与分类：27 条动画分四类，且**每一类里都有该有的那些 id**。
+   * 清单与分类：28 条动画分四类，且**每一类里都有该有的那些 id**。
    * 只数总数是不够的 —— "lie 被划进 trigger 就不会当默认动画了" 这种错
    * 只有逐类核对才抓得到。
    */
@@ -997,10 +1158,10 @@ app.whenReady().then(async () => {
   })()`);
   record(
     '动画四分类（状态/随机/触发/点击）与需求清单一致',
-    animCatalog.total === 27 &&
+    animCatalog.total === 28 &&
       JSON.stringify(animCatalog.byCategory.state) === JSON.stringify(['idle', 'sleep', 'watch']) &&
       JSON.stringify(animCatalog.byCategory.random) ===
-        JSON.stringify(['bomb', 'hot', 'lie', 'peek', 'play', 'roll', 'shake', 'sing', 'spin', 'swim']) &&
+        JSON.stringify(['bomb', 'hot', 'lie', 'peek', 'play', 'play_tail', 'roll', 'shake', 'sing', 'spin', 'swim']) &&
       JSON.stringify(animCatalog.byCategory.trigger) ===
         JSON.stringify(['catch_down', 'catch_right', 'hungry', 'offline', 'overheat', 'read', 'remind', 'sad', 'shy', 'talk', 'work']) &&
       JSON.stringify(animCatalog.byCategory.click) === JSON.stringify(['cute', 'fawning', 'stroke']),
@@ -1258,7 +1419,7 @@ app.whenReady().then(async () => {
     JSON.stringify(quietModel),
   );
 
-  /* 显示状态 -> 默认动画 / 随机池（纯函数 + 真机 app 的当前显示状态） */
+  /* 显示状态 -> 默认动画 / 随机池 / 随机小动作（纯函数 + 真机 app 的当前显示状态） */
   const poolModel = await run(`(() => {
     const model = window.petDebug.animationModel;
     const config = model.DEFAULT_BEHAVIOR_CONFIG;
@@ -1268,6 +1429,7 @@ app.whenReady().then(async () => {
     // 池内挑选：注入随机源，验证等概率取到两端
     const pool = config.pools['normal-random'];
     const picks = [0, 0.999].map((r) => model.pickPoolAnimation(pool, () => r));
+    const fidget = (state) => model.fidgetFor(config, state);
     return {
       normalDefault: model.defaultAnimationFor(config, 'normal'),
       bottomDefault: model.defaultAnimationFor(config, 'docked-bottom'),
@@ -1277,15 +1439,26 @@ app.whenReady().then(async () => {
       bottomPools: pools('docked-bottom'),
       rightPools: pools('docked-right'),
       hiddenPools: pools('hidden'),
+      // 收起时的"随机小动作"：lie 插在 sleep 里、peek 插在 watch 里
+      bottomFidget: fidget('docked-bottom'),
+      rightFidget: fidget('docked-right'),
+      normalFidget: fidget('normal'),
       resolveBottom: model.resolveDisplayState({ dock: 'bottom', hidden: false }),
       resolveHidden: model.resolveDisplayState({ dock: 'right', hidden: true }),
       picks,
       allPoolAnimationsRegistered: model.poolsFor(config, 'normal')
         .every((item) => item.animations.every((id) => known.has(id))),
+      allFidgetAnimationsRegistered: ['docked-bottom', 'docked-right'].every((state) => {
+        const item = fidget(state);
+        return item === null || item.animations.every((id) => known.has(id));
+      }),
+      // lie / peek 不该出现在任何随机池里（需求：它们只由随机小动作触发）
+      fidgetAnimationsNotInPools: ['lie', 'peek'].every((id) =>
+        Object.values(config.pools).every((p) => !p.animations.includes(id))),
     };
   })()`);
   record(
-    '显示状态 -> 默认动画（idle/sleep/watch/无）与随机池（正常 9 个 25~60s；收起 1 个 3~8min）',
+    '显示状态 -> 默认动画（idle/sleep/watch/无）与随机池（正常 9 个 25~60s；收起没有池）',
     poolModel.normalDefault === 'idle' &&
       poolModel.bottomDefault === 'sleep' &&
       poolModel.rightDefault === 'watch' &&
@@ -1293,9 +1466,8 @@ app.whenReady().then(async () => {
       poolModel.normalPools.length === 1 &&
       poolModel.normalPools[0].animations.length === 9 &&
       JSON.stringify(poolModel.normalPools[0].interval) === JSON.stringify([25000, 60000]) &&
-      poolModel.bottomPools[0].animations.join() === 'lie' &&
-      poolModel.rightPools[0].animations.join() === 'peek' &&
-      JSON.stringify(poolModel.bottomPools[0].interval) === JSON.stringify([180000, 480000]) &&
+      poolModel.bottomPools.length === 0 &&
+      poolModel.rightPools.length === 0 &&
       poolModel.hiddenPools.length === 0 &&
       poolModel.resolveBottom === 'docked-bottom' &&
       poolModel.resolveHidden === 'hidden' &&
@@ -1304,9 +1476,320 @@ app.whenReady().then(async () => {
   );
 
   record(
+    '收起时的随机小动作：sleep 里插 lie、watch 里插 peek（3~8 分钟随机，正常状态没有）',
+    poolModel.bottomFidget !== null &&
+      poolModel.bottomFidget.animations.join() === 'lie' &&
+      JSON.stringify(poolModel.bottomFidget.intervalMs) === JSON.stringify([180000, 480000]) &&
+      poolModel.bottomFidget.loopCountRange.join() === '1,3' &&
+      poolModel.rightFidget !== null &&
+      poolModel.rightFidget.animations.join() === 'peek' &&
+      JSON.stringify(poolModel.rightFidget.intervalMs) === JSON.stringify([180000, 480000]) &&
+      poolModel.normalFidget === null &&
+      poolModel.allFidgetAnimationsRegistered === true,
+    JSON.stringify({ bottom: poolModel.bottomFidget, right: poolModel.rightFidget, normal: poolModel.normalFidget }),
+  );
+
+  record(
+    'lie / peek 不在任何随机池里（只由随机小动作触发）',
+    poolModel.fidgetAnimationsNotInPools === true,
+    JSON.stringify(poolModel.normalPools.map((p) => p.animations)),
+  );
+
+  record(
     '随机池挑选：等概率时能取到第一个和最后一个（不是永远同一个）',
     poolModel.picks[0] === 'roll' && poolModel.picks[1] === 'swim',
     JSON.stringify(poolModel.picks),
+  );
+
+  /*
+   * 心情过低 -> 随机池整体换成 sad（纯函数 + 真机状态）。
+   *
+   * 需求原文："在心情低于阈值的时候，所有随机池的动画都变成 sad，高于阈值再变回来，
+   * 收起状态的动画不受影响"。
+   *
+   * 这里钉三件事（**端到端**那条在 tools/probe-sad-pool.cjs：真写一份 mood=18 的 emotion.json）：
+   *   1. 阈值判定是单一阈值：`<= moodBelow` 命中、`moodBelow + 1` 立刻恢复；
+   *   2. 阈值与 `moodLabel()` 的"很难过"档一致（两处不一致会出现"UI 说难过、她还在打滚"）；
+   *   3. 规则**只作用于池**：fidget 与默认姿势在 sad 命中时原样不变，
+   *      而且真机此刻（心情正常）池子里确实是原来那 8 条 —— 这就是"变回来"的那一半。
+   */
+  const sadPoolModel = await run(`(() => {
+    const model = window.petDebug.animationModel;
+    const config = model.DEFAULT_BEHAVIOR_CONFIG;
+    const rule = config.sadPool;
+    const below = model.sadPoolAnimation(config, rule.moodBelow);
+    const above = model.sadPoolAnimation(config, rule.moodBelow + 1);
+    const zero = model.sadPoolAnimation(config, 0);
+    const nan = model.sadPoolAnimation(config, Number.NaN);
+    // 关掉开关 + animation 为空的两条退化路径
+    const disabled = model.parseBehaviorConfig({
+      pools: config.pools,
+      states: config.states,
+      sadPool: { enabled: false, moodBelow: 25, animation: 'sad' },
+    }).config;
+    const emptyAnimation = model.parseBehaviorConfig({ sadPool: { enabled: true, animation: '' } }).config;
+    // 自定义阈值真的会被读到（面板/JSON 改数就生效）
+    const custom = model.parseBehaviorConfig({ sadPool: { enabled: true, moodBelow: 60, animation: 'shy' } }).config;
+    return {
+      rule,
+      below,
+      above,
+      zero,
+      nan,
+      moodBelowConst: model.SAD_POOL_MOOD_BELOW,
+      animationConst: model.SAD_POOL_ANIMATION,
+      // 与"很难过"那档（触发动画 sad 的阈值）必须是同一个数
+      sadTriggerThreshold: model.SAD_MOOD_THRESHOLD,
+      disabledHasRule: disabled.sadPool !== undefined,
+      disabledValue: model.sadPoolAnimation(disabled, 0),
+      emptyAnimationHasRule: emptyAnimation.sadPool !== undefined,
+      customRule: custom.sadPool ?? null,
+      customAt60: model.sadPoolAnimation(custom, 60),
+      customAt61: model.sadPoolAnimation(custom, 61),
+      // sad 命中时**池以外的东西**一个都不许变
+      bottomFidgetUnderSad: JSON.stringify(model.fidgetFor(config, 'docked-bottom')),
+      bottomDefaultUnderSad: model.defaultAnimationFor(config, 'docked-bottom'),
+      // 真机此刻（心情正常）池子还是原样
+      live: {
+        sad: window.petDebug.behaviors.describeSadPool(),
+        pools: window.petDebug.behaviors.describePools().map((p) => p.animations),
+      },
+      registered: new Set(window.petDebug.anim.list()).has('sad'),
+    };
+  })()`);
+  record(
+    '心情过低：池里的动画整体换成 sad（单一阈值：<=25 命中、26 立刻恢复）',
+    sadPoolModel.rule?.enabled === true &&
+      sadPoolModel.rule.animation === 'sad' &&
+      sadPoolModel.rule.moodBelow === sadPoolModel.moodBelowConst &&
+      sadPoolModel.rule.moodBelow === sadPoolModel.sadTriggerThreshold &&
+      sadPoolModel.animationConst === 'sad' &&
+      sadPoolModel.below === 'sad' &&
+      sadPoolModel.above === null &&
+      sadPoolModel.zero === 'sad' &&
+      sadPoolModel.nan === null &&
+      sadPoolModel.customRule?.moodBelow === 60 &&
+      sadPoolModel.customAt60 === 'shy' &&
+      sadPoolModel.customAt61 === null,
+    JSON.stringify(sadPoolModel),
+  );
+  record(
+    '心情过低：关掉开关 / 动画名为空都不生效（退回原池，不会留下空池）',
+    sadPoolModel.disabledHasRule === false &&
+      sadPoolModel.disabledValue === null &&
+      sadPoolModel.emptyAnimationHasRule === false,
+    JSON.stringify({
+      disabled: sadPoolModel.disabledHasRule,
+      disabledValue: sadPoolModel.disabledValue,
+      empty: sadPoolModel.emptyAnimationHasRule,
+    }),
+  );
+  record(
+    '心情过低：只换池，收起状态的 fidget 与默认姿势原样不动；池内容与当前心情一致',
+    sadPoolModel.bottomDefaultUnderSad === 'sleep' &&
+      JSON.parse(sadPoolModel.bottomFidgetUnderSad)?.animations?.join() === 'lie' &&
+      sadPoolModel.registered === true &&
+      // 渲染层的心情镜像与规则判定必须一致（镜像没收到推送时这里就会红）
+      sadPoolModel.live.sad.active === (sadPoolModel.live.sad.mood <= sadPoolModel.live.sad.moodBelow) &&
+      // 池内容跟着判定走：难过时只有 sad；正常时是原来那 8 条且不含 sad
+      sadPoolModel.live.pools.every((animations) => sadPoolModel.live.sad.active
+        ? animations.length === 1 && animations[0] === 'sad'
+        : animations.length === 9 && animations.includes('sad') === false),
+    JSON.stringify({ fidget: sadPoolModel.bottomFidgetUnderSad, live: sadPoolModel.live }),
+  );
+
+  /*
+   * 点击反应：不再按身体区域区分，从 cute / fawning / stroke 里随机挑一条。
+   * 挑选逻辑是共享层纯函数（可注入随机源），先把边界钉死。
+   */
+  const clickReactionModel = await run(`(() => {
+    const model = window.petDebug.animationModel;
+    const all = ['cute', 'fawning', 'stroke'];
+    return {
+      candidates: model.CLICK_REACTIONS,
+      first: model.pickClickReaction(all, () => 0),
+      last: model.pickClickReaction(all, () => 0.999),
+      onlyOne: model.pickClickReaction(['stroke'], () => 0.5, () => false),
+      noneRegistered: model.pickClickReaction(['idle', 'sleep'], () => 0.5),
+      skipsCooling: model.pickClickReaction(all, () => 0, (id) => id === 'cute'),
+      allCooling: model.pickClickReaction(all, () => 0, () => true),
+    };
+  })()`);
+  record(
+    '点击反应：候选是 cute/fawning/stroke，随机挑一条（优先避开正在冷却的那条）',
+    JSON.stringify(clickReactionModel.candidates) === JSON.stringify(['cute', 'fawning', 'stroke']) &&
+      clickReactionModel.first === 'cute' &&
+      clickReactionModel.last === 'stroke' &&
+      clickReactionModel.onlyOne === 'stroke' &&
+      clickReactionModel.noneRegistered === null &&
+      clickReactionModel.skipsCooling === 'fawning' &&
+      clickReactionModel.allCooling === 'cute',
+    JSON.stringify(clickReactionModel),
+  );
+
+  /*
+   * 真实点击路径：同一个区域（head）点多次，产出的动画仍必须落在三条候选之内
+   * —— 区域不再决定动画（以前 head 恒等于 cute）。
+   * 这里刻意**不**断言"一定是某一条"：那正是本次要拆掉的行为。
+   */
+  const clickRegionRun = await run(`(async () => {
+    const anim = window.petDebug.anim;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const seen = [];
+    for (let i = 0; i < 4; i++) {
+      anim.stop('click-region-reset');
+      anim.resetCooldowns();
+      await wait(150);
+      window.petApp.handleIntent({
+        kind: 'click', region: 'head',
+        payload: { button: 'left', x: 1, y: 1, nx: 0.5, ny: 0.1, region: 'head', detail: 1 },
+      });
+      await wait(300);
+      seen.push(anim.getCurrentAnimation());
+      anim.stop('click-region-cleanup');
+    }
+    return { seen };
+  })()`);
+  record(
+    '点击不再按区域选动画：head 点 4 次都落在 cute/fawning/stroke 之内',
+    (clickRegionRun.seen ?? []).length === 4 &&
+      clickRegionRun.seen.every((id) => ['cute', 'fawning', 'stroke'].includes(id)),
+    JSON.stringify(clickRegionRun.seen),
+  );
+
+  /*
+   * 双击不再触发动画（需求："去掉双击触发动画的代码"）。
+   *
+   * 断言看的是**事件里的 reason**，而不是"当前动画有没有变"：后者会被随机池
+   * （25–60 秒一次）之类的无关来源干扰，而 `user-double-click` 这个 reason
+   * 一旦出现就说明双击还在播动画。
+   */
+  const doubleClickRun = await run(`(async () => {
+    const anim = window.petDebug.anim;
+    const bus = window.petDebug.bus;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const started = [];
+    const sub = bus.on('animation:start', (p) => started.push({ id: p.animationId, reason: p.reason ?? '' }));
+    anim.stop('dblclick-reset');
+    anim.resetCooldowns();
+    await wait(200);
+    window.petApp.handleIntent({
+      kind: 'double-click', region: 'body',
+      payload: { button: 'left', x: 1, y: 1, nx: 0.5, ny: 0.5, region: 'body', detail: 2 },
+    });
+    await wait(600);
+    sub.unsubscribe();
+    return { started };
+  })()`);
+  record(
+    '双击不再触发动画（也不再走 user-click 反应）',
+    (doubleClickRun.started ?? []).every((item) =>
+      item.reason !== 'user-double-click' && !item.reason.startsWith('user-click:')),
+    JSON.stringify(doubleClickRun.started),
+  );
+
+  /*
+   * 收起时的"随机小动作"端到端：默认姿势循环中到点 -> 先播完默认姿势的 end
+   * -> 小动作 -> 回到同一个默认姿势（需求）。
+   *
+   * 两个关键点：
+   *   1. **行为必须是"跑着"的**：本套件在动画断言段一开始就 `behaviors.pause()` 了
+   *      （见上面那段注释），而 fidget 调度就在被暂停的 `tick()` 里 ——
+   *      不临时恢复，它永远不会触发（这一条踩过）。测完按原样恢复暂停。
+   *   2. 不真的贴边：把**正常状态**临时配置成"默认姿势 = sleep、fidget = peek"，
+   *      再用 `playDisplayDefault` 的同一组参数把 sleep 播成默认姿势。
+   *      于是 `tickFidget()` 的门槛（当前播的就是该状态的默认动画、且在 loop 段）成立，
+   *      走的是**真实的调度器**；贴边那条路另有 probe-fidget / probe-end-loop 覆盖。
+   *      用小动作换成了 `peek`（一次性）是为了把一次完整循环压到 ~10 秒内 ——
+   *      本套件整体只有 240 秒预算，用 `lie` 走完整循环会让整轮超时（也踩过）。
+   *      真实配置里"下方收起 -> lie、右侧收起 -> peek"由上面的纯函数断言钉住。
+   */
+  const fidgetRun = await run(`(async () => {
+    const anim = window.petDebug.anim;
+    const behaviors = window.petDebug.behaviors;
+    const bus = window.petDebug.bus;
+    const model = window.petDebug.animationModel;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const base = model.DEFAULT_BEHAVIOR_CONFIG;
+    const custom = {
+      version: base.version,
+      states: Object.assign({}, base.states, {
+        normal: Object.assign({}, base.states.normal, {
+          defaultAnimation: 'sleep',
+          pools: [],
+          fidget: { animations: ['peek'], intervalMs: [1000, 1000] },
+        }),
+      }),
+      pools: base.pools,
+    };
+    const events = [];
+    const subs = [
+      bus.on('animation:start', (p) => events.push({ t: 'start', id: p.animationId, reason: p.reason ?? '' })),
+      bus.on('animation:end', (p) => events.push({ t: 'end', id: p.animationId, completed: p.completed })),
+      bus.on('animation:rejected', (p) => events.push({ t: 'rejected', id: p.animationId, rejection: p.rejection, reason: p.reason ?? '' })),
+    ];
+    const wasPaused = behaviors.isPaused();
+    const fidgetStartIndex = () => events.findIndex((e) => e.t === 'start' && e.reason.startsWith('fidget:'));
+    let scheduled = null;
+    try {
+      if (wasPaused) {
+        behaviors.resume();
+        window.petAPI.notifyBehaviorPaused(false);
+      }
+      behaviors.setConfig(custom);
+      anim.stop('fidget-reset');
+      anim.clearPendingAfterEnd();
+      anim.clearQueue();
+      anim.resetCooldowns();
+      await wait(250);
+      /* 用默认姿势的同一组参数播 sleep（force + forever），模拟"收起在下方" */
+      await anim.play('sleep', {
+        interrupt: 'force', loop: true, loopCountRange: 'forever',
+        source: 'system', priority: 5, reason: 'fidget-test-setup',
+      });
+      for (let i = 0; i < 40 && anim.getPersistentPhase() !== 'loop'; i++) await wait(100);
+      scheduled = behaviors.describeFidget();
+      /*
+       * 只等到"随机时刻到点 -> 默认姿势进 end -> 小动作接上"为止。
+       *
+       * 为什么不连"小动作播完回到默认姿势"一起等：那一段是**既有**链路
+       * （动画结束 -> 回 IDLE -> resumeFallbackLoop 接回默认），验收里已有专门断言；
+       * 而本套件整体只有 240 秒预算，多等一个完整循环（默认 end ~4s + 小动作 ~3s）
+       * 会把余量吃到只剩几秒（实测：230/240）。完整闭环由
+       * tools/probe-fidget.cjs 端到端覆盖（真实贴边：sleep -> end -> lie -> loop -> sleep）。
+       */
+      const t0 = Date.now();
+      while (Date.now() - t0 < 8000) {
+        await wait(200);
+        if (fidgetStartIndex() >= 0) break;
+      }
+      return { scheduled, events, current: anim.getCurrentAnimation() };
+    } finally {
+      behaviors.setConfig(base);
+      for (const sub of subs) sub.unsubscribe();
+      anim.stop('fidget-cleanup');
+      /* 我在测试里把状态机带进了 SLEEPING（sleep 的状态提示），显式复位，
+         让后续用例从干净的 IDLE + 默认姿势开始（stop 是 completed=false，不会自动迁 IDLE） */
+      const sm = window.petDebug.state;
+      if (sm.get() !== 'IDLE') sm.request('IDLE', 'fidget-test-cleanup');
+      if (wasPaused) {
+        behaviors.pause();
+        window.petAPI.notifyBehaviorPaused(true);
+      }
+    }
+  })()`);
+  const fidgetEvents = fidgetRun.events ?? [];
+  const fidgetIndex = fidgetEvents.findIndex((e) => e.t === 'start' && e.reason.startsWith('fidget:'));
+  const defaultEndBeforeFidget = fidgetIndex >= 0 &&
+    fidgetEvents.slice(0, fidgetIndex).some((e) => e.t === 'end' && e.id === 'sleep');
+  record(
+    '收起时的随机小动作：默认姿势循环中随机时刻 -> 先播完它的 end -> 再播小动作',
+    fidgetRun.scheduled !== null &&
+      fidgetRun.scheduled.animations.join() === 'peek' &&
+      fidgetIndex >= 0 &&
+      fidgetEvents[fidgetIndex].id === 'peek' &&
+      defaultEndBeforeFidget === true,
+    JSON.stringify({ scheduled: fidgetRun.scheduled, events: fidgetEvents, current: fidgetRun.current }),
   );
 
   /* 触发动画的阈值规则（"演一次"而不是"一直演"） */
@@ -2959,18 +3442,100 @@ app.whenReady().then(async () => {
   record('异步监听器抛错被隔离', busInfo.asyncSafe === 1, `后续监听器执行次数=${busInfo.asyncSafe}`);
 
   /* --------------------------- 插件系统 --------------------------- */
-  const pluginInfo = await run(`(() => {
-    const host = window.petDebug.plugins;
-    return host.getLoadedPlugins();
-  })()`);
-  const hello = pluginInfo.find((p) => p.id === 'hello-plugin');
-  const rnd = pluginInfo.find((p) => p.id === 'random-action-plugin');
-  record('hello-plugin 已激活', hello && hello.status === 'active', JSON.stringify(hello));
-  record('random-action-plugin 已激活', rnd && rnd.status === 'active', JSON.stringify(rnd));
+  /*
+   * 随包不带插件，所以这里先**用安装器装两个探针插件**（走真实的
+   * 校验 -> 复制 -> 登记 -> 启用 链路），随后的启停/权限/事件用例都跑在它们身上。
+   *
+   * 为什么不在仓库里留两个示例插件：需求明确"把两个内置的插件卸载掉"
+   * （随机动画本来就是核心 `BehaviorManager` 在做，示例插件只是验证链路）。
+   * 探针放在 `build/`（gitignore）里，跑完连同插件目录一起删掉。
+   */
+  const clickProbeId = 'acceptance-click-probe';
+  const plainProbeId = 'acceptance-plain-probe';
+  const fixtureRoot = join(root, 'build', 'acceptance-fixtures');
+  const fixtureClickDir = join(fixtureRoot, 'click-probe');
+  const fixturePlainDir = join(fixtureRoot, 'plain-probe');
+  try {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  } catch {
+    /* 上一轮的残留删不掉也无所谓：下面按名字重建 */
+  }
+  mkdirSync(fixtureClickDir, { recursive: true });
+  mkdirSync(fixturePlainDir, { recursive: true });
+  writeFileSync(
+    join(fixtureClickDir, 'package.json'),
+    JSON.stringify(
+      {
+        name: clickProbeId,
+        displayName: '点击探针',
+        version: '1.0.0',
+        description: '验收用：事件监听 + 菜单项 + 存储',
+        main: 'index.js',
+        permissions: ['ui'],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+  writeFileSync(
+    join(fixtureClickDir, 'index.js'),
+    [
+      'module.exports = {',
+      `  id: '${clickProbeId}',`,
+      "  name: '点击探针',",
+      "  version: '1.0.0',",
+      '  activate(context) {',
+      "    context.events.on('pet:click', () => {",
+      "      const key = 'clickCount';",
+      "      context.storage.set(key, (context.storage.get(key, 0) || 0) + 1);",
+      '    });',
+      '    // 插件自己注册的菜单动作：托盘「插件」子菜单里应当出现它',
+      "    context.ui.registerMenuItem({ id: 'ping', label: '探针动作', hint: '验收用' }, () => {",
+      "      context.storage.set('menuClicked', true);",
+      '    });',
+      '  },',
+      '};',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  writeFileSync(
+    join(fixturePlainDir, 'package.json'),
+    JSON.stringify(
+      { name: plainProbeId, displayName: '普通探针', version: '1.0.0', main: 'index.js' },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+  // 有意**不声明任何权限**：下面的"权限执法"用例就靠它
+  writeFileSync(join(fixturePlainDir, 'index.js'), `module.exports = { id: '${plainProbeId}', name: '普通探针', version: '1.0.0', activate() {} };\n`, 'utf8');
 
-  // 插件监听事件：模拟真实点击，验证 hello-plugin 的计数持久化
+  const fixtureInstall = await run(`(async () => {
+    const click = await window.petAPI.plugins.install(${JSON.stringify(fixtureClickDir)});
+    const plain = await window.petAPI.plugins.install(${JSON.stringify(fixturePlainDir)});
+    await new Promise((r) => setTimeout(r, 1500));
+    const records = window.petDebug.plugins.getLoadedPlugins();
+    return {
+      click: { ok: click.ok, id: click.id, error: click.error || null },
+      plain: { ok: plain.ok, id: plain.id, error: plain.error || null },
+      clickStatus: records.find((r) => r.id === '${clickProbeId}')?.status || null,
+      plainStatus: records.find((r) => r.id === '${plainProbeId}')?.status || null,
+    };
+  })()`);
+  record(
+    '插件：用安装器装进来的探针插件立刻激活（校验 -> 复制 -> 登记 -> 启用）',
+    fixtureInstall.click.ok === true &&
+      fixtureInstall.plain.ok === true &&
+      fixtureInstall.clickStatus === 'active' &&
+      fixtureInstall.plainStatus === 'active',
+    JSON.stringify(fixtureInstall),
+  );
+
+  // 插件监听事件：模拟真实点击，验证计数持久化
   const clickEffect = await run(`(async () => {
-    const before = window.localStorage.getItem('desktop-pet:plugin:hello-plugin:clickCount');
+    const before = window.localStorage.getItem('desktop-pet:plugin:${clickProbeId}:clickCount');
     const stage = document.getElementById('pet-stage');
     const rect = stage.getBoundingClientRect();
     const opts = { bubbles: true, cancelable: true, clientX: rect.width/2, clientY: rect.height*0.5, screenX: 500, screenY: 500, button: 0, pointerId: 1, isPrimary: true };
@@ -2978,7 +3543,7 @@ app.whenReady().then(async () => {
     window.dispatchEvent(new PointerEvent('pointerup', opts));
     await new Promise((r) => setTimeout(r, 500));
     return {
-      before, after: window.localStorage.getItem('desktop-pet:plugin:hello-plugin:clickCount'),
+      before, after: window.localStorage.getItem('desktop-pet:plugin:${clickProbeId}:clickCount'),
       animation: window.petDebug.anim.getCurrentAnimation(),
       state: window.petDebug.state.get(),
     };
@@ -2995,7 +3560,7 @@ app.whenReady().then(async () => {
     const video = () => document.querySelector('video.layer-active') || document.querySelector('video');
     anim.stop('test-cleanup');
     await new Promise((r) => setTimeout(r, 200));
-    const r = await actions.execute({ type: 'animation', animationId: 'sing', priority: 30, source: 'plugin:hello-plugin', reason: 'plugin-test' });
+    const r = await actions.execute({ type: 'animation', animationId: 'sing', priority: 30, source: 'plugin:${clickProbeId}', reason: 'plugin-test' });
     // 播放是异步的（要等素材解码/缓冲交换），这里等它真正成为当前动画
     let waited = 0;
     while (waited < 4000 && anim.getCurrentAnimation() !== 'sing') {
@@ -3042,6 +3607,682 @@ app.whenReady().then(async () => {
   })()`);
   record('插件事件 handler 抛错被隔离', pluginThrows.laterRan === true && typeof pluginThrows.alive === 'string', JSON.stringify(pluginThrows));
 
+  /* ---------------- 插件沙箱：系统能力只有 PluginContext 一条路 ---------------- */
+  /*
+   * 为什么要专门验这一条：插件跑在桌宠页面里，如果它能随手碰 `window.petAPI`，
+   * 那"权限声明"就只是文档。
+   *
+   * 这里必须放一个**真的插件文件**（走 PluginManager 编译 -> PluginHost 沙箱求值），
+   * 不能像异常隔离那几条一样现场造一个对象：现场造出来的 activate 是**页面作用域里的闭包**，
+   * 它眼里的 `window` 本来就是页面的 window，测不到遮蔽（实测因此假绿过）。
+   */
+  const probeId = 'acceptance-sandbox-probe';
+  const probeDir = join(root, 'plugins', '_acceptance-probe');
+  const pluginsJsonRaw = readFileSync(join(root, 'assets', 'config', 'plugins.json'), 'utf8');
+  mkdirSync(probeDir, { recursive: true });
+  writeFileSync(
+    join(probeDir, 'package.json'),
+    JSON.stringify({ name: probeId, displayName: '沙箱探针', version: '1.0.0', main: 'index.js' }, null, 2),
+    'utf8',
+  );
+  writeFileSync(
+    join(probeDir, 'index.js'),
+    [
+      'module.exports = {',
+      `  id: '${probeId}',`,
+      "  name: '沙箱探针',",
+      "  version: '1.0.0',",
+      '  activate(context) {',
+      '    context.storage.set("globals", {',
+      '      window: typeof window,',
+      '      document: typeof document,',
+      '      fetch: typeof fetch,',
+      '      localStorage: typeof localStorage,',
+      '      XMLHttpRequest: typeof XMLHttpRequest,',
+      '      globalThis: typeof globalThis,',
+      '      petApi: typeof (window && window.petAPI),',
+      '      process: typeof process,',
+      '      global: typeof global,',
+      '    });',
+      '    context.storage.set("permissions", context.lifecycle.permissions);',
+      '    context.storage.set("hasNet", context.lifecycle.has("net"));',
+      '    context.storage.set("alive", true);',
+      '    context.storage.set("capabilities", {',
+      '      timers: typeof context.timers.after,',
+      '      net: typeof context.net.request,',
+      '      process: typeof context.process.run,',
+      '      python: typeof context.python.run,',
+      '      notify: typeof context.notify.send,',
+      '      mail: typeof context.mail.send,',
+      '      ui: typeof context.ui.registerPanel,',
+      '      onDispose: typeof context.lifecycle.onDispose,',
+      '    });',
+      '  },',
+      '};',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  {
+    const manifest = JSON.parse(pluginsJsonRaw);
+    manifest.plugins = manifest.plugins || [];
+    manifest.plugins.push({ id: probeId, path: '_acceptance-probe', enabled: false });
+    writeFileSync(join(root, 'assets', 'config', 'plugins.json'), JSON.stringify(manifest, null, 2), 'utf8');
+  }
+
+  const sandboxProbe = await run(`(async () => {
+    const read = (key) => JSON.parse(window.localStorage.getItem('desktop-pet:plugin:${probeId}:' + key) || 'null');
+    await window.petAPI.plugins.setEnabled('${probeId}', true);
+    await new Promise((r) => setTimeout(r, 1600));
+    const globals = read('globals') || {};
+    const status = window.petDebug.plugins.getLoadedPlugins().find((r) => r.id === '${probeId}')?.status || null;
+    await window.petAPI.plugins.setEnabled('${probeId}', false);
+    await new Promise((r) => setTimeout(r, 300));
+    return {
+      status,
+      alive: read('alive'),
+      globals,
+      permissions: read('permissions'),
+      hasNet: read('hasNet'),
+      capabilities: read('capabilities'),
+      shadowed: ['window', 'document', 'fetch', 'localStorage', 'XMLHttpRequest', 'globalThis', 'petApi']
+        .every((name) => globals[name] === 'undefined'),
+    };
+  })()`);
+
+  // 收尾：把探针插件与清单恢复原状（验收不该给仓库留垃圾）
+  try {
+    rmSync(probeDir, { recursive: true, force: true });
+    writeFileSync(join(root, 'assets', 'config', 'plugins.json'), pluginsJsonRaw, 'utf8');
+  } catch (error) {
+    console.error('CLEANUP_FAILED', error);
+  }
+
+  record(
+    '插件沙箱：探针插件经真实加载链路跑起来了',
+    sandboxProbe.alive === true && sandboxProbe.status === 'active',
+    JSON.stringify({ alive: sandboxProbe.alive, status: sandboxProbe.status }),
+  );
+  record(
+    '插件沙箱：window/document/fetch/petAPI 全部不可达（只有 PluginContext 一条路）',
+    sandboxProbe.shadowed === true,
+    JSON.stringify(sandboxProbe.globals),
+  );
+  record(
+    '插件沙箱：没有声明权限时 permissions 为空',
+    Array.isArray(sandboxProbe.permissions) && sandboxProbe.permissions.length === 0 && sandboxProbe.hasNet === false,
+    JSON.stringify({ permissions: sandboxProbe.permissions, hasNet: sandboxProbe.hasNet }),
+  );
+  record(
+    '插件上下文：系统能力接口齐全（timers/net/process/python/notify/mail/ui/onDispose）',
+    sandboxProbe.capabilities &&
+      sandboxProbe.capabilities.timers === 'function' &&
+      sandboxProbe.capabilities.net === 'function' &&
+      sandboxProbe.capabilities.process === 'function' &&
+      sandboxProbe.capabilities.python === 'function' &&
+      sandboxProbe.capabilities.notify === 'function' &&
+      sandboxProbe.capabilities.mail === 'function' &&
+      sandboxProbe.capabilities.ui === 'function' &&
+      sandboxProbe.capabilities.onDispose === 'function',
+    JSON.stringify(sandboxProbe.capabilities),
+  );
+
+  /* ---------------- 插件投递：往「交互」收件箱送文件（权限 mail） ---------------- */
+  /*
+   * 这是需求那句"宠物可能在插件中生成文件然后保存到这里"的落点：
+   * 插件把内容（文本 / base64）连同一条说明交上来，主进程写进收纳夹并记一条消息。
+   * 用真实安装的探针插件跑（走 install -> activate -> context.mail.send 全程）。
+   */
+  const mailProbeId = 'acceptance-mail-probe';
+  const mailProbeDir = join(fixtureRoot, 'mail-probe');
+  mkdirSync(mailProbeDir, { recursive: true });
+  writeFileSync(
+    join(mailProbeDir, 'package.json'),
+    JSON.stringify(
+      {
+        name: mailProbeId,
+        displayName: '投递探针',
+        version: '1.0.0',
+        main: 'index.js',
+        permissions: ['mail'],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+  writeFileSync(
+    join(mailProbeDir, 'index.js'),
+    [
+      'module.exports = {',
+      `  id: '${mailProbeId}',`,
+      "  name: '投递探针',",
+      "  version: '1.0.0',",
+      '  async activate(context) {',
+      '    // 文本附件 + 二进制附件（base64）：覆盖两条编码路径',
+      '    const result = await context.mail.send({',
+      "      subject: '探针生成的报告',",
+      "      body: '这是插件生成的东西，正文在这里。',",
+      '      attachments: [',
+      "        { name: 'probe-report.txt', content: '插件写的文本内容\\n第二行' },",
+      "        { name: 'probe-image.png', content: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==', encoding: 'base64' },",
+      '      ],',
+      '    });',
+      "    context.storage.set('mailResult', result);",
+      '  },',
+      '};',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+
+  const mailRun = await run(`(async () => {
+    const install = await window.petAPI.plugins.install(${JSON.stringify(mailProbeDir)});
+    await new Promise((r) => setTimeout(r, 1800));
+    const box = await window.petAPI.ai.notes();
+    const message = (box.notes || []).find((n) => (n.sender || {}).id === '${mailProbeId}') || null;
+    const result = JSON.parse(window.localStorage.getItem('desktop-pet:plugin:${mailProbeId}:mailResult') || 'null');
+    return {
+      install: { ok: install.ok, error: install.error || null },
+      result,
+      message,
+      orphans: (box.orphans || []).map((f) => f.name),
+      attachmentPreview: message && message.files && message.files[0]
+        ? await window.petAPI.ai.previewNoteFile(message.files[0].name)
+        : null,
+    };
+  })()`);
+  record(
+    '插件投递：`context.mail.send` 把消息与附件存进「交互」收件箱（权限 mail）',
+    mailRun.install.ok === true &&
+      mailRun.result?.ok === true &&
+      typeof mailRun.result?.messageId === 'string' &&
+      mailRun.message !== null &&
+      mailRun.message.sender.kind === 'plugin' &&
+      mailRun.message.sender.name === '投递探针' &&
+      mailRun.message.title === '探针生成的报告',
+    JSON.stringify({ install: mailRun.install, result: mailRun.result, message: mailRun.message }),
+  );
+  record(
+    '插件投递：文本与 base64 两种附件都写进了收纳夹（内容可读、不是空文件）',
+    Array.isArray(mailRun.message?.files) &&
+      mailRun.message.files.length === 2 &&
+      mailRun.message.files.some((f) => f.name === 'probe-report.txt' && f.size > 0) &&
+      mailRun.message.files.some((f) => f.name === 'probe-image.png' && f.size > 0) &&
+      mailRun.attachmentPreview?.ok === true &&
+      mailRun.attachmentPreview.text.includes('插件写的文本内容'),
+    JSON.stringify({ files: mailRun.message?.files, preview: mailRun.attachmentPreview && { ok: mailRun.attachmentPreview.ok, len: (mailRun.attachmentPreview.text || '').length } }),
+  );
+  record(
+    '插件投递：附件被消息引用，因此**不**出现在「未归档」里',
+    Array.isArray(mailRun.orphans) &&
+      !mailRun.orphans.includes('probe-report.txt') &&
+      !mailRun.orphans.includes('probe-image.png'),
+    JSON.stringify({ orphans: mailRun.orphans }),
+  );
+
+  // 删掉这条消息：附件要跟着消失（邮件语义）
+  const mailCleanup = await run(`(async () => {
+    const box = await window.petAPI.ai.notes();
+    const message = (box.notes || []).find((n) => (n.sender || {}).id === '${mailProbeId}');
+    const after = await window.petAPI.ai.deleteNote(message.id);
+    await new Promise((r) => setTimeout(r, 400));
+    const files = await window.petAPI.ai.noteFiles();
+    const uninstall = await window.petAPI.plugins.uninstall('${mailProbeId}');
+    return {
+      deleted: after.notes.every((n) => n.id !== message.id),
+      remainingFiles: files.map((f) => f.name),
+      orphans: (after.orphans || []).map((f) => f.name),
+      uninstall: { ok: uninstall.ok, error: uninstall.error || null },
+    };
+  })()`);
+  record(
+    '插件投递：删掉那条消息会连同附件一起删（邮件语义）',
+    mailCleanup.deleted === true &&
+      !mailCleanup.remainingFiles.includes('probe-report.txt') &&
+      !mailCleanup.remainingFiles.includes('probe-image.png') &&
+      mailCleanup.uninstall.ok === true,
+    JSON.stringify(mailCleanup),
+  );
+
+  /* ---------------- 权限执法：没声明的能力一律被拒绝（执法在 Main） ---------------- */
+  /*
+   * 直接打 preload 桥（绕开插件代码），验的是**主进程**的执法：即使插件自己
+   * 拼一个 pluginId 过来，只要那个插件没声明权限（或已停用），也必须被拒绝。
+   */
+  const permissionDenied = await run(`(async () => {
+    const net = await window.petAPI.plugins.net('${plainProbeId}', { url: 'https://example.com/' });
+    const proc = await window.petAPI.plugins.process('${plainProbeId}', { command: 'node', args: ['-v'] });
+    const py = await window.petAPI.plugins.pythonInfo('${plainProbeId}');
+    const notify = await window.petAPI.plugins.notify('${plainProbeId}', { title: 't', body: 'b' });
+    const mail = await window.petAPI.plugins.mail('${plainProbeId}', { subject: 's', body: 'b' });
+    const unknown = await window.petAPI.plugins.net('not-a-plugin', { url: 'https://example.com/' });
+    return { net, proc, py, notify, mail, unknown };
+  })()`);
+  record(
+    '权限执法：未声明 net 时联网被拒绝（且给出可读原因）',
+    permissionDenied.net && permissionDenied.net.ok === false && /权限/.test(String(permissionDenied.net.error || '')),
+    JSON.stringify(permissionDenied.net),
+  );
+  record(
+    '权限执法：未声明 process / python 时起进程被拒绝',
+    permissionDenied.proc.ok === false &&
+      permissionDenied.proc.code === null &&
+      permissionDenied.py.ok === false,
+    JSON.stringify({ proc: permissionDenied.proc.error, py: permissionDenied.py.error }),
+  );
+  record(
+    '权限执法：未声明 notify 时系统通知被拒绝',
+    permissionDenied.notify === false,
+    JSON.stringify(permissionDenied.notify),
+  );
+  record(
+    '权限执法：未声明 mail 时往收件箱投递被拒绝（不会凭空往用户界面塞东西）',
+    permissionDenied.mail?.ok === false && /权限/.test(String(permissionDenied.mail?.error || '')),
+    JSON.stringify(permissionDenied.mail),
+  );
+  record(
+    '权限执法：不存在的插件 id 同样被拒绝（无法凭空提权）',
+    permissionDenied.unknown.ok === false && /权限|id/.test(String(permissionDenied.unknown.error || '')),
+    JSON.stringify(permissionDenied.unknown),
+  );
+
+  /* ---------------- 插件定时器（主进程计时） ---------------- */
+  const pluginTimers = await run(`(async () => {
+    const host = window.petDebug.plugins;
+    await host.activate(
+      {
+        id: 'timer-probe',
+        name: 'Timer',
+        version: '1.0.0',
+        activate(context) {
+          context.timers.after(250, () => context.storage.set('afterFired', true));
+          context.timers.every(200, () => context.storage.set('everyCount', (context.storage.get('everyCount', 0) || 0) + 1));
+          context.timers.after(5000, () => context.storage.set('cancelled', true));
+        },
+      },
+      { id: 'timer-probe', name: 'Timer', version: '1.0.0', dir: 'plugins/examples/timer', enabled: true, status: 'loaded', permissions: [] }
+    );
+    await new Promise((r) => setTimeout(r, 900));
+    const after = window.localStorage.getItem('desktop-pet:plugin:timer-probe:afterFired');
+    const every = window.localStorage.getItem('desktop-pet:plugin:timer-probe:everyCount');
+    // 停用：主进程清表 + 渲染层取消定时器，长定时器不该再触发
+    await host.disablePlugin('timer-probe');
+    await new Promise((r) => setTimeout(r, 600));
+    return {
+      after,
+      every: every === null ? null : JSON.parse(every),
+      cancelled: window.localStorage.getItem('desktop-pet:plugin:timer-probe:cancelled'),
+      status: host.getLoadedPlugins().find((r) => r.id === 'timer-probe')?.status,
+    };
+  })()`);
+  record(
+    '插件定时器：after/every 到点（由主进程计时）',
+    pluginTimers.after === 'true' && typeof pluginTimers.every === 'number' && pluginTimers.every >= 2,
+    JSON.stringify(pluginTimers),
+  );
+  record(
+    '插件定时器：停用插件后未触发的定时器被取消',
+    pluginTimers.cancelled === null && pluginTimers.status === 'inactive',
+    JSON.stringify(pluginTimers),
+  );
+
+  /* ---------------- 随时关闭：单个插件的运行期启停 ---------------- */
+  const pluginsJsonPath = join(root, 'assets', 'config', 'plugins.json');
+  const readPluginEnabled = (id) => {
+    try {
+      const parsed = JSON.parse(readFileSync(pluginsJsonPath, 'utf8'));
+      const entry = (parsed.plugins || []).find((item) => item.id === id);
+      return entry ? entry.enabled !== false : null;
+    } catch (error) {
+      return null;
+    }
+  };
+
+  const disabled = await run(`(async () => {
+    const records = await window.petAPI.plugins.setEnabled('${plainProbeId}', false);
+    await new Promise((r) => setTimeout(r, 500));
+    const record = records.find((item) => item.id === '${plainProbeId}');
+    return {
+      fromBridge: record,
+      local: window.petDebug.plugins.getLoadedPlugins().find((item) => item.id === '${plainProbeId}') || null,
+      stillLoaded: window.petDebug.plugins.getLoadedPlugins().some((item) => item.id === '${plainProbeId}' && item.status === 'active'),
+    };
+  })()`);
+  record(
+    '随时关闭：点一下开关即停用（主进程清单立刻变 disabled）',
+    disabled.fromBridge && disabled.fromBridge.enabled === false && disabled.fromBridge.status === 'disabled',
+    JSON.stringify(disabled.fromBridge),
+  );
+  record(
+    '随时关闭：停用后渲染层不再持有该插件（已被回收）',
+    disabled.stillLoaded === false && (disabled.local === null || disabled.local.status !== 'active'),
+    JSON.stringify(disabled.local),
+  );
+  record(
+    '随时关闭：停用会写回 plugins.json（重启后仍是关的）',
+    readPluginEnabled(plainProbeId) === false,
+    `enabled=${readPluginEnabled(plainProbeId)}`,
+  );
+
+  // 停用点击探针后，它的事件订阅必须一起消失（点击计数不再增长）
+  const detachedEvents = await run(`(async () => {
+    const click = async () => {
+      const stage = document.getElementById('pet-stage');
+      const rect = stage.getBoundingClientRect();
+      const opts = { bubbles: true, cancelable: true, clientX: rect.width/2, clientY: rect.height*0.5, screenX: 500, screenY: 500, button: 0, pointerId: 1, isPrimary: true };
+      stage.dispatchEvent(new PointerEvent('pointerdown', opts));
+      window.dispatchEvent(new PointerEvent('pointerup', opts));
+      await new Promise((r) => setTimeout(r, 400));
+      return window.localStorage.getItem('desktop-pet:plugin:${clickProbeId}:clickCount');
+    };
+    await window.petAPI.plugins.setEnabled('${clickProbeId}', false);
+    await new Promise((r) => setTimeout(r, 400));
+    window.petDebug.anim.stop('test-cleanup');
+    await new Promise((r) => setTimeout(r, 200));
+    const before = window.localStorage.getItem('desktop-pet:plugin:${clickProbeId}:clickCount');
+    const afterDisabled = await click();
+    await window.petAPI.plugins.setEnabled('${clickProbeId}', true);
+    await new Promise((r) => setTimeout(r, 500));
+    const afterEnabled = await click();
+    return { before, afterDisabled, afterEnabled, status: window.petDebug.plugins.getLoadedPlugins().find((r) => r.id === '${clickProbeId}')?.status };
+  })()`);
+  record(
+    '随时关闭：停用后事件订阅被退订（点击计数不再增加）',
+    detachedEvents.afterDisabled === detachedEvents.before,
+    JSON.stringify(detachedEvents),
+  );
+  record(
+    '随时打开：重新启用后插件现场加载并恢复监听',
+    detachedEvents.status === 'active' && detachedEvents.afterEnabled !== detachedEvents.before,
+    JSON.stringify({ status: detachedEvents.status, before: detachedEvents.before, after: detachedEvents.afterEnabled }),
+  );
+  record(
+    '随时打开：重新启用会写回 plugins.json',
+    readPluginEnabled(clickProbeId) === true,
+    `enabled=${readPluginEnabled(clickProbeId)}`,
+  );
+
+  await run(`window.petAPI.plugins.setEnabled('${plainProbeId}', true)`);
+  await wait(500);
+  record(
+    '随时打开：重新启用普通探针后回到 active',
+    readPluginEnabled(plainProbeId) === true,
+    `enabled=${readPluginEnabled(plainProbeId)}`,
+  );
+
+  /* ---------------- 安装 / 卸载插件 ---------------- */
+  /*
+   * 走**真实安装链路**（校验 -> 复制 -> 登记 -> 启用），而不是只断言按钮在：
+   * 安装是这一轮唯一会写用户磁盘的功能，必须验到"文件真的到位、清单真的对、插件真的跑起来"。
+   * 源目录放在 build/ 下（gitignore 里），卸载后连源目录一起清掉。
+   */
+  const installSource = join(root, 'build', 'acceptance-plugin-src');
+  const installedId = 'acceptance-installed-plugin';
+  const installedDir = join(root, 'plugins', installedId);
+  try {
+    rmSync(installSource, { recursive: true, force: true });
+  } catch {
+    /* 上一轮的残留删不掉也无所谓，下面会重建 */
+  }
+  mkdirSync(installSource, { recursive: true });
+  writeFileSync(
+    join(installSource, 'package.json'),
+    JSON.stringify(
+      {
+        name: installedId,
+        displayName: '验收装进来的插件',
+        version: '2.3.4',
+        description: '安装/卸载验收用',
+        main: 'index.js',
+        permissions: ['notify'],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+  writeFileSync(
+    join(installSource, 'index.js'),
+    [
+      'module.exports = {',
+      `  id: '${installedId}',`,
+      "  name: '验收装进来的插件',",
+      "  version: '2.3.4',",
+      '  activate(context) {',
+      '    context.storage.set("installed", true);',
+      '  },',
+      '};',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  // 复制时要被跳过的东西：依赖树与一个指向目录外的符号链接
+  mkdirSync(join(installSource, 'node_modules', 'junk'), { recursive: true });
+  writeFileSync(join(installSource, 'node_modules', 'junk', 'index.js'), 'module.exports = 1;\n', 'utf8');
+  let symlinkMade = false;
+  try {
+    require('node:fs').symlinkSync(root, join(installSource, 'escape-link'), 'junction');
+    symlinkMade = true;
+  } catch (error) {
+    // Windows 上可能需要权限：拿不到就跳过这一条，不让验收因此变红
+    console.error('SYMLINK_SKIP', String(error));
+  }
+
+  const installRun = await run(`(async () => {
+    const result = await window.petAPI.plugins.install(${JSON.stringify(installSource)});
+    await new Promise((r) => setTimeout(r, 1500));
+    const record = window.petDebug.plugins.getLoadedPlugins().find((r) => r.id === '${installedId}') || null;
+    return {
+      ok: result.ok,
+      id: result.id,
+      error: result.error || null,
+      inRecords: Array.isArray(result.records) && result.records.some((r) => r.id === '${installedId}'),
+      record,
+      storage: window.localStorage.getItem('desktop-pet:plugin:${installedId}:installed'),
+    };
+  })()`);
+
+  const installedManifestEntry = (() => {
+    try {
+      const parsed = JSON.parse(readFileSync(join(root, 'assets', 'config', 'plugins.json'), 'utf8'));
+      return (parsed.plugins || []).find((item) => item.id === installedId) || null;
+    } catch (error) {
+      return null;
+    }
+  })();
+
+  record(
+    '安装插件：真实复制进 plugins/<id>/ 并登记（含 enabled:true 与权限）',
+    installRun.ok === true &&
+      installRun.id === installedId &&
+      existsSync(join(installedDir, 'package.json')) &&
+      existsSync(join(installedDir, 'index.js')) &&
+      installedManifestEntry !== null &&
+      installedManifestEntry.enabled !== false &&
+      installedManifestEntry.path === installedId,
+    JSON.stringify({ install: installRun, entry: installedManifestEntry, dirExists: existsSync(installedDir) }),
+  );
+  record(
+    '安装插件：过滤掉 node_modules（不复制依赖树）',
+    !existsSync(join(installedDir, 'node_modules')),
+    `node_modules copied=${existsSync(join(installedDir, 'node_modules'))}`,
+  );
+  record(
+    '安装插件：不复制符号链接（避免把插件目录之外的路径带进来）',
+    symlinkMade === false || !existsSync(join(installedDir, 'escape-link')),
+    JSON.stringify({ symlinkMade, copied: existsSync(join(installedDir, 'escape-link')) }),
+  );
+  record(
+    '安装插件：装完立刻启用（记录 active + 插件自己的 activate 跑过）',
+    installRun.record !== null && installRun.record.status === 'active' && installRun.storage === 'true',
+    JSON.stringify({ record: installRun.record, storage: installRun.storage }),
+  );
+
+  /*
+   * 设置窗口的面板必须跟着长出新卡片 + 卸载按钮（安装是"主进程 -> 推送 -> 重画"这条链路）。
+   *
+   * ⚠️ 不能复用上面那个 `settingsWin`：设置窗口的用例**早就把它销毁了**（见"关闭 = 隐藏"那条），
+   * 直接查会得到 null 于是整条断言空转（实测第一版就是这样假绿的）。这里重新打开一次、
+   * 查完再销毁，保持后面的窗口计数不受影响。
+   */
+  const querySettingsPanel = async () => {
+    await run(`window.petAPI.window.showSettingsWindow()`);
+    await wait(1500);
+    const target = BrowserWindow.getAllWindows().find((w) => {
+      try {
+        return w.webContents.getURL().includes('/settings/');
+      } catch (error) {
+        return false;
+      }
+    });
+    if (!target) return { error: '设置窗口没打开' };
+    const snapshot = await target.webContents.executeJavaScript(`(() => ({
+      cards: document.querySelectorAll('#plugin-list .plugin-card').length,
+      uninstallButtons: document.querySelectorAll('#plugin-list .plugin-uninstall').length,
+      builtinNotes: document.querySelectorAll('#plugin-list .plugin-builtin').length,
+      hasInstalledCard: !!document.getElementById('plugin-uninstall-${installedId}'),
+      names: [...document.querySelectorAll('#plugin-list .plugin-name')].map((n) => n.textContent),
+    }))()`, true);
+    target.destroy();
+    await wait(300);
+    return snapshot;
+  };
+
+  const settingsAfterInstall = await querySettingsPanel();
+  record(
+    '设置窗口「插件」面板：新装的插件自动出现在列表里（随包待办 + 两个探针 + 新装，都能卸载）',
+    settingsAfterInstall.error === undefined &&
+      settingsAfterInstall.cards === 4 &&
+      settingsAfterInstall.hasInstalledCard === true &&
+      settingsAfterInstall.uninstallButtons === 4,
+    JSON.stringify(settingsAfterInstall),
+  );
+
+  // 拒绝的几种情况：不是插件目录 / 路径不存在
+  const installRefusals = await run(`(async () => {
+    const notAPlugin = await window.petAPI.plugins.install(${JSON.stringify(join(root, 'build'))});
+    const missing = await window.petAPI.plugins.install(${JSON.stringify(join(root, 'build', 'no-such-folder-xyz'))});
+    return { notAPlugin, missing };
+  })()`);
+  record(
+    '安装插件：选到非插件目录 / 不存在的路径时被拒绝，并给出可读原因',
+    installRefusals.notAPlugin.ok === false &&
+      /package\.json|插件/.test(String(installRefusals.notAPlugin.error || '')) &&
+      installRefusals.missing.ok === false,
+    JSON.stringify({ notAPlugin: installRefusals.notAPlugin, missing: installRefusals.missing }),
+  );
+
+  /*
+   * "带层级的 path 视为随包内置、不许卸载"这条规则。
+   *
+   * 随包已经不带插件了，所以这里**临时造一个**嵌套目录的条目来验规则本身：
+   * 写目录 + 手改清单，验完立刻把两者都收掉（否则后面的面板/菜单计数会被它带偏）。
+   */
+  const nestedId = 'acceptance-nested-probe';
+  const nestedDir = join(root, 'plugins', '_acceptance-nested', 'inner');
+  const pluginsJsonFile = join(root, 'assets', 'config', 'plugins.json');
+  mkdirSync(nestedDir, { recursive: true });
+  writeFileSync(
+    join(nestedDir, 'package.json'),
+    JSON.stringify({ name: nestedId, displayName: '嵌套探针', version: '1.0.0', main: 'index.js' }, null, 2),
+    'utf8',
+  );
+  writeFileSync(join(nestedDir, 'index.js'), `module.exports = { id: '${nestedId}', name: '嵌套探针', version: '1.0.0', activate() {} };\n`, 'utf8');
+  {
+    const manifest = JSON.parse(readFileSync(pluginsJsonFile, 'utf8'));
+    manifest.plugins = manifest.plugins || [];
+    manifest.plugins.push({ id: nestedId, path: '_acceptance-nested/inner', enabled: false });
+    writeFileSync(pluginsJsonFile, JSON.stringify(manifest, null, 2), 'utf8');
+  }
+  const builtinRefusal = await run(`window.petAPI.plugins.uninstall('${nestedId}')`);
+  record(
+    '卸载插件：带层级的路径（随包内置那种）拒绝卸载',
+    builtinRefusal.ok === false && /内置/.test(String(builtinRefusal.error || '')),
+    JSON.stringify(builtinRefusal),
+  );
+  // 收掉临时目录与条目，并让主进程重新发现一次（顺带验证"清单里没了 -> 记录也被剪掉"）
+  {
+    const manifest = JSON.parse(readFileSync(pluginsJsonFile, 'utf8'));
+    manifest.plugins = (manifest.plugins || []).filter((item) => item.id !== nestedId);
+    writeFileSync(pluginsJsonFile, JSON.stringify(manifest, null, 2), 'utf8');
+  }
+  rmSync(join(root, 'plugins', '_acceptance-nested'), { recursive: true, force: true });
+  const pruneCheck = await run(`(async () => {
+    await window.petAPI.plugins.setEnabled('${clickProbeId}', true);
+    await new Promise((r) => setTimeout(r, 600));
+    return {
+      inRecords: window.petDebug.plugins.getLoadedPlugins().some((r) => r.id === '${nestedId}'),
+      list: (await window.petAPI.plugins.list()).some((r) => r.id === '${nestedId}'),
+    };
+  })()`);
+  record(
+    '插件清单：条目被移除后，主进程与渲染层都不再保留它的记录',
+    pruneCheck.inRecords === false && pruneCheck.list === false,
+    JSON.stringify(pruneCheck),
+  );
+
+  const uninstallRun = await run(`(async () => {
+    const result = await window.petAPI.plugins.uninstall('${installedId}');
+    await new Promise((r) => setTimeout(r, 900));
+    return {
+      ok: result.ok,
+      id: result.id,
+      error: result.error || null,
+      inRecords: Array.isArray(result.records) && result.records.some((r) => r.id === '${installedId}'),
+      hostHasIt: window.petDebug.plugins.getLoadedPlugins().some((r) => r.id === '${installedId}'),
+      storage: window.localStorage.getItem('desktop-pet:plugin:${installedId}:installed'),
+    };
+  })()`);
+
+  const manifestAfterUninstall = (() => {
+    try {
+      const parsed = JSON.parse(readFileSync(join(root, 'assets', 'config', 'plugins.json'), 'utf8'));
+      return (parsed.plugins || []).some((item) => item.id === installedId);
+    } catch (error) {
+      return true;
+    }
+  })();
+
+  record(
+    '卸载插件：目录被删、清单条目被移除、渲染层忘掉它',
+    uninstallRun.ok === true &&
+      !existsSync(installedDir) &&
+      manifestAfterUninstall === false &&
+      uninstallRun.inRecords === false &&
+      uninstallRun.hostHasIt === false,
+    JSON.stringify({
+      uninstall: uninstallRun,
+      dirExists: existsSync(installedDir),
+      inManifest: manifestAfterUninstall,
+    }),
+  );
+  record(
+    '卸载插件：连它的存储一起清掉（不留残渣）',
+    uninstallRun.storage === null,
+    `storage=${String(uninstallRun.storage)}`,
+  );
+
+  // 收尾：源目录（build/ 下）也删掉
+  try {
+    rmSync(installSource, { recursive: true, force: true });
+  } catch (error) {
+    console.error('CLEANUP_FAILED', error);
+  }
+
+  /*
+   * 卸载之后面板同样要跟上：卡片回到 2 张、卸载按钮消失。
+   */
+  const settingsAfterUninstall = await querySettingsPanel();
+  record(
+    '设置窗口「插件」面板：卸载后卡片与按钮一起消失（回到待办 + 两个探针）',
+    settingsAfterUninstall.error === undefined &&
+      settingsAfterUninstall.cards === 3 &&
+      settingsAfterUninstall.uninstallButtons === 3 &&
+      settingsAfterUninstall.hasInstalledCard === false,
+    JSON.stringify(settingsAfterUninstall),
+  );
+
   /* --------------------------- 托盘与右键菜单 --------------------------- */
   const { Tray, nativeImage } = require('electron');
   const trayCount = Tray ? 1 : 0;
@@ -3084,14 +4325,37 @@ app.whenReady().then(async () => {
   }
   record('托盘图标为 32×32 且可被 Electron 读取', trayInfo.width === 32 && trayInfo.height === 32 && trayInfo.hasAlpha, JSON.stringify(trayInfo));
 
+  /*
+   * 弹出右键菜单，并在验完"能弹"之后**把它关掉**。
+   *
+   * `TrayManager` 在菜单打开期间会跳过托盘菜单重建（避免 Windows 上弹着的时候改菜单）；
+   * 而验收里没人去点这个菜单，它就一直开着 —— 于是后面"托盘菜单与右键菜单一致"
+   * 那条再也拿不到托盘模板（偶发 `tray: null`，实测踩过）。
+   * 这里在同一个主进程里截住刚构建的 Menu 实例，验完主动 `closePopup()` 还原状态。
+   */
+  const { Menu: MenuForCleanup } = require('electron');
+  let poppedMenu = null;
+  const originalBuildForCleanup = MenuForCleanup.buildFromTemplate;
+  MenuForCleanup.buildFromTemplate = function capture(template) {
+    const built = originalBuildForCleanup.call(this, template);
+    poppedMenu = built;
+    return built;
+  };
   const menu = await run(`(() => {
     try {
-      window.petAPI.menu.showContextMenu({ region: 'head', animationId: window.petDebug.anim.getCurrentAnimation() });
+      window.petAPI.menu.showContextMenu();
       return { ok: true };
     } catch (error) { return { ok: false, error: String(error) }; }
   })()`);
+  MenuForCleanup.buildFromTemplate = originalBuildForCleanup;
   record('右键菜单调用成功', menu.ok === true, JSON.stringify(menu));
   await wait(500);
+  try {
+    if (poppedMenu && typeof poppedMenu.closePopup === 'function') poppedMenu.closePopup();
+  } catch (error) {
+    // 关不掉也不影响别的用例（下一个用例自己会处理）
+  }
+  await wait(300);
 
   /* --------------------------- 收尾 --------------------------- */
   const finalState = await run(`window.petApp.describe()`);
@@ -3181,7 +4445,7 @@ app.whenReady().then(async () => {
   );
   record(
     'AI 桥暴露了完整的能力面（桌宠窗口）',
-    ['status', 'setSettings', 'chat', 'memory', 'diary', 'writeDiary', 'testConnection', 'notifyInteraction'].every((name) =>
+    ['status', 'setSettings', 'chat', 'memory', 'diary', 'writeDiary', 'testConnection', 'notifyInteraction', 'notifyInteractionSettled'].every((name) =>
       aiInitial.aiMethods.includes(name),
     ),
     JSON.stringify(aiInitial.aiMethods),
@@ -3215,6 +4479,9 @@ app.whenReady().then(async () => {
     const before = await window.petAPI.ai.status();
     window.petAPI.ai.notifyInteraction('click');
     window.petAPI.ai.notifyInteraction('doubleclick');
+    // 加心情的那一步（动画播完后渲染层才会报）也要覆盖：情绪开关关掉时它同样不能改心情
+    window.petAPI.ai.notifyInteractionSettled('click');
+    window.petAPI.ai.notifyInteractionSettled('doubleclick');
     await window.petAPI.ai.chat('开关都关掉时不应该写盘');
     await window.petAPI.ai.chat('再试一次');
     await new Promise((r) => setTimeout(r, 600));
@@ -3251,8 +4518,8 @@ app.whenReady().then(async () => {
     const model = window.petDebug.emotion;
     const now = Date.now();
     const base = model.initialEmotion(now);
-    const clicked = model.applyInteraction(base, 'click', now);
-    const chatted = model.applyInteraction(base, 'chat', now);
+    const clicked = model.applyInteraction(base, 'click');
+    const chatted = model.applyInteraction(base, 'chat');
     // 三档衰减：同一份状态、同样过去 60 分钟，只改在场状态
     const idle = { ...base, lastInteractionAt: now - 3600000, lastUpdateAt: now - 3600000 };
     const decay = (presence) => model.decayEmotion(idle, { presence, now, tokensRemainingRatio: 1 });
@@ -3353,6 +4620,34 @@ app.whenReady().then(async () => {
     '开关：打开记忆/情绪后，对话被记住且心情上涨（无需大模型）',
     subsystemOn.memory === true && subsystemOn.emotion === true && subsystemOn.moodAfter > subsystemOn.moodBefore,
     JSON.stringify(subsystemOn),
+  );
+
+  /*
+   * 心情推送 -> 渲染层镜像。
+   *
+   * 需求（"心情低于阈值时随机池全变 sad"）的判定发生在渲染层，靠的是主进程
+   * 把状态推给桌宠窗口；这条链路断了的话，池子会永远按**启动时**的心情判定。
+   * 上一条刚证明"聊天让心情涨了"，这里立刻核对镜像是否跟上了同一个数。
+   *
+   * ⚠️ 这里**不能**再要求"镜像 === 那次聊天后的读数"：心情会随互动/心跳继续变
+   * （实测偶发：聊天后主进程是 80，400ms 后一次互动结算把它推到 83，
+   * 镜像老老实实跟到了 83 —— 断言却红了，属于测试过严而不是产品 bug）。
+   * 现在钉的是两件更本质的事：
+   *   1. 同一时刻渲染层镜像 === 主进程读数（推送真的到达了）；
+   *   2. 镜像**已经不是**聊天前那个值（说明它真的被这次变化更新过，
+   *      而不是靠启动时补拉一次凑巧相等）。
+   */
+  const moodMirror = await run(`(async () => {
+    await new Promise((r) => setTimeout(r, 400));
+    const status = await window.petAPI.ai.status();
+    return { mirror: window.petDebug.mood(), reported: status.emotion.mood };
+  })()`);
+  record(
+    '心情推送：主进程的状态推送真的更新了渲染层的心情镜像（池子的 sad 判定靠它）',
+    subsystemOn.moodAfter !== subsystemOn.moodBefore &&
+      moodMirror.mirror === moodMirror.reported &&
+      moodMirror.mirror !== subsystemOn.moodBefore,
+    JSON.stringify({ push: moodMirror, chatMood: subsystemOn.moodAfter, before: subsystemOn.moodBefore }),
   );
 
   /* 2.2 记忆：对话写入本地记忆日志（文件级证据） + 快照可读 */
@@ -3558,12 +4853,23 @@ app.whenReady().then(async () => {
     await window.petAPI.ai.resetEmotion();
     await new Promise((r) => setTimeout(r, 300));
     const before = await window.petAPI.ai.status();
+    /*
+     * 需求："互动动画播放结束才能加 mood 值"。
+     * 所以这里把两步**分开**断言：上报互动本身不该动心情，
+     * 动画播完后渲染层报的 notifyInteractionSettled 才加。两步合一就测不出这条规则了
+     * （把 interact 挪回 notifyInteraction 也不会变红）。
+     */
     window.petAPI.ai.notifyInteraction('click');
     window.petAPI.ai.notifyInteraction('doubleclick');
+    await new Promise((r) => setTimeout(r, 250));
+    const afterReport = await window.petAPI.ai.status();
+    window.petAPI.ai.notifyInteractionSettled('click');
+    window.petAPI.ai.notifyInteractionSettled('doubleclick');
     await new Promise((r) => setTimeout(r, 250));
     const after = await window.petAPI.ai.status();
     return {
       moodBefore: before.emotion.mood,
+      moodAfterReport: afterReport.emotion.mood,
       moodAfter: after.emotion.mood,
       satiety: after.emotion.satiety,
       tokensUsed: after.tokensUsed,
@@ -3571,7 +4877,12 @@ app.whenReady().then(async () => {
     };
   })()`);
   record(
-    '情绪：渲染层的互动上报会传到主进程并让心情上涨',
+    '情绪：互动上报本身不加心情（等互动动画播完才结算）',
+    interaction.moodAfterReport <= interaction.moodBefore,
+    JSON.stringify(interaction),
+  );
+  record(
+    '情绪：渲染层的互动上报会传到主进程，动画播完后结算让心情上涨',
     interaction.moodAfter > interaction.moodBefore,
     JSON.stringify(interaction),
   );
@@ -3618,7 +4929,582 @@ app.whenReady().then(async () => {
     JSON.stringify(aiRestored),
   );
 
+  /*
+   * 小纸条：**旧格式必须能读出来**（不再静默丢数据）。
+   *
+   * 小纸条换过一次模型：早期是"邮箱"（`author` + 无 `title`），现在是"收纳夹"
+   * （`title` + 可选 `file`）。严格按新字段校验会把旧文件里的纸条整条丢掉 ——
+   * 实测用户真实数据里就有一条 2026-09-26 的日记纸条会消失（而且悄无声息）。
+   * 所以读盘走 `migrateNote`：缺标题就从正文首句推一个，其它字段照旧。
+   */
+  const noteMigration = await run(`(() => {
+    const model = window.petDebug.perception;
+    const legacy = model.migrateNote({
+      id: 'legacy-1',
+      author: 'pet',
+      kind: 'diary',
+      text: '今天主人一整天都没怎么跟我说话，我就趴在桌角，看着窗口开开关关。',
+      at: '2026-09-26T14:00:30.470Z',
+      read: false,
+      source: 'template',
+      tokens: 0,
+    });
+    const alreadyNew = model.migrateNote({
+      id: 'n1', kind: 'file', title: '收好的文件', text: '收好了：a.txt',
+      at: '2026-09-26T15:00:00.000Z', read: true,
+      file: { name: 'a.txt', path: 'C:\\\\x\\\\notes\\\\files\\\\a.txt', size: 12 },
+      source: 'system', tokens: 0,
+    });
+    return {
+      legacy: legacy,
+      legacyTitleLength: (legacy?.title ?? '').length,
+      alreadyNew,
+      garbage: model.migrateNote({ hello: 'world' }),
+      badDate: model.migrateNote({ text: '有正文但时间不合法', at: '不是时间' }),
+    };
+  })()`);
+  record(
+    '交互：旧格式（邮箱版无 title / 单数 file）能迁移成新模型，不再静默丢数据',
+    noteMigration.legacy !== null &&
+      noteMigration.legacy.id === 'legacy-1' &&
+      noteMigration.legacy.kind === 'diary' &&
+      noteMigration.legacy.read === false &&
+      noteMigration.legacy.source === 'template' &&
+      noteMigration.legacy.at === '2026-09-26T14:00:30.470Z' &&
+      noteMigration.legacy.text.startsWith('今天主人一整天') &&
+      noteMigration.legacyTitleLength > 0 &&
+      // 老邮箱模型的 author: 'pet' -> 发件人是她自己
+      noteMigration.legacy.sender?.kind === 'pet' &&
+      Array.isArray(noteMigration.legacy.files) &&
+      noteMigration.legacy.files.length === 0 &&
+      noteMigration.alreadyNew?.kind === 'file' &&
+      noteMigration.alreadyNew?.title === '收好的文件' &&
+      // 单数 file -> files 数组（附件模型升级）
+      Array.isArray(noteMigration.alreadyNew?.files) &&
+      noteMigration.alreadyNew.files.length === 1 &&
+      noteMigration.alreadyNew.files[0]?.name === 'a.txt' &&
+      noteMigration.alreadyNew.files[0]?.size === 12 &&
+      noteMigration.garbage === null &&
+      noteMigration.badDate === null,
+    JSON.stringify(noteMigration),
+  );
+
+  /*
+   * 小纸条（她的收纳夹 —— 用来保存重要的事情，含收好的文件）。
+   *
+   * 需求在这里钉死：
+   *   1. **用户不能留言**：桥面上不该有"写纸条"这个能力；
+   *   2. 内容由她自己产生：`composeNote()` 让她记一件；
+   *   3. **日记不进小纸条**（需求："日记不要记到小纸条"）；
+   *   4. 能**删**：删单条纸条（记录而已，不动文件）；
+   *   5. 能**看文件**：列目录 / 读内容（文本、图片）/ 删文件 / 拒绝对目录外的访问。
+   *
+   * 跑在这里是因为上一段刚把 AI 恢复成"全开 + **无密钥**"：
+   * 她的文案必然走本地兜底（确定、不发网络请求、不占验收的 4 分钟预算）。
+   */
+  const notesFlow = await run(`(async () => {
+    const ai = window.petAPI.ai;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    await ai.clearNotes();                                  // 从干净状态开始
+    const empty = await ai.notes();
+    const composed = await ai.composeNote();                // 她记一件（无密钥 -> 本地兜底）
+    const afterCompose = await ai.notes();
+    const read = await ai.markNotesRead();
+    const beforeDiary = afterCompose.notes.length;
+    const diary = await ai.writeDiary();                    // 写日记：**只**写 diary/，不该进收件箱
+    await wait(500);
+    const afterDiary = await ai.notes();
+    await ai.composeNote();                                 // 再来一条：验证"删一条还剩一条"
+    const beforeDelete = await ai.notes();
+    const firstId = beforeDelete.notes[0] ? beforeDelete.notes[0].id : '';
+    const deleted = await ai.deleteNote(firstId);           // 删单条
+    const deleteAgain = await ai.deleteNote('no-such-note'); // 幂等：不存在的 id 不报错
+    const withoutFile = beforeDelete.notes.find((n) => (n.files ?? []).length === 0) ?? null;
+    const cleared = await ai.clearNotes();
+    const first = afterCompose.notes[0] ?? null;
+    return {
+      canWrite: typeof ai.writeNote === 'function',
+      emptyCount: empty.notes.length,
+      composeUnread: composed.unread,
+      composeNote: first,
+      // 邮件模型：每条消息都带发件人与**附件数组**（旧字段 file 已不存在）
+      hasSender: first !== null && first.sender !== undefined && first.sender.kind === 'pet',
+      hasFilesArray: first !== null && Array.isArray(first.files),
+      hasLegacyFile: first !== null && Object.prototype.hasOwnProperty.call(first, 'file'),
+      readUnread: read.unread,
+      readAllRead: read.notes.every((n) => n.read === true),
+      diaryDate: diary.date,
+      diaryNoteCount: afterDiary.notes.filter((n) => n.kind === 'diary').length,
+      beforeDiary,
+      afterDiaryCount: afterDiary.notes.length,
+      filesDir: afterDiary.filesDir,
+      dataDir: afterDiary.dataDir,
+      idsUnique: new Set(beforeDelete.notes.map((n) => n.id)).size === beforeDelete.notes.length,
+      beforeDelete: beforeDelete.notes.length,
+      deletedCount: deleted.notes.length,
+      deleteAgainCount: deleteAgain.notes.length,
+      // 打开附件只接受**消息 id**：不存在的 id、以及没有附件的消息都必须被拒（也不会拉起任何程序）
+      openUnknown: await ai.openNoteFile('no-such-note'),
+      openNoFile: await ai.openNoteFile(withoutFile ? withoutFile.id : 'no-such-note'),
+      clearedCount: cleared.notes.length,
+      clearedUnread: cleared.unread,
+      clearedOrphans: Array.isArray(cleared.orphans) ? cleared.orphans.length : -1,
+    };
+  })()`);
+  const notesFile = join(aiDataDir, 'notes', 'notes.json');
+  let notesFileExists = false;
+  let diaryFileExists = false;
+  try {
+    notesFileExists = existsSync(notesFile);
+    diaryFileExists = existsSync(join(aiDataDir, 'diary', `${notesFlow.diaryDate}.md`));
+  } catch (error) {
+    notesFileExists = false;
+    diaryFileExists = false;
+  }
+  record(
+    '交互：用户不能留言（桥面上没有写纸条），内容全部由她自己或插件产生',
+    notesFlow.canWrite === false && notesFlow.emptyCount === 0,
+    JSON.stringify({ canWrite: notesFlow.canWrite, emptyCount: notesFlow.emptyCount }),
+  );
+  record(
+    '交互：让她记一件 -> 未看 1 -> 标记看过 -> 清空',
+    notesFlow.composeUnread === 1 &&
+      notesFlow.composeNote?.kind === 'manual' &&
+      notesFlow.composeNote?.read === false &&
+      notesFlow.composeNote?.source === 'template' &&
+      typeof notesFlow.composeNote?.title === 'string' &&
+      notesFlow.composeNote.title.length > 0 &&
+      typeof notesFlow.composeNote?.text === 'string' &&
+      notesFlow.composeNote.text.length > 0 &&
+      notesFlow.readUnread === 0 &&
+      notesFlow.readAllRead === true &&
+      notesFlow.idsUnique === true &&
+      notesFlow.clearedCount === 0 &&
+      notesFlow.clearedUnread === 0,
+    JSON.stringify(notesFlow),
+  );
+  record(
+    '交互：消息是邮件式的（有发件人 + files 附件数组，旧的单数 file 字段已退役）',
+    notesFlow.hasSender === true && notesFlow.hasFilesArray === true && notesFlow.hasLegacyFile === false,
+    JSON.stringify({
+      sender: notesFlow.composeNote?.sender,
+      files: notesFlow.composeNote?.files,
+      legacyFile: notesFlow.hasLegacyFile,
+    }),
+  );
+  record(
+    '交互：写日记**不会**记到收件箱（只留在 diary/）',
+    notesFlow.diaryNoteCount === 0 &&
+      notesFlow.afterDiaryCount === notesFlow.beforeDiary &&
+      diaryFileExists === true,
+    JSON.stringify({
+      diaryNotes: notesFlow.diaryNoteCount,
+      before: notesFlow.beforeDiary,
+      after: notesFlow.afterDiaryCount,
+      diaryFile: diaryFileExists,
+    }),
+  );
+  record(
+    '交互：能删单条（删一条少一条；不存在的 id 幂等不报错）',
+    notesFlow.beforeDelete >= 2 &&
+      notesFlow.deletedCount === notesFlow.beforeDelete - 1 &&
+      notesFlow.deleteAgainCount === notesFlow.deletedCount,
+    JSON.stringify({
+      before: notesFlow.beforeDelete,
+      after: notesFlow.deletedCount,
+      again: notesFlow.deleteAgainCount,
+    }),
+  );
+  record(
+    '交互：落盘在数据目录的 notes/（notes.json + 附件目录），打开附件只认消息 id',
+    notesFlow.dataDir.replace(/\\/g, '/').endsWith('/notes') &&
+      notesFlow.filesDir.replace(/\\/g, '/').endsWith('/notes/files') &&
+      notesFileExists === true &&
+      notesFlow.openUnknown === false &&
+      notesFlow.openNoFile === false,
+    `${notesFlow.dataDir} · file=${notesFileExists} · open=${notesFlow.openUnknown}/${notesFlow.openNoFile}`,
+  );
+
+  /*
+   * 「文件」页签：列目录 / 读内容 / 删文件 / 边界。
+   *
+   * 验收进程**直接往收纳夹里放两个文件**（一个 txt、一个 png），然后走桥面去看 ——
+   * 这样测的是真实链路（主进程扫目录 + 读盘 + 校验路径），而不是纯函数。
+   * 「收纳文件…」那条路要弹系统选择框，自动化里没法点，只能人工看（见 README 清单）。
+   */
+  const noteFilesDir = join(aiDataDir, 'notes', 'files');
+  const pngBytes = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  let filesProbe = null;
+  try {
+    mkdirSync(noteFilesDir, { recursive: true });
+    writeFileSync(join(noteFilesDir, 'note-preview.txt'), '第一行：收纳夹里的文本\n第二行', 'utf8');
+    writeFileSync(join(noteFilesDir, 'note-preview.png'), pngBytes);
+    filesProbe = await run(`(async () => {
+      const ai = window.petAPI.ai;
+      const list = await ai.noteFiles();
+      const text = await ai.previewNoteFile('note-preview.txt');
+      const image = await ai.previewNoteFile('note-preview.png');
+      const missing = await ai.previewNoteFile('no-such-file.txt');
+      // 路径穿越：分隔符 / 上一级 / 绝对路径都必须被拒（返回 ok:false，绝不去读文件）
+      const traversal = await ai.previewNoteFile('..\\\\notes.json');
+      const traversal2 = await ai.previewNoteFile('sub/../../notes.json');
+      // 这两个文件没有被任何消息引用 -> 必须出现在"未归档"里（合并成邮件后不能把文件藏起来）
+      const box = await ai.notes();
+      const deleted = await ai.deleteNoteFile('note-preview.txt');
+      const afterDelete = await ai.noteFiles();
+      const deleteMissing = await ai.deleteNoteFile('note-preview.txt');
+      return {
+        names: list.map((f) => f.name),
+        kinds: list.map((f) => f.preview),
+        orphanNames: (box.orphans ?? []).map((f) => f.name),
+        textOk: text.ok === true && text.preview === 'text' && text.text.includes('收纳夹里的文本'),
+        textTruncated: text.truncated === true,
+        imageOk: image.ok === true && image.preview === 'image' &&
+          typeof image.dataUrl === 'string' && image.dataUrl.startsWith('data:image/png;base64,'),
+        missingOk: missing.ok === false && typeof missing.reason === 'string' && missing.reason.length > 0,
+        traversalOk: traversal.ok === false,
+        traversal2Ok: traversal2.ok === false,
+        deleted,
+        afterDelete: afterDelete.map((f) => f.name),
+        deleteMissingOk: deleteMissing.ok === false,
+      };
+    })()`);
+  } catch (error) {
+    filesProbe = null;
+  }
+  record(
+    '附件：扫收纳夹目录（新文件也在里面），能按名字读文本与图片',
+    filesProbe !== null &&
+      filesProbe.names.includes('note-preview.txt') &&
+      filesProbe.names.includes('note-preview.png') &&
+      filesProbe.kinds.includes('text') &&
+      filesProbe.kinds.includes('image') &&
+      filesProbe.textOk === true &&
+      filesProbe.textTruncated === false &&
+      filesProbe.imageOk === true,
+    JSON.stringify(filesProbe),
+  );
+  record(
+    '附件：能删（删掉就从列表里消失），也能拒绝目录外的名字与不存在的文件',
+    filesProbe !== null &&
+      filesProbe.deleted?.ok === true &&
+      filesProbe.afterDelete.includes('note-preview.txt') === false &&
+      filesProbe.afterDelete.includes('note-preview.png') === true &&
+      filesProbe.deleteMissingOk === true &&
+      filesProbe.missingOk === true &&
+      filesProbe.traversalOk === true &&
+      filesProbe.traversal2Ok === true,
+    JSON.stringify(filesProbe),
+  );
+  record(
+    '附件：没被任何消息引用的文件出现在「未归档」里（合并成邮件后不会消失）',
+    filesProbe !== null &&
+      filesProbe.orphanNames.includes('note-preview.txt') &&
+      filesProbe.orphanNames.includes('note-preview.png'),
+    JSON.stringify({ orphans: filesProbe?.orphanNames }),
+  );
+  try {
+    rmSync(noteFilesDir, { recursive: true, force: true });
+  } catch (error) {
+    // 清理失败不影响断言（下一个用例会自己收干净）
+  }
+
+  /*
+   * 记忆召回（纯函数）：她主动查记忆宫殿时，凭什么把某段经历捞出来。
+   *
+   * 这是 7.3（"模型调用工具 → 我们把记忆宫殿的内容传回去"）的检索内核：
+   * 相关的才给、不相关的**必须为空**（否则她会拿一段无关经历硬答）。
+   */
+  const recallModel = await run(`(() => {
+    const model = window.petDebug.perception;
+    const nodes = [
+      { id: 'a', kind: 'project', title: '一起熬夜赶论文', detail: '你说要在周五前交初稿', at: '2026-09-20T10:00:00.000Z', source: 'auto', evidence: [] },
+      { id: 'b', kind: 'trip', title: '出门旅行一周', detail: '你去了外地，我每天等你回来', at: '2026-09-10T10:00:00.000Z', source: 'auto', evidence: [] },
+    ];
+    const hit = model.selectPalaceMatches(nodes, '上次说的论文怎么样了');
+    const miss = model.selectPalaceMatches(nodes, '今天天气不错呀');
+    const empty = model.selectPalaceMatches(nodes, '');
+    return {
+      tokens: model.recallTokens('上次说的论文怎么样了'),
+      hitTitles: hit.map((item) => item.node.title),
+      hitText: model.formatPalaceRecall(hit),
+      missCount: miss.length,
+      emptyCount: empty.length,
+      missText: model.formatPalaceRecall(miss),
+    };
+  })()`);
+  record(
+    '记忆召回：相关才命中、不相关为空（她不会拿无关经历硬答）',
+    recallModel.hitTitles.length === 1 &&
+      recallModel.hitTitles[0] === '一起熬夜赶论文' &&
+      recallModel.hitText.includes('熬夜赶论文') &&
+      recallModel.hitText.includes('2026-09-20') &&
+      recallModel.missCount === 0 &&
+      recallModel.emptyCount === 0 &&
+      recallModel.missText.includes('没有与这件事相关'),
+    JSON.stringify(recallModel),
+  );
+
+  /*
+   * 7.3 端到端：**模型调用工具 → 我们回传记忆宫殿内容 → 模型据此回答**。
+   *
+   * 这里起一个本地假网关（`node:http`，跑在验收自己这个主进程里）：
+   *   第 1 次请求：断言请求体里带了 `tools`（含 recall_memory），回一个 tool_call；
+   *   第 2 次请求：断言请求体里出现了 `role: 'tool'` 的结果、且内容里有记忆宫殿的文本，
+   *                再回最终答复。
+   * 于是"工具调用 → 回传 → 作答"这条链是真的被走通的，而不是只测了几个纯函数。
+   */
+  const http = require('node:http');
+  const stubRequests = [];
+  const stubServer = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      let parsed = {};
+      try { parsed = JSON.parse(body); } catch (error) { parsed = {}; }
+      stubRequests.push(parsed);
+      const isFirst = stubRequests.length === 1;
+      const reply = isFirst
+        ? {
+            id: 'stub-1',
+            model: 'stub-model',
+            choices: [{
+              index: 0,
+              finish_reason: 'tool_calls',
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: [{
+                  id: 'call-1',
+                  type: 'function',
+                  function: { name: 'recall_memory', arguments: JSON.stringify({ query: '论文' }) },
+                }],
+              },
+            }],
+            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+          }
+        : {
+            id: 'stub-2',
+            model: 'stub-model',
+            choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: '我记得你说要赶论文，写完了吗？' } }],
+            usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
+          };
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(reply));
+    });
+  });
+  await new Promise((resolve) => stubServer.listen(0, '127.0.0.1', resolve));
+  const stubPort = stubServer.address().port;
+
+  const toolCallRun = await run(`(async () => {
+    const ai = window.petAPI.ai;
+    await window.petAPI.growth.addNode({
+      kind: 'project', title: '一起熬夜赶论文', detail: '你说要在周五前交初稿',
+    });
+    const before = await ai.status();
+    await ai.setSettings({
+      enabled: true, chat: true, memory: true,
+      provider: { kind: 'openai', baseUrl: 'http://127.0.0.1:${stubPort}/v1', model: 'stub-model', apiKey: 'sk-acceptance-tool-0001', timeoutMs: 8000 },
+    });
+    const reply = await ai.chat('我们上次说的论文怎么样了');
+    const after = await ai.status();
+    const memory = await ai.memory();
+    await ai.setSettings({
+      provider: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', timeoutMs: 20000 },
+      clearApiKey: true,
+    });
+    return {
+      reply,
+      tokensUsed: after.tokensUsed - before.tokensUsed,
+      toolEvents: memory.todayEvents.filter((e) => e.text.includes('记忆宫殿')).map((e) => e.text).slice(0, 3),
+    };
+  })()`);
+  await new Promise((resolve) => stubServer.close(resolve));
+
+  const firstRequestBody = stubRequests[0] ?? {};
+  const toolNames = Array.isArray(firstRequestBody.tools)
+    ? firstRequestBody.tools.map((tool) => tool?.function?.name ?? tool?.name ?? '')
+    : [];
+  const secondMessages = Array.isArray(stubRequests[1]?.messages) ? stubRequests[1].messages : [];
+  const toolMessage = secondMessages.find((message) => message?.role === 'tool') ?? null;
+  record(
+    '7.3 工具调用：模型请求查记忆 -> 本地回传记忆宫殿内容 -> 模型据此作答',
+    stubRequests.length === 2 &&
+      toolNames.includes('recall_memory') &&
+      Array.isArray(firstRequestBody.tools) &&
+      firstRequestBody.tools[0]?.function?.parameters?.properties?.query !== undefined &&
+      toolMessage !== null &&
+      String(toolMessage.content ?? '').includes('熬夜赶论文') &&
+      toolCallRun.reply?.reply === '我记得你说要赶论文，写完了吗？' &&
+      toolCallRun.reply?.mode === 'llm' &&
+      // 两轮请求的 usage 都会计入预算（15 + 28 = 43；不写死等号，留出并发心跳的余量）
+      toolCallRun.tokensUsed >= 43 &&
+      toolCallRun.tokensUsed <= 80 &&
+      toolCallRun.toolEvents.length >= 1,
+    JSON.stringify({
+      requests: stubRequests.length,
+      toolNames,
+      toolContent: String(toolMessage?.content ?? '').slice(0, 120),
+      reply: toolCallRun.reply,
+      tokensUsed: toolCallRun.tokensUsed,
+      toolEvents: toolCallRun.toolEvents,
+    }),
+  );
+
+  /*
+   * 空内容重试 + 关推理（这一轮修的 bug，用户视角是"时间线断断续续"）。
+   *
+   * 现场证据（用户真机 2026-09-27）：`api.deepseek.com` + `deepseek-flash` 是**推理模型**，
+   * 每次请求先写几百字 reasoning，而视觉那条只给了 `max_tokens: 360` ——
+   * 于是正文被截断（finish_reason=length）或整段为空，那一次采样**什么都没记下来**，
+   * 时间线就出现空洞（实测约 1/3 的采样）。
+   *
+   * 这条用一个假网关把两种机制都钉住：
+   *   1. 请求体里必须带 `reasoning_effort: 'none'`（关推理才有正文预算）；
+   *   2. 第一次返回空内容（finish_reason=length）时，客户端会自动**加大 max_tokens 重试一次**，
+   *      第二次成功即得到回复 —— 而不是直接降级成本地兜底。
+   */
+  const retryRequests = [];
+  const retryServer = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      let parsed = {};
+      try { parsed = JSON.parse(body); } catch (error) { parsed = {}; }
+      retryRequests.push(parsed);
+      const first = retryRequests.length === 1;
+      const reply = first
+        ? {
+            id: 'retry-1',
+            model: 'stub-model',
+            choices: [{ index: 0, finish_reason: 'length', message: { role: 'assistant', content: '' } }],
+            usage: {
+              prompt_tokens: 100, completion_tokens: 40, total_tokens: 140,
+              completion_tokens_details: { reasoning_tokens: 40 },
+            },
+          }
+        : {
+            id: 'retry-2',
+            model: 'stub-model',
+            choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: '我在的，主人。' } }],
+            usage: { prompt_tokens: 100, completion_tokens: 8, total_tokens: 108 },
+          };
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(reply));
+    });
+  });
+  await new Promise((resolve) => retryServer.listen(0, '127.0.0.1', resolve));
+  const retryPort = retryServer.address().port;
+
+  const emptyRetryRun = await run(`(async () => {
+    const ai = window.petAPI.ai;
+    await ai.setSettings({
+      enabled: true, chat: true, memory: true,
+      provider: { kind: 'openai', baseUrl: 'http://127.0.0.1:${retryPort}/v1', model: 'stub-model', apiKey: 'sk-acceptance-retry-0002', timeoutMs: 8000 },
+    });
+    const reply = await ai.chat('你在吗');
+    await ai.setSettings({
+      provider: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', timeoutMs: 20000 },
+      clearApiKey: true,
+    });
+    return { reply };
+  })()`);
+  await new Promise((resolve) => retryServer.close(resolve));
+  const retryFirst = retryRequests[0] ?? {};
+  const retrySecond = retryRequests[1] ?? {};
+  record(
+    '模型返回空内容时自动加大 max_tokens 重试一次（并且请求里关掉了推理）',
+    retryRequests.length >= 2 &&
+      retryFirst.reasoning_effort === 'none' &&
+      retrySecond.reasoning_effort === 'none' &&
+      typeof retryFirst.max_tokens === 'number' &&
+      typeof retrySecond.max_tokens === 'number' &&
+      retrySecond.max_tokens > retryFirst.max_tokens &&
+      emptyRetryRun.reply?.reply === '我在的，主人。' &&
+      emptyRetryRun.reply?.mode === 'llm',
+    JSON.stringify({
+      requests: retryRequests.length,
+      first: { maxTokens: retryFirst.max_tokens, effort: retryFirst.reasoning_effort },
+      second: { maxTokens: retrySecond.max_tokens, effort: retrySecond.reasoning_effort },
+      reply: emptyRetryRun.reply,
+    }),
+  );
+
+
+  /*
+   * 7.2 记忆保留期：明细流水超期要真的被清掉（长期事实与宫殿不动）。
+   */
+  const retentionRun = await run(`(async () => {
+    const status = await window.petAPI.ai.status();
+    return { keepMemoryDays: status.settings.keepMemoryDays, dataDir: status.dataDir };
+  })()`);
+  const memoryDir = join(aiDataDir, 'memory');
+  try {
+    writeFileSync(join(memoryDir, 'events-2020-01-01.jsonl'), '{"at":"2020-01-01T00:00:00.000Z","kind":"chat","text":"很久以前"}\n', 'utf8');
+    writeFileSync(join(memoryDir, 'chat-2020-01-01.jsonl'), '{"at":"2020-01-01T00:00:00.000Z","role":"user","text":"很久以前"}\n', 'utf8');
+    appendFileSync(join(memoryDir, 'memory-log.md'), '\n## 2020-01-01\n- 01-01 00:00 · 很久以前的事\n', 'utf8');
+  } catch (error) {
+    /* 目录不存在也无所谓：下面断言会说明问题 */
+  }
+  const pruned = await run(`window.petAPI.ai.pruneMemory()`);
+  let memoryRetentionFiles = { oldEvents: true, oldChat: true, oldLogSection: true };
+  try {
+    memoryRetentionFiles = {
+      oldEvents: existsSync(join(memoryDir, 'events-2020-01-01.jsonl')),
+      oldChat: existsSync(join(memoryDir, 'chat-2020-01-01.jsonl')),
+      oldLogSection: readFileSync(join(memoryDir, 'memory-log.md'), 'utf8').includes('2020-01-01'),
+    };
+  } catch (error) {
+    memoryRetentionFiles = { oldEvents: true, oldChat: true, oldLogSection: true };
+  }
+  record(
+    '7.2 记忆保留期：超期的 events/chat 流水与日志小节被清掉，今天的保留',
+    retentionRun.keepMemoryDays > 0 &&
+      pruned.days >= 1 &&
+      memoryRetentionFiles.oldEvents === false &&
+      memoryRetentionFiles.oldChat === false &&
+      memoryRetentionFiles.oldLogSection === false &&
+      existsSync(join(memoryDir, 'profile.json')) === true,
+    JSON.stringify({ keepMemoryDays: retentionRun.keepMemoryDays, pruned, files: memoryRetentionFiles }),
+  );
+
+  /*
+   * 7.2b `keepMemoryDays = 0` = 永久保留：什么都不该删。
+   */
+  const permanentRun = await run(`(async () => {
+    const ai = window.petAPI.ai;
+    await ai.setSettings({ keepMemoryDays: 0 });
+    const status = await ai.status();
+    return { keepMemoryDays: status.settings.keepMemoryDays };
+  })()`);
+  try {
+    writeFileSync(join(memoryDir, 'events-2021-02-02.jsonl'), '{"at":"2021-02-02T00:00:00.000Z","kind":"chat","text":"永久保留测试"}\n', 'utf8');
+  } catch (error) { /* 忽略 */ }
+  const prunedPermanent = await run(`window.petAPI.ai.pruneMemory()`);
+  let permanentKept = false;
+  try {
+    permanentKept = existsSync(join(memoryDir, 'events-2021-02-02.jsonl'));
+  } catch (error) {
+    permanentKept = false;
+  }
+  await run(`window.petAPI.ai.setSettings({ keepMemoryDays: 180 })`);
+  record(
+    '7.2b 记忆保留期：设为 0 = 永久保留（不删任何流水）',
+    permanentRun.keepMemoryDays === 0 && prunedPermanent.days === 0 && permanentKept === true,
+    JSON.stringify({ keepMemoryDays: permanentRun.keepMemoryDays, pruned: prunedPermanent, kept: permanentKept }),
+  );
+
+  record(
+    '数据目录：验收经 DESKTOP_PET_AI_DATA_DIR 隔离（不与用户真实记忆混用）',
+    retentionRun.dataDir === aiDataDir && aiDataDir.includes('desktop-pet-acceptance-ai') === true,
+    `dataDir=${retentionRun.dataDir} expected=${aiDataDir}`,
+  );
+
   /* 聊天窗口：能打开、并且是独立的普通窗口（只暴露 chatAPI） */
+
   const chatWindowOpened = await run(`window.petAPI.ai.openChatWindow()`);
   await wait(1200);
   const chatWins = BrowserWindow.getAllWindows().filter((w) => {
@@ -3643,7 +5529,766 @@ app.whenReady().then(async () => {
       chatBridge.hasChatAPI === true && chatBridge.hasPetAPI === false && chatBridge.hasNode === false,
       JSON.stringify(chatBridge),
     );
+
+    /*
+     * 交互收件箱 UI：页签能**真的来回切**、只读（没有输入框）、消息能渲染、
+     * 附件挂在消息下面、看完之后"新"徽标消失。
+     *
+     * ⚠️ 断言一律看**计算样式与真实高度**，不看 `element.hidden`：
+     * 作者样式里的 `display: flex` 会覆盖 UA 的 `[hidden] { display: none }`，
+     * 于是"两个视图同时显示、页签点了没反应"，而 `hidden === true` 依旧成立
+     * （实测踩过：收件箱和聊天叠在一起）。见 tools/probe-note-views.cjs。
+     *
+     * 2026-09 需求："把交互式纸条和文件合并，做成类似邮件的内容" ——
+     * 所以**没有「文件」页签了**：一条消息 = 发件人 + 主题 + 正文 + 附件，
+     * 没被引用的文件归成一封「未归档的文件」。
+     */
+    /*
+     * 先直接往收纳夹里放一个**没有被任何消息引用**的文件：
+     * 合并成邮件之后它必须出现在「未归档的文件」那封虚拟消息里，而不是消失。
+     * （不点「收纳文件…」是因为那会弹原生选择框，自动化点不到。）
+     */
+    const uiOrphanDir = join(aiDataDir, 'notes', 'files');
+    mkdirSync(uiOrphanDir, { recursive: true });
+    writeFileSync(join(uiOrphanDir, 'ui-orphan.txt'), '这个文件没有挂到任何消息上\n', 'utf8');
+
+    const notesUi = await chatWins[0].webContents.executeJavaScript(`(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const shown = (id) => {
+        const el = document.getElementById(id);
+        if (!el) return false;
+        const style = getComputedStyle(el);
+        return style.display !== 'none' && el.getBoundingClientRect().height > 0;
+      };
+      const badgeShown = () => {
+        const el = document.getElementById('notes-badge');
+        return getComputedStyle(el).display !== 'none';
+      };
+      const countMessages = () => document.querySelectorAll('#notes-list .note-message').length;
+      await window.chatAPI.clearNotes();
+      document.getElementById('note-compose').click();     // 她记一条（带发件人）
+      await wait(600);
+
+      document.getElementById('tab-notes').click();
+      await wait(400);
+      document.getElementById('notes-refresh').click();
+      await wait(500);
+      const onNotes = {
+        chat: shown('view-chat'),
+        notes: shown('view-notes'),
+        diary: shown('view-diary'),
+        badge: badgeShown(),
+        tabs: [...document.querySelectorAll('#tabs .tab')].map((t) => t.textContent.trim()),
+        cards: countMessages(),
+        // 每条**消息**都带发件人（邮件模型里最重要的一列）；「未归档」那封虚拟邮件也有自己的发件人
+        fromCount: document.querySelectorAll('#notes-list .note-message .note-from').length,
+        hasTitle: (document.querySelector('.note-title')?.textContent ?? '').length > 0,
+        hasDelete: document.querySelectorAll('.note-delete').length >= 1,
+        hasImport: !!document.getElementById('file-import'),
+        hasRefresh: !!document.getElementById('notes-refresh'),
+        hasInput: document.getElementById('note-input') !== null,
+        hasWriteButton: document.getElementById('note-write') !== null,
+        // 「未归档的文件」：磁盘上有、但没有归属的文件
+        orphanCard: !!document.getElementById('note-orphans'),
+        orphanFiles: [...document.querySelectorAll('#note-orphans .note-file-name')].map((n) => n.textContent),
+        // 未归档的文件也带「删除」按钮（单独删附件）
+        orphanDeletes: document.querySelectorAll('#note-orphans .note-file-delete').length,
+        // 「文件」视图必须**已经不存在**（合并进这一页了）
+        legacyFilesView: !!document.getElementById('view-files'),
+        legacyFilesTab: !!document.getElementById('tab-files'),
+      };
+
+      document.getElementById('tab-chat').click();
+      await wait(300);
+      const onChat = { chat: shown('view-chat'), notes: shown('view-notes'), diary: shown('view-diary') };
+
+      document.getElementById('tab-diary').click();
+      await wait(300);
+      const onDiary = { chat: shown('view-chat'), notes: shown('view-notes'), diary: shown('view-diary') };
+
+      document.getElementById('tab-notes').click();
+      await wait(300);
+      const backAgain = { chat: shown('view-chat'), notes: shown('view-notes'), diary: shown('view-diary') };
+
+      // 预览浮层默认不显示（它也用 display:flex，同样要防"一直挡在屏幕上"）
+      const previewHidden = getComputedStyle(document.getElementById('preview')).display === 'none';
+      const preview = await window.chatAPI.previewNoteFile('no-such-file.txt');
+
+      // 消息上的「删除」：真点一次（confirm 是原生模态点不到，先换成"永远同意"）
+      const beforeDeleteCards = countMessages();
+      window.confirm = () => true;
+      const deleteButton = document.querySelector('.note-delete');
+      if (deleteButton) deleteButton.click();
+      await wait(900);
+      const afterDeleteCards = countMessages();
+
+      await window.chatAPI.clearNotes();
+      await wait(200);
+      return {
+        onNotes,
+        onChat,
+        onDiary,
+        backAgain,
+        previewHidden,
+        previewFailsGracefully: preview.ok === false && typeof preview.reason === 'string',
+        deleteViaUi: { before: beforeDeleteCards, after: afterDeleteCards },
+        afterClearCards: countMessages(),
+        orphanCardAfterClear: !!document.getElementById('note-orphans'),
+      };
+    })()`, true);
+    record(
+      '交互 UI：三个视图互斥且能来回切（看计算样式，不看 hidden 属性）',
+      notesUi.onNotes.chat === false &&
+        notesUi.onNotes.notes === true &&
+        notesUi.onNotes.diary === false &&
+        notesUi.onChat.chat === true &&
+        notesUi.onChat.notes === false &&
+        notesUi.onDiary.diary === true &&
+        notesUi.onDiary.notes === false &&
+        notesUi.backAgain.notes === true &&
+        notesUi.backAgain.chat === false,
+      JSON.stringify({
+        onNotes: notesUi.onNotes && { chat: notesUi.onNotes.chat, notes: notesUi.onNotes.notes },
+        onChat: notesUi.onChat,
+        onDiary: notesUi.onDiary,
+        backAgain: notesUi.backAgain,
+      }),
+    );
+    record(
+      '交互 UI：消息带发件人、只读（无输入框/无写按钮）、看完徽标消失、有删除按钮',
+      notesUi.onNotes.hasInput === false &&
+        notesUi.onNotes.hasWriteButton === false &&
+        notesUi.onNotes.cards >= 1 &&
+        notesUi.onNotes.fromCount === notesUi.onNotes.cards &&
+        notesUi.onNotes.hasTitle === true &&
+        notesUi.onNotes.hasDelete === true &&
+        notesUi.onNotes.badge === false &&
+        notesUi.afterClearCards === 0,
+      JSON.stringify(notesUi.onNotes),
+    );
+    record(
+      '交互 UI：纸条与文件已合并（前三个页签是聊天/交互/日记，后面才是插件页签）',
+      notesUi.onNotes.legacyFilesView === false &&
+        notesUi.onNotes.legacyFilesTab === false &&
+        notesUi.onNotes.tabs.length >= 3 &&
+        // 页签文字里带未读徽标（"交互" 后面可能跟着数字），所以按前缀比而不是全等
+        notesUi.onNotes.tabs[0] === '聊天' &&
+        String(notesUi.onNotes.tabs[1]).startsWith('交互') &&
+        notesUi.onNotes.tabs[2] === '日记' &&
+        // 随包的待办插件在后面挂了自己的页签（插件面板就是"多一个页签"）
+        notesUi.onNotes.tabs.some((label) => String(label).includes('待办')) &&
+        // 「收纳文件…」与「刷新」并进了收件箱工具栏
+        notesUi.onNotes.hasImport === true &&
+        notesUi.onNotes.hasRefresh === true,
+      JSON.stringify({ tabs: notesUi.onNotes.tabs, import: notesUi.onNotes.hasImport, refresh: notesUi.onNotes.hasRefresh }),
+    );
+    record(
+      '交互 UI：没被引用的文件归成「未归档的文件」（带查看/打开/删除，不会被藏起来）',
+      notesUi.onNotes.orphanCard === true &&
+        notesUi.onNotes.orphanFiles.some((name) => String(name).includes('ui-orphan.txt')) &&
+        notesUi.onNotes.orphanDeletes >= 1,
+      JSON.stringify({
+        card: notesUi.onNotes.orphanCard,
+        files: notesUi.onNotes.orphanFiles,
+        deletes: notesUi.onNotes.orphanDeletes,
+      }),
+    );
+    record(
+      '交互 UI：预览浮层平时不显示、读不到时报错而不是崩',
+      notesUi.previewHidden === true && notesUi.previewFailsGracefully === true,
+      JSON.stringify({ previewHidden: notesUi.previewHidden, fails: notesUi.previewFailsGracefully }),
+    );
+    record(
+      '交互 UI：点「删除」能真的删掉那条消息（真点按钮，不只是调 IPC）',
+      notesUi.deleteViaUi.before >= 1 && notesUi.deleteViaUi.after === notesUi.deleteViaUi.before - 1,
+      JSON.stringify(notesUi.deleteViaUi),
+    );
+
+    /*
+     * 插件面板：插件注册 -> 聊天窗口长出页签 -> 用户点按钮 -> 动作回到插件 -> 面板刷新。
+     *
+     * 这是 TODO / 课程表 / 番茄钟这类插件唯一的界面通道，所以要把整条链路钉死：
+     * 生成 HTML 的插件跑在**桌宠窗口**，渲染却在**聊天窗口**，中间还得过一道净化。
+     */
+    const panelPlugin = await run(`(async () => {
+      const host = window.petDebug.plugins;
+      const html = (text, echo) =>
+        '<table class="probe-table"><tr><th>时间</th><th>课程</th></tr>' +
+        '<tr><td>8:00</td><td>' + (echo ? '已收到:' + echo : '高等数学') + '</td></tr></table>' +
+        '<input data-plugin-field="text" value="' + (text || '') + '" />' +
+        '<button data-plugin-action="add">加一条</button>' +
+        '<a href="javascript:alert(1)">坏链接</a>' +
+        '<img src="https://example.com/x.png" />' +
+        '<script>window.__panelHacked = true<\\/script>' +
+        '<div onclick="window.__panelHacked = true">内联事件</div>';
+      await host.activate(
+        {
+          id: 'panel-probe',
+          name: '课程表',
+          version: '1.0.0',
+          activate(context) {
+            context.ui.registerPanel({
+              id: 'probe',
+              title: '课程表',
+              html: html('', ''),
+              onAction(action) {
+                return html(action.fields.text, action.fields.text);
+              },
+            });
+          },
+        },
+        { id: 'panel-probe', name: '课程表', version: '1.0.0', dir: 'plugins/examples/panel-probe', enabled: true, status: 'loaded', permissions: ['ui'] }
+      );
+      await new Promise((r) => setTimeout(r, 600));
+      return { status: host.getLoadedPlugins().find((r) => r.id === 'panel-probe')?.status };
+    })()`);
+    record('插件面板：注册面板后插件仍处于 active', panelPlugin.status === 'active', JSON.stringify(panelPlugin));
+
+    const panelUi = await chatWins[0].webContents.executeJavaScript(`(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      await wait(700);
+      const tabs = [...document.querySelectorAll('#tabs .tab')].map((t) => t.textContent.trim());
+      const pluginTab = [...document.querySelectorAll('#tabs .tab')].find((t) => /课程表/.test(t.textContent));
+      if (!pluginTab) return { tabs, found: false };
+      pluginTab.click();
+      await wait(300);
+      const body = document.getElementById('plugin-panel-body');
+      const view = document.getElementById('view-plugin');
+      const style = getComputedStyle(view);
+      const height = view.getBoundingClientRect().height;
+      const shown = style.display !== 'none' && height > 0;
+      const initial = {
+        shown,
+        chatHidden: getComputedStyle(document.getElementById('view-chat')).display === 'none',
+        hasTable: body.querySelectorAll('table').length === 1,
+        hasAction: body.querySelectorAll('[data-plugin-action="add"]').length === 1,
+        hasField: body.querySelectorAll('[data-plugin-field="text"]').length === 1,
+        scriptStripped: body.querySelectorAll('script').length === 0,
+        inlineHandlerStripped: body.querySelector('[onclick]') === null,
+        jsHrefStripped: body.querySelector('a[href^="javascript:"]') === null,
+        remoteImgStripped: body.querySelector('img[src^="https://"]') === null,
+        hacked: window.__panelHacked === true,
+        text: body.textContent,
+      };
+      const field = body.querySelector('[data-plugin-field="text"]');
+      field.value = 'hello';
+      body.querySelector('[data-plugin-action="add"]').click();
+      await wait(600);
+      const afterClick = {
+        text: document.getElementById('plugin-panel-body').textContent,
+        stillShown: getComputedStyle(document.getElementById('view-plugin')).display !== 'none',
+      };
+      return { tabs, found: true, initial, afterClick };
+    })()`, true);
+    record(
+      '插件面板：注册后聊天窗口长出页签，点开是独立视图',
+      panelUi.found === true &&
+        panelUi.initial.shown === true &&
+        panelUi.initial.chatHidden === true &&
+        panelUi.initial.hasTable === true,
+      JSON.stringify({ tabs: panelUi.tabs, initial: panelUi.initial && { shown: panelUi.initial.shown, hasTable: panelUi.initial.hasTable } }),
+    );
+    record(
+      '插件面板：HTML 被净化（script / on* / javascript: / 远程图片全被剔除，且确实没执行）',
+      panelUi.found === true &&
+        panelUi.initial.scriptStripped === true &&
+        panelUi.initial.inlineHandlerStripped === true &&
+        panelUi.initial.jsHrefStripped === true &&
+        panelUi.initial.remoteImgStripped === true &&
+        panelUi.initial.hacked === false,
+      JSON.stringify(panelUi.initial && {
+        scriptStripped: panelUi.initial.scriptStripped,
+        inlineHandlerStripped: panelUi.initial.inlineHandlerStripped,
+        jsHrefStripped: panelUi.initial.jsHrefStripped,
+        remoteImgStripped: panelUi.initial.remoteImgStripped,
+        hacked: panelUi.initial.hacked,
+      }),
+    );
+    record(
+      '插件面板：点按钮把字段值回传插件，插件返回新 HTML 即刷新',
+      panelUi.found === true &&
+        panelUi.initial.hasAction === true &&
+        panelUi.initial.hasField === true &&
+        /已收到:hello/.test(String(panelUi.afterClick && panelUi.afterClick.text)),
+      JSON.stringify(panelUi.afterClick),
+    );
+
+    // 停用插件：它的面板页签必须跟着消失（否则"关掉插件"就只关了一半）
+    const panelGone = await run(`(async () => {
+      await window.petDebug.plugins.disablePlugin('panel-probe');
+      await new Promise((r) => setTimeout(r, 600));
+      return window.petDebug.plugins.getLoadedPlugins().find((r) => r.id === 'panel-probe')?.status || 'removed';
+    })()`);
+    const panelTabsAfter = await chatWins[0].webContents.executeJavaScript(`(async () => {
+      await new Promise((r) => setTimeout(r, 400));
+      return {
+        tabs: [...document.querySelectorAll('#tabs .tab')].map((t) => t.textContent.trim()),
+        pluginHidden: getComputedStyle(document.getElementById('view-plugin')).display === 'none',
+        bodyEmpty: document.getElementById('plugin-panel-body').textContent.trim() === '',
+      };
+    })()`, true);
+    record(
+      '插件面板：停用插件后页签消失、退回聊天视图',
+      panelGone === 'inactive' &&
+        panelTabsAfter.tabs.every((t) => !/课程表/.test(t)) &&
+        panelTabsAfter.pluginHidden === true,
+      JSON.stringify({ status: panelGone, ...panelTabsAfter }),
+    );
+
+    /*
+     * 随包的待办插件（`plugins/todo-plugin`）—— 第一个真插件，整条链路真点界面：
+     * 输入时间与事件 -> 到点提醒（气泡 + 动画）-> 打勾 / 恢复 -> 删除。
+     *
+     * ⚠️ 它的清单存在**渲染层 localStorage** 里（插件的 `context.storage`），
+     * 而 localStorage 跟着 Chromium 的 userData 走，不像 AI 数据那样被
+     * `DESKTOP_PET_AI_DATA_DIR` 隔离 —— 所以这里先抄一份原值，跑完写回去，
+     * 绝不把用户真实的待办清单改掉。
+     */
+    const todoStorageKeys = await run(`(() => {
+      const prefix = 'desktop-pet:plugin:todo-plugin:';
+      const saved = {};
+      for (let index = 0; index < window.localStorage.length; index += 1) {
+        const key = window.localStorage.key(index);
+        if (key && key.startsWith(prefix)) saved[key] = window.localStorage.getItem(key);
+      }
+      return saved;
+    })()`);
+
+    // 先清空待办，让断言从一个确定的状态开始
+    const todoPanel = await chatWins[0].webContents.executeJavaScript(`(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const tab = [...document.querySelectorAll('#tabs .tab')].find((t) => /待办/.test(t.textContent));
+      if (!tab) return { found: false, tabs: [...document.querySelectorAll('#tabs .tab')].map((t) => t.textContent.trim()) };
+      tab.click();
+      await wait(400);
+      const body = () => document.getElementById('plugin-panel-body');
+      return {
+        found: true,
+        shown: getComputedStyle(document.getElementById('view-plugin')).display !== 'none',
+        title: document.getElementById('plugin-panel-title').textContent,
+        from: document.getElementById('plugin-panel-from').textContent,
+        hasText: !!body().querySelector('[data-plugin-field="text"]'),
+        hasDue: !!body().querySelector('[data-plugin-field="due"]'),
+        dueType: body().querySelector('[data-plugin-field="due"]')?.type ?? null,
+        hasAdd: !!body().querySelector('[data-plugin-action="add"]'),
+        hasQuick15: !!body().querySelector('[data-plugin-action="addIn"][data-plugin-value="15"]'),
+        hasNoTime: !!body().querySelector('[data-plugin-action="addNoTime"]'),
+        hasExport: !!body().querySelector('[data-plugin-action="export"]'),
+      };
+    })()`, true);
+    record(
+      '待办插件：面板是「待办清单」，有"事件 + 时间"两个输入框与添加/快捷按钮',
+      todoPanel.found === true &&
+        todoPanel.shown === true &&
+        String(todoPanel.title).includes('待办') &&
+        String(todoPanel.from).includes('待办清单') &&
+        todoPanel.hasText === true &&
+        todoPanel.hasDue === true &&
+        todoPanel.dueType === 'datetime-local' &&
+        todoPanel.hasAdd === true &&
+        todoPanel.hasQuick15 === true &&
+        todoPanel.hasNoTime === true &&
+        todoPanel.hasExport === true,
+      JSON.stringify(todoPanel),
+    );
+
+    // 输入「明天 09:00 写周报」-> 添加 -> 打勾 -> 恢复 -> 删除（全部真点 DOM）
+    const todoFlow = await chatWins[0].webContents.executeJavaScript(`(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const body = () => document.getElementById('plugin-panel-body');
+      const rows = () => [...body().querySelectorAll('tbody tr')];
+      const click = (selector) => {
+        const target = body().querySelector(selector);
+        if (!target) return false;
+        target.click();
+        return true;
+      };
+      // 清掉可能存在的旧条目（用户真实数据已经在验收前抄走了）
+      click('[data-plugin-action="clearDone"]');
+      await wait(400);
+
+      // 1) 输入时间与事件
+      const text = body().querySelector('[data-plugin-field="text"]');
+      const due = body().querySelector('[data-plugin-field="due"]');
+      text.value = '写周报';
+      due.value = '2030-01-02T09:30';
+      click('[data-plugin-action="add"]');
+      await wait(600);
+      const afterAdd = {
+        rows: rows().length,
+        text: body().textContent,
+        dueShown: rows()[0]?.querySelectorAll('td')[2]?.textContent ?? '',
+        actions: rows()[0]?.querySelectorAll('button').length ?? 0,
+      };
+
+      // 2) 打勾（完成）——真点那一行的「完成」
+      click('[data-plugin-action="toggle"]');
+      await wait(500);
+      const afterDone = {
+        // 只看**那一行**：整面板里永远有「清除已完成」这个按钮，拿整段文本判断会假绿
+        rowText: rows()[0]?.textContent ?? '',
+        mark: rows()[0]?.querySelectorAll('td')[0]?.textContent ?? '',
+        buttonLabels: [...(rows()[0]?.querySelectorAll('button') ?? [])].map((b) => b.textContent),
+      };
+
+      // 3) 恢复
+      click('[data-plugin-action="toggle"]');
+      await wait(500);
+      const afterRestore = {
+        rowText: rows()[0]?.textContent ?? '',
+        mark: rows()[0]?.querySelectorAll('td')[0]?.textContent ?? '',
+        buttonLabels: [...(rows()[0]?.querySelectorAll('button') ?? [])].map((b) => b.textContent),
+      };
+
+      // 4) 删除 —— 真点那一行的「删除」
+      click('[data-plugin-action="remove"]');
+      await wait(500);
+      const afterRemove = { rows: rows().length, text: body().textContent };
+
+      return { afterAdd, afterDone, afterRestore, afterRemove };
+    })()`, true);
+    record(
+      '待办插件：写「写周报」+ 选时间 -> 添加（列表出现这一行，带时间与三个按钮）',
+      todoFlow.afterAdd.rows === 1 &&
+        todoFlow.afterAdd.text.includes('写周报') &&
+        /2030-01-02|1 月 2 日|09:30/.test(String(todoFlow.afterAdd.dueShown)) &&
+        todoFlow.afterAdd.actions >= 3,
+      JSON.stringify(todoFlow.afterAdd && { rows: todoFlow.afterAdd.rows, due: todoFlow.afterAdd.dueShown, actions: todoFlow.afterAdd.actions }),
+    );
+    record(
+      '待办插件：点「完成」打勾（✅ + 已完成），点「恢复」又变回未完成',
+      todoFlow.afterDone.rowText.includes('已完成') &&
+        todoFlow.afterDone.mark.includes('✅') &&
+        todoFlow.afterDone.buttonLabels.includes('恢复') &&
+        !todoFlow.afterRestore.rowText.includes('已完成') &&
+        todoFlow.afterRestore.mark.includes('☐') &&
+        todoFlow.afterRestore.buttonLabels.includes('完成'),
+      JSON.stringify({ done: todoFlow.afterDone, restored: todoFlow.afterRestore }),
+    );
+    record(
+      '待办插件：点「删除」那一条就没了',
+      todoFlow.afterRemove.rows === 0 && todoFlow.afterRemove.text.includes('还没有待办'),
+      JSON.stringify({ rows: todoFlow.afterRemove.rows }),
+    );
+
+    /*
+     * 到点提醒：真等一次。
+     *
+     * 面板的时间输入是分钟粒度（`datetime-local` 本身如此），等不到"几秒后"，
+     * 所以这里把「15 分钟后」那个按钮的 `data-plugin-value` 改成 `0.05`（= 3 秒）再点 ——
+     * 走的仍然是**同一条**代码路径（`addIn` -> `timers.after` -> 主进程计时 -> 到点回调）。
+     *
+     * ⚠️ 气泡要在**桌宠窗口**侧轮询着抓：她可能在这几秒里恰好主动搭一句话
+     * （闲聊会走同一颗气泡），等 4 秒再读一次很容易读到后来那句（实测踩过：
+     * 读到的是"刚刚想起你，就出来打个招呼～"）。所以每 400ms 采一帧，
+     * 只要有一帧带着待办文案就算数；动画同理（`remind` 只播一次）。
+     */
+    const todoReminder = await chatWins[0].webContents.executeJavaScript(`(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const body = () => document.getElementById('plugin-panel-body');
+      const text = body().querySelector('[data-plugin-field="text"]');
+      text.value = '开短会';
+      const quick = body().querySelector('[data-plugin-action="addIn"][data-plugin-value="15"]');
+      quick.setAttribute('data-plugin-value', '0.05');   // 3 秒后
+      quick.click();
+      await wait(1200);
+      return { added: body().textContent.includes('开短会') };
+    })()`, true);
+    let reminderBubble = '';
+    let reminderAnimation = null;
+    for (let attempt = 0; attempt < 22; attempt += 1) {
+      const sample = await run(`(() => {
+        const bubble = document.getElementById('pet-bubble');
+        return {
+          shown: !!bubble && getComputedStyle(bubble).display !== 'none' && bubble.getBoundingClientRect().height > 0,
+          text: document.getElementById('pet-bubble-body')?.textContent ?? '',
+          animation: window.petDebug.anim.getCurrentAnimation(),
+        };
+      })()`);
+      if (sample.shown === true && String(sample.text).includes('开短会')) reminderBubble = String(sample.text);
+      if (sample.animation === 'remind') reminderAnimation = 'remind';
+      if (reminderBubble !== '' && reminderAnimation !== null) break;
+      await wait(400);
+    }
+    const todoReminderPanel = await chatWins[0].webContents.executeJavaScript(
+      `document.getElementById('plugin-panel-body').textContent`,
+      true,
+    );
+    record(
+      '待办插件：到点真的提醒了（面板标记「已提醒」+ 桌宠冒泡说出那件事 + 演 remind 动作）',
+      todoReminder.added === true &&
+        String(todoReminderPanel).includes('已提醒') &&
+        reminderBubble.includes('开短会') &&
+        /到时间啦|早该开始/.test(reminderBubble) &&
+        reminderAnimation === 'remind',
+      JSON.stringify({ added: todoReminder.added, panelHasReminded: String(todoReminderPanel).includes('已提醒'), bubble: reminderBubble, animation: reminderAnimation }),
+    );
+
+    // 收尾：把这条测试待办删掉，并把用户原来的待办清单写回去
+    await chatWins[0].webContents.executeJavaScript(`(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const body = () => document.getElementById('plugin-panel-body');
+      for (const button of [...body().querySelectorAll('[data-plugin-action="remove"]')]) {
+        button.click();
+        await wait(300);
+      }
+      return true;
+    })()`, true);
+    const todoStorageRestored = await run(`(() => {
+      const saved = ${JSON.stringify(todoStorageKeys)};
+      const prefix = 'desktop-pet:plugin:todo-plugin:';
+      const current = [];
+      for (let index = 0; index < window.localStorage.length; index += 1) {
+        const key = window.localStorage.key(index);
+        if (key && key.startsWith(prefix)) current.push(key);
+      }
+      for (const key of current) window.localStorage.removeItem(key);
+      for (const [key, value] of Object.entries(saved)) {
+        if (typeof value === 'string') window.localStorage.setItem(key, value);
+      }
+      return { restoredKeys: Object.keys(saved).length, removed: current.length };
+    })()`);
+    record(
+      '待办插件：验收跑完把用户真实的待办清单原样写回（不污染 localStorage）',
+      typeof todoStorageRestored.restoredKeys === 'number' && typeof todoStorageRestored.removed === 'number',
+      JSON.stringify(todoStorageRestored),
+    );
+
+    /*
+     * 日记页（2026-09 需求：日记从托盘的 AI 子菜单搬进「交互」窗口）。
+     *
+     * 这一条必须**真点页签**再看计算样式：视图用的是 `display:flex`，
+     * `hidden` 属性会被作者样式盖掉（小纸条那两个视图就踩过同样的坑）。
+     * 同时验「看正文」能展开 —— 正文是按需向主进程要的，不走清单。
+     */
+    const diaryUi = await chatWins[0].webContents.executeJavaScript(`(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const shown = (id) => {
+        const el = document.getElementById(id);
+        const style = getComputedStyle(el);
+        return style.display !== 'none' && el.getBoundingClientRect().height > 0;
+      };
+      const tab = document.getElementById('tab-diary');
+      if (!tab) return { hasTab: false };
+      const tabText = tab.textContent.trim();
+      tab.click();
+      await wait(400);
+      const onDiary = {
+        diary: shown('view-diary'),
+        chat: shown('view-chat'),
+        notes: shown('view-notes'),
+      };
+      const items = document.querySelectorAll('#diary-list .diary-item');
+      const summary = document.getElementById('diary-summary').textContent;
+      const hasWrite = !!document.getElementById('diary-write');
+      const hasOpenDir = !!document.getElementById('diary-open-dir');
+      let bodyShown = false;
+      let bodyLength = 0;
+      if (items.length > 0) {
+        document.querySelector('#diary-list .diary-open').click();
+        await wait(600);
+        bodyShown = shown('diary-detail');
+        bodyLength = document.getElementById('diary-detail-body').textContent.length;
+      }
+      // 「交互」页签（原「小纸条」）改名后仍然在，且名字就是交互
+      const notesTabText = document.getElementById('tab-notes').textContent.trim();
+      document.getElementById('tab-chat').click();
+      await wait(300);
+      return {
+        hasTab: true,
+        tabText,
+        notesTabText,
+        onDiary,
+        items: items.length,
+        summary,
+        hasWrite,
+        hasOpenDir,
+        bodyShown,
+        bodyLength,
+        backToChat: shown('view-chat') && !shown('view-diary'),
+      };
+    })()`, true);
+    record(
+      '聊天窗口：页签是「交互 / 日记」（日记从菜单的 AI 子菜单搬进来了）',
+      diaryUi.hasTab === true && diaryUi.tabText === '日记' && diaryUi.notesTabText.startsWith('交互'),
+      JSON.stringify({ tab: diaryUi.tabText, notesTab: diaryUi.notesTabText }),
+    );
+    record(
+      '日记页：能切进去（看计算样式）、三个视图互斥、有「写今天的日记」与「打开日记目录」',
+      diaryUi.hasTab === true &&
+        diaryUi.onDiary.diary === true &&
+        diaryUi.onDiary.chat === false &&
+        diaryUi.onDiary.notes === false &&
+        diaryUi.hasWrite === true &&
+        diaryUi.hasOpenDir === true &&
+        diaryUi.backToChat === true,
+      JSON.stringify(diaryUi.onDiary),
+    );
+    record(
+      '日记页：清单渲染出已有的日记，点「看正文」能展开正文',
+      diaryUi.hasTab === true &&
+        diaryUi.items >= 1 &&
+        /共 \d+ 篇/.test(String(diaryUi.summary)) &&
+        diaryUi.bodyShown === true &&
+        diaryUi.bodyLength > 0,
+      JSON.stringify({ items: diaryUi.items, summary: diaryUi.summary, shown: diaryUi.bodyShown, len: diaryUi.bodyLength }),
+    );
   }
+
+  /*
+   * 托盘菜单与桌宠右键菜单**必须一致**（需求）。
+   *
+   * 做法：在主进程里临时接管 `Menu.buildFromTemplate`，把两份模板的
+   * "标签序列"都录下来再逐项比较 —— 只看标签（子菜单内容由同一个函数生成，
+   * 这里要钉的是"两个菜单的条目与顺序完全一样"）。
+   * 触发时机：托盘菜单随 `setAlwaysOnTop` 刷新；右键菜单直接让渲染层弹一次。
+   */
+  const { Menu } = require('electron');
+  const capturedTemplates = [];
+  const capturedMenus = [];
+  const originalBuildFromTemplate = Menu.buildFromTemplate;
+  Menu.buildFromTemplate = function patched(template) {
+    const menu = originalBuildFromTemplate.call(this, template);
+    capturedTemplates.push(template);
+    capturedMenus.push(menu);
+    return menu;
+  };
+  let menuParity = { tray: null, context: null, error: '' };
+  try {
+    /*
+     * 触发托盘菜单重建。托盘**不是**每次设置变化都重建，只在状态推送时重建
+     * （`refreshAISurfaces` -> `refreshTray`）；因此这里用一次互动触发的状态推送，
+     * 它一定会走到重建 —— 靠"改置顶"那种可能无变化的操作会偶发抓不到模板（实测）。
+     */
+    await run(`window.petAPI.ai.notifyInteraction('click')`);
+    await wait(500);
+    const trayTemplate = capturedTemplates.length > 0 ? capturedTemplates[capturedTemplates.length - 1] : null;
+    capturedTemplates.length = 0;
+    await run(`(() => { window.petAPI.menu.showContextMenu(); return true; })()`);
+    await wait(500);
+    const contextTemplate = capturedTemplates.length > 0 ? capturedTemplates[capturedTemplates.length - 1] : null;
+    const labels = (template) => (Array.isArray(template) ? template.map((item) => item?.label ?? `[${item?.type ?? '?'}]`) : null);
+    /*
+     * 「插件」子菜单：上半是插件自己注册的动作（按插件分组，是一层子菜单），
+     * 下半每个插件一个**可点的 checkbox**（"插件可随时关闭"的菜单入口）。
+     * 这里把 type / checked / 子菜单文字都记下来 —— 断言才有硬证据。
+     */
+    const pluginSubmenu = (template) => {
+      if (!Array.isArray(template)) return null;
+      const entry = template.find((item) => item?.label === '插件');
+      if (!entry || !Array.isArray(entry.submenu)) return null;
+      return entry.submenu.map((item) => ({
+        label: typeof item?.label === 'string' ? item.label : '',
+        type: item?.type ?? 'normal',
+        checked: item?.checked === true,
+        clickable: typeof item?.click === 'function',
+        submenu: Array.isArray(item?.submenu) ? labels(item.submenu) : null,
+      }));
+    };
+    menuParity = {
+      tray: labels(trayTemplate),
+      context: labels(contextTemplate),
+      plugins: pluginSubmenu(trayTemplate),
+      error: '',
+    };
+    // 把刚才为了取模板而弹出的那个菜单关掉，别让它一直开着（会让托盘菜单停止刷新）
+    await wait(200);
+    const lastMenu = capturedMenus.length > 0 ? capturedMenus[capturedMenus.length - 1] : null;
+    if (lastMenu && typeof lastMenu.closePopup === 'function') lastMenu.closePopup();
+    await wait(300);
+  } catch (error) {
+    menuParity = { tray: null, context: null, error: String(error) };
+  } finally {
+    Menu.buildFromTemplate = originalBuildFromTemplate;
+  }
+  const menuLabels = menuParity.tray ?? [];
+  /*
+   * 配置项一律不该出现在菜单里（2026-09 需求）：它们全都搬进了设置窗口。
+   * 用**精确匹配 / 前缀**而不是 includes，避免误伤状态行
+   * （例如"感知：coding · 在电脑前"是读数，`startsWith('感知')` 会把它当成子菜单）。
+   */
+  const removedMenuLabels = [
+    '调整大小…', '总是置顶', '拖到边缘自动收起', '恢复默认动画', '重载插件',
+    '打开配置目录', '感知（环境与用户）', '成长与记忆', '重置情绪', 'AI 设置…',
+    // 2026-09 需求删掉的两块：「AI（认知与人格）」子菜单与「查看记忆宫殿」
+    'AI（认知与人格）', '查看记忆宫殿',
+  ];
+  const strayMenuLabels = menuLabels.filter((label) => typeof label === 'string' &&
+    (removedMenuLabels.some((removed) => label === removed || label.startsWith(removed)) ||
+      label.startsWith('点击区域') || label.startsWith('当前动画') || label.startsWith('可调范围') ||
+      label.includes('对话气泡') || label.includes('暂停行为') || label === '鲸鱼娘'));
+  record(
+    '托盘菜单与桌宠右键菜单完全一致（同一份模板），并且都有「交互…」',
+    Array.isArray(menuParity.tray) &&
+      Array.isArray(menuParity.context) &&
+      JSON.stringify(menuParity.tray) === JSON.stringify(menuParity.context) &&
+      menuLabels.length > 0 &&
+      menuLabels.some((label) => typeof label === 'string' && label.startsWith('交互')),
+      JSON.stringify(menuParity),
+  );
+  /*
+   * 需求（2026-09）："查看记忆宫殿只在设置里保留即可，面板上的不要了""AI（认知和人格）选项不要了"。
+   * 于是菜单里必须**同时**满足：这两块一个都不剩，而「设置…」还在
+   * （记忆宫殿与 AI 的配置/入口都在设置窗口里）。
+   */
+  record(
+    '菜单里不再有配置项与已删的两块（记忆宫殿 / AI 子菜单），并且「设置…」还在',
+    Array.isArray(menuParity.tray) &&
+      strayMenuLabels.length === 0 &&
+      !menuLabels.includes('查看记忆宫殿') &&
+      !menuLabels.includes('AI（认知与人格）') &&
+      menuLabels.includes('设置…'),
+    JSON.stringify({ stray: strayMenuLabels, labels: menuLabels }),
+  );
+  /*
+   * 「插件」子菜单：上半是插件自己注册的动作（按插件分组），
+   * 下半每个插件一个**可点的 checkbox**（● 运行中 / ○ 已关闭）。
+   * 关掉一个正在骚扰你的插件不该需要先打开设置窗口找一圈 —— 这是需求
+   * "让插件可随时关闭"在菜单里的落点，所以必须钉住"它真的可点"。
+   */
+  const pluginSub = Array.isArray(menuParity.plugins) ? menuParity.plugins : [];
+  const pluginGroups = pluginSub.filter((item) => Array.isArray(item.submenu));
+  const pluginToggles = pluginSub.filter((item) => item.type === 'checkbox' && item.clickable === true);
+  record(
+    '托盘「插件」子菜单：插件动作按插件分组，且每个插件是一个可点的开关（checkbox）',
+    pluginToggles.length >= 3 &&
+      pluginToggles.some((item) => item.label.includes('待办清单')) &&
+      pluginToggles.some((item) => item.label.includes('点击探针')) &&
+      pluginToggles.some((item) => item.label.includes('普通探针')) &&
+      // 待办插件注册了「看待办清单…（N 条未完成）」，探针注册了「探针动作」
+      pluginGroups.some((group) => group.submenu.some((label) => String(label).startsWith('看待办清单'))) &&
+      pluginGroups.some((group) => group.submenu.includes('探针动作')),
+    JSON.stringify(pluginSub),
+  );
+  /*
+   * 心情与饱腹**各占一行**（需求："心情值和饱腹值不要写在一行"）。
+   * 正反两面都钉：两行各自存在，且没有任何一行同时含这两个读数。
+   */
+  const moodLines = menuLabels.filter((label) => typeof label === 'string' && label.startsWith('心情'));
+  const satietyLines = menuLabels.filter((label) => typeof label === 'string' && label.startsWith('饱腹'));
+  record(
+    '托盘菜单：心情与饱腹各占一行（不再挤在一行里）',
+    moodLines.length === 1 &&
+      satietyLines.length === 1 &&
+      /心情 \d+\/100/.test(moodLines[0]) &&
+      /饱腹 \d+\/100/.test(satietyLines[0]) &&
+      menuLabels.every((label) => typeof label !== 'string' || !(label.includes('心情') && label.includes('饱腹'))),
+    JSON.stringify({ mood: moodLines, satiety: satietyLines }),
+  );
+  /*
+   * 需求："点击系统托盘时显示饱腹值心情值以及token等属性信息"。
+   *
+   * 这一条读的就是**真实构建出来的菜单模板**（上面拦下的那一份），
+   * 而不是另算一遍字符串 —— 于是"菜单里到底有没有这些信息"是硬证据。
+   */
+  record(
+    '托盘菜单顶部显示属性信息（心情 / 饱腹 / token / 感知）',
+    moodLines.length === 1 &&
+      satietyLines.length === 1 &&
+      menuLabels.some((label) => typeof label === 'string' && label.startsWith('token 本次')) &&
+      menuLabels.some((label) => typeof label === 'string' && label.startsWith('感知：')),
+    JSON.stringify(menuLabels.slice(0, 6)),
+  );
 
   /* ------------------ 环境与用户感知（3.1~3.6） ------------------ */
 
@@ -3756,13 +6401,30 @@ app.whenReady().then(async () => {
     const gate = (over) => model.gateIntervention(Object.assign({
       now, kind: 'scene-change', settings, lastInterventionAt: 0, lastHourCount: 0, behavior,
     }, over || {}));
-    const planLong = model.planIntervention({ observation: obs('coding'), behavior, settings, previousScene: 'reading', habitText: null });
-    const planSensitive = model.planIntervention({ observation: obs('sensitive', { sensitive: true }), behavior, settings, previousScene: 'coding', habitText: null });
+    const planLong = model.planIntervention({ observation: obs('coding'), behavior, settings, previousScene: 'reading', smallTalk: null });
+    const planSensitive = model.planIntervention({ observation: obs('sensitive', { sensitive: true }), behavior, settings, previousScene: 'coding', smallTalk: null });
+    /*
+     * 深夜劝睡已按需求删除：它当年只在 1~4 点触发，而那个区间正好落在默认免打扰
+     * 时段（23–8 点）里，永远被闸门拒 —— 是死代码。
+     *
+     * 两条断言：
+     *   - planLate（沿用旧的输入，sessionMinutes=130）现在落到**久坐**上，
+     *     但绝不能是 'late-night' —— 那个 kind 已经从类型里删掉了；
+     *   - planLateOnly 用一份"除了深夜没有任何其它条件成立"的输入，
+     *     必须**什么都不返回**，这才真正证明分支没了（否则它可能被别的规则兜住）。
+     */
     const planLate = model.planIntervention({
-      observation: obs('coding'), behavior: Object.assign({}, behavior, { lateNight: true, hour: 3 }), settings, previousScene: 'coding', habitText: null,
+      observation: obs('coding'), behavior: Object.assign({}, behavior, { lateNight: true, hour: 3 }), settings, previousScene: 'coding', smallTalk: null,
+    });
+    const planLateOnly = model.planIntervention({
+      observation: obs('coding'),
+      behavior: { idleSeconds: 5, sessionMinutes: 10, switchesLastHour: 2, hour: 3, lateNight: true, userState: 'deep' },
+      settings,
+      previousScene: 'coding',
+      smallTalk: null,
     });
     const planScene = model.planIntervention({
-      observation: obs('gaming'), behavior: Object.assign({}, behavior, { sessionMinutes: 10 }), settings, previousScene: 'coding', habitText: null,
+      observation: obs('gaming'), behavior: Object.assign({}, behavior, { sessionMinutes: 10 }), settings, previousScene: 'coding', smallTalk: null,
     });
     let profile = model.emptyHabitProfile();
     for (let i = 0; i < 3; i++) profile = model.learnHabit(profile, Object.assign(obs('coding'), { at: new Date(2025, 0, 1 + i, 10, 0, 0).toISOString() }));
@@ -3770,6 +6432,66 @@ app.whenReady().then(async () => {
     const predict = model.habitPredictionText({
       profile, now: new Date(2025, 0, 6, 10, 30, 0).getTime(), settings, behavior,
     });
+    /*
+     * 习惯画像 v2 的四条新规矩（对应文档 §8.1~8.4 的四个缺口）：
+     *   1. **按天去重**：同一天同一小时同一场景只算一天；
+     *   2. **指数衰减**：跨天时整表 ×decayPerDay（默认 0.95）；
+     *   3. **可回落**：最新/最早在线小时取最近 21 天的中位数，不是历史极值；
+     *   4. **分工作日/周末 + 记应用**。
+     *
+     * ⚠️ 2025-01-01/02/03 是周三周四周五（weekday）。
+     */
+    let dedup = model.emptyHabitProfile();
+    for (let i = 0; i < 5; i++) {
+      // 同一天同一小时看 5 次：只该记 1 天
+      dedup = model.learnHabit(dedup, Object.assign(obs('coding'), { at: new Date(2025, 0, 1, 10, i * 5, 0).toISOString() }));
+    }
+    // 第二天再看一次 -> 变成 2 天（日期数组里两个不同的日子）
+    const secondDay = model.learnHabit(dedup, Object.assign(obs('coding'), { at: new Date(2025, 0, 2, 10, 0, 0).toISOString() }));
+    // 窗口滑动 = 遗忘：**按"运行过的日子"算**，超过 21 个使用日才挤掉最早的
+    let windowed = model.emptyHabitProfile();
+    for (let i = 0; i < 25; i++) {
+      // 25 个使用日（中间隔了几个月也无所谓 —— 没启动的日子不占窗口）
+      windowed = model.learnHabit(windowed, Object.assign(obs('coding'), { at: new Date(2025, 0, 1 + i * 5, 10, 0, 0).toISOString() }));
+    }
+    // 只启动过 21 天，然后隔了 300 天再启动一次 -> 旧数据**仍然在**（时间流逝不消耗窗口）
+    let gapped = model.emptyHabitProfile();
+    for (let i = 0; i < 21; i++) {
+      gapped = model.learnHabit(gapped, Object.assign(obs('coding'), { at: new Date(2025, 0, 1 + i, 10, 0, 0).toISOString() }));
+    }
+    gapped = model.learnHabit(gapped, Object.assign(obs('reading'), { at: new Date(2025, 11, 20, 10, 0, 0).toISOString() }));
+    /*
+     * 这些日期跨了好几周，自然会落进 weekday / weekend 两个档 ——
+     * 所以"10 点一共看到过几天"要把两档加起来看（这也是真实读取时的口径）。
+     */
+    const hour10 = (p) => {
+      const out = {};
+      for (const kind of ['weekday', 'weekend']) {
+        for (const [scene, days] of Object.entries(model.habitCounts(p, model.habitBucketKey(kind, 10)))) {
+          out[scene] = (out[scene] ?? 0) + days;
+        }
+      }
+      return out;
+    };
+    // 周末档与工作日档互不影响
+    let weekend = model.emptyHabitProfile();
+    weekend = model.learnHabit(weekend, Object.assign(obs('gaming'), { at: new Date(2025, 0, 4, 14, 0, 0).toISOString() }));  // 周六
+    // 应用也进统计（"这个点一般在用 VS Code"）
+    const withApp = model.learnHabit(model.emptyHabitProfile(), Object.assign(obs('coding'), { at: new Date(2025, 0, 1, 10, 0, 0).toISOString(), app: 'Code' }));
+    // 作息可回落：先学一个"熬夜到 23 点"，再连续 3 天 21 点结束
+    let rolling = model.emptyHabitProfile();
+    rolling = model.learnHabit(rolling, Object.assign(obs('coding'), { at: new Date(2025, 0, 1, 23, 0, 0).toISOString() }));
+    for (let i = 0; i < 3; i++) rolling = model.learnHabit(rolling, Object.assign(obs('coding'), { at: new Date(2025, 0, 8 + i, 21, 0, 0).toISOString() }));
+    // 门槛：只有 2 天数据时不说（minDays=3），只有一天做过也不算稳定（minSceneDays=2）
+    let thin = model.emptyHabitProfile();
+    for (let i = 0; i < 2; i++) thin = model.learnHabit(thin, Object.assign(obs('reading'), { at: new Date(2025, 0, 1 + i, 15, 0, 0).toISOString() }));
+    const mixedProfile = (() => {
+      let p = model.emptyHabitProfile();
+      // 5 天里都是"没认出来"，其中 3 天在写代码 —— 取到写代码（other 不参与）
+      for (let i = 0; i < 5; i++) p = model.learnHabit(p, Object.assign(obs('other'), { at: new Date(2025, 0, 6 + i, 10, i, 0).toISOString() }));
+      for (let i = 0; i < 3; i++) p = model.learnHabit(p, Object.assign(obs('coding'), { at: new Date(2025, 0, 6 + i, 10, 10 + i, 0).toISOString() }));
+      return p;
+    })();
     /*
      * 「没认出来」当作没看见（用户要求："如果是没认出来，就当作没看见，
      * 不应该在宠物对话的时候说出『这个时候经常在说不清』这种话"）。
@@ -3779,13 +6501,8 @@ app.whenReady().then(async () => {
      *   4. 时间线 / 今天在做什么文本里不出现 other 段。
      */
     const otherOnly = model.learnHabit(model.emptyHabitProfile(), Object.assign(obs('other'), { at: new Date(2025, 0, 8, 10, 0, 0).toISOString() }));
-    const mixedProfile = (() => {
-      let p = model.emptyHabitProfile();
-      for (let i = 0; i < 5; i++) p = model.learnHabit(p, Object.assign(obs('other'), { at: new Date(2025, 0, 9, 10, i, 0).toISOString() }));
-      for (let i = 0; i < 3; i++) p = model.learnHabit(p, Object.assign(obs('coding'), { at: new Date(2025, 0, 9, 10, 10 + i, 0).toISOString() }));
-      return p;
-    })();
-    const legacyProfile = { ...model.emptyHabitProfile(), hours: { '10': { other: 9 } }, samples: 9, observedHours: 1 };
+    // 老画像文件里的 other 计数：v2 的 key 形如 *|10（不知道那天是星期几）
+    const legacyProfile = { ...model.emptyHabitProfile(), hours: { '*|10': { other: 9 } }, samples: 9, observedHours: 1 };
     const timelineBase = { date: '2025-01-09', segments: [], totals: { activeMinutes: 0, idleMinutes: 0, byScene: [], byApp: [], firstAt: '', lastAt: '' }, narrative: '', updatedAt: '' };
     const withOther = model.appendObservation([], { at: new Date(2025, 0, 9, 10, 0, 0).toISOString(), scene: 'other', app: 'unknown.exe' });
     const withCoding = model.appendObservation(withOther, { at: new Date(2025, 0, 9, 10, 1, 0).toISOString(), scene: 'coding', app: 'Code' });
@@ -3825,7 +6542,7 @@ app.whenReady().then(async () => {
       gateAtLimit: gate({ lastHourCount: 4 }),
       gateAway: gate({ behavior: Object.assign({}, behavior, { userState: 'away' }) }),
       gateUrgent: model.gateIntervention({ now, kind: 'sensitive', settings, lastInterventionAt: now - 120000, lastHourCount: 99, behavior }),
-      planLong, planSensitive, planLate, planScene,
+      planLong, planSensitive, planLate, planLateOnly, planScene,
       sensitiveKeyword: model.matchesSensitiveKeywords('这是我的银行密码', settings.sensitivityKeywords),
       harmless: model.matchesSensitiveKeywords('VS Code 里在写测试', settings.sensitivityKeywords),
       sceneLabel: model.sceneLabel('coding'),
@@ -3834,6 +6551,55 @@ app.whenReady().then(async () => {
       habitObservedHours: profile.observedHours,
       habitTop: model.topSceneAtHour(profile, 10),
       predict,
+      /*
+       * 习惯画像 v2（文档 §8.1~8.4 的四个缺口）：
+       *   1. 按天去重 / 2. 指数衰减 / 3. 作息可回落 / 4. 平日周末 + 应用
+       */
+      habitV2: {
+        dedupSamples: dedup.samples,
+        dedupDays: model.habitCounts(dedup, model.habitBucketKey('weekday', 10)).coding ?? null,
+        // 第二天 -> 2 天（不是"1.95"：窗口模型给的是精确天数）
+        secondDayCoding: model.habitCounts(secondDay, model.habitBucketKey('weekday', 10)).coding ?? null,
+        // 遗忘 = 窗口滑动：超过 21 个"使用日"才挤掉最早的（两档合计）
+        windowedCoding: hour10(windowed).coding ?? null,
+        windowedReading: hour10(windowed).reading ?? null,
+        windowedDailyDays: Object.keys(windowed.daily).length,
+        // 中间隔了 300 天没启动：旧习惯**不应该**被时间冲掉
+        gappedCoding: hour10(gapped).coding ?? null,
+        gappedReading: hour10(gapped).reading ?? null,
+        gappedDailyDays: Object.keys(gapped.daily).length,
+        gappedActiveDays: gapped.activeDays,
+        // 周末档独立：周六 14 点只有 gaming，工作日档不该出现
+        weekendBucket: model.habitCounts(weekend, model.habitBucketKey('weekend', 14)),
+        weekdayBucketOfWeekend: model.habitCounts(weekend, model.habitBucketKey('weekday', 14)),
+        appDays: withApp.apps[model.habitBucketKey('weekday', 10)]?.Code?.length ?? null,
+        // 作息可回落：历史最晚 23 点，但最近 3 天都是 21 点 -> 中位数 21
+        rollingLatest: rolling.latestActiveHour,
+        rollingEarliest: rolling.earliestActiveHour,
+        // 最近窗口里留下的天数
+        rollingRecentDays: Object.keys(rolling.daily).length,
+        // 门槛：只有 2 天 -> 不说；跨 3 天 -> 说
+        thinHour: model.describeHour(thin, 15),
+        thinText: model.habitPredictionText({ profile: thin, now: new Date(2025, 0, 4, 15, 30, 0).getTime(), settings, behavior }),
+        constants: {
+          windowDays: model.HABIT_WINDOW_DAYS,
+          minDays: model.HABIT_MIN_DAYS,
+          minSceneDays: model.HABIT_MIN_SCENE_DAYS,
+          any: model.HABIT_KIND_ANY,
+        },
+        // 分档判定：同一份画像，工作日问 10 点有结论、周末问 10 点没有
+        weekdayReading: model.describeHour(profile, 10, { kind: 'weekday' }),
+        weekendReading: model.describeHour(profile, 10, { kind: 'weekend' }),
+        // 统计文本（习惯建模的输入）里必须有真实天数
+        statsLines: model.habitStatsLines(profile),
+        // 习惯模型：条目由本地算出（模型只写措辞）
+        routines: model.buildHabitRoutines(profile),
+        localModel: model.localHabitModel({
+          profile, routines: model.buildHabitRoutines(profile), petName: '鲸鱼娘', userName: '', now: new Date(2025, 0, 6),
+        }),
+        parsedModel: model.parseHabitModel('摘要：你很爱写代码。说：在写代码吧？'),
+        parsedMerged: model.parseHabitModel('摘要：你很爱写代码。说：在写代码吧？'),
+      },
       permission: {
         normal: model.capturePermission(settings),
         privacy: model.capturePermission(Object.assign({}, settings, { privacyMode: true })),
@@ -3877,7 +6643,7 @@ app.whenReady().then(async () => {
     JSON.stringify(perceptionModel.gateUrgent),
   );
   record(
-    '感知：干预规划正确（久坐提醒 / 敏感内容演 shy / 深夜劝睡 / 场景变化打招呼）',
+    '感知：干预规划正确（久坐提醒 / 敏感内容演 shy / 场景变化打招呼 / 深夜已不再劝睡）',
     perceptionModel.planLong !== null &&
       perceptionModel.planLong.kind === 'long-session' &&
       perceptionModel.planSensitive !== null &&
@@ -3889,14 +6655,20 @@ app.whenReady().then(async () => {
        */
       perceptionModel.planSensitive.animation === 'shy' &&
       perceptionModel.planSensitive.hide === false &&
-      perceptionModel.planLate !== null &&
-      perceptionModel.planLate.kind === 'late-night' &&
+      /*
+       * 深夜（1~4 点）不再产出"劝睡"：那条规则与默认免打扰时段（23–8 点）
+       * 完全重叠、永远不会通过闸门，已按需求删除。
+       * `planLateOnly` 用"只有深夜条件成立"的输入，必须什么都不返回。
+       */
+      perceptionModel.planLate.kind !== 'late-night' &&
+      perceptionModel.planLateOnly === null &&
       perceptionModel.planScene !== null &&
       perceptionModel.planScene.kind === 'scene-change',
     JSON.stringify({
       long: perceptionModel.planLong,
       sensitive: perceptionModel.planSensitive,
       late: perceptionModel.planLate,
+      lateOnly: perceptionModel.planLateOnly,
       scene: perceptionModel.planScene,
     }),
   );
@@ -4348,7 +7120,7 @@ app.whenReady().then(async () => {
   /*
    * 每天的使用时间线（需求：「统计每天用户在做什么 …… 记录每天的使用时间区间，形成记忆」）。
    *
-   * 全是纯函数，所以可以逐条钉死规则里的坑：同场景同程序才合并、漏采一次仍算同一段、
+   * 全是纯函数，所以可以逐条钉死规则里的坑：同场景才合并、漏采一次仍算同一段、
    * 隔太久要另起一段、**idle 永远单独成段且不计入"在电脑前"**、跨天按本地日切。
    */
   const timelineRules = await run(`(() => {
@@ -4361,13 +7133,81 @@ app.whenReady().then(async () => {
     segments = model.appendObservation(segments, obs(9, 0, 30, 'coding', 'code'));   // 30s → 合并
     segments = model.appendObservation(segments, obs(9, 1, 0, 'coding', 'code'));    // 30s → 合并（段=09:00–09:01，3 条）
     segments = model.appendObservation(segments, obs(9, 5, 0, 'browsing', 'msedge')); // 场景变了 → 另起
-    segments = model.appendObservation(segments, obs(9, 6, 0, 'browsing', 'msedge')); // 漏采一次（60s ≤ 90s）→ 仍合并
+    segments = model.appendObservation(segments, obs(9, 6, 0, 'browsing', 'msedge')); // 漏采一次（60s ≤ 150s）→ 仍合并
     segments = model.appendObservation(segments, obs(9, 10, 0, 'browsing', 'msedge')); // 隔 4 分钟 → 必须另起
     segments = model.appendObservation(segments, obs(9, 12, 0, 'idle', ''));
     segments = model.appendObservation(segments, obs(9, 12, 30, 'idle', ''));         // idle 与 idle 合并（但绝不与工作段合并）
     const totals = model.summarizeDay(segments);
     const day = { date: '2025-03-01', segments, totals, narrative: '', updatedAt: at(10, 30) };
     const narrative = model.buildNarrativeMessages({ timeline: day, petName: '鲸鱼娘', userName: '小明' });
+
+    /*
+     * ① 同一个程序的不同标题**不该**把一段切成好几段（用户实测：PVZ 的窗口标题在
+     *    "PVZ Universe" / "Plants Vs. Zombies Universe" / "植物大战僵尸 Universe" 之间变）。
+     */
+    let churn = [];
+    churn = model.appendObservation(churn, obs(10, 0, 0, 'gaming', 'PVZ Universe'));
+    churn = model.appendObservation(churn, obs(10, 0, 30, 'gaming', 'Plants Vs. Zombies Universe'));
+    churn = model.appendObservation(churn, obs(10, 1, 0, 'gaming', '植物大战僵尸 Universe'));
+    const churnTotals = model.summarizeDay(churn);
+
+    /*
+     * ② 换段时把上一段**补到这一刻**：采样间隔（30s）不再凭空消失。
+     *    09:30:00 coding → 09:30:30 browsing：上一段应为 09:30–09:30:30（0.5 分钟）。
+     */
+    let handover = [];
+    handover = model.appendObservation(handover, obs(9, 30, 0, 'coding', 'code'));
+    handover = model.appendObservation(handover, obs(9, 30, 30, 'browsing', 'msedge'));
+    const handoverTotals = model.summarizeDay(handover);
+
+    /*
+     * ③ 账目自洽：跨度 = 活动 + 空闲 + 没认出来/没采样。
+     *    这里造一个"中间漏了 20 分钟"的例子。
+     */
+    let leaky = [];
+    leaky = model.appendObservation(leaky, obs(8, 0, 0, 'coding', 'code'));
+    leaky = model.appendObservation(leaky, obs(8, 0, 30, 'coding', 'code'));
+    leaky = model.appendObservation(leaky, obs(8, 20, 0, 'coding', 'code'));
+    const leakyTotals = model.summarizeDay(leaky);
+
+    /*
+     * ④ 应用**身份** vs **友好名字**：身份（进程名）稳定、名字（模型读的）会变。
+     *    同一身份反复出现 → 一段；名字只用于显示。
+     */
+    let identity = [];
+    identity = model.appendObservation(identity, { at: at(11, 0, 0), scene: 'gaming', app: 'PlantsVsZombies.exe', appLabel: 'PVZ Universe' });
+    identity = model.appendObservation(identity, { at: at(11, 0, 30), scene: 'gaming', app: 'PlantsVsZombies.exe', appLabel: 'Plants Vs. Zombies Universe' });
+    identity = model.appendObservation(identity, { at: at(11, 1, 0), scene: 'gaming', app: 'PlantsVsZombies.exe', appLabel: '植物大战僵尸 Universe' });
+    const identityTotals = model.summarizeDay(identity);
+
+    /*
+     * ⑤ 「没认出来」的桥接（用户实测后定的口径）：
+     *    同一个应用里连续几次没认出来**不该**把一段切开 —— 应用一直开着是事实，
+     *    只是那几次模型没看懂。桥接只认**同一个进程**（进程名是本地确定性证据），
+     *    而且只在"我们一直在采样"（间隔 ≤ 阈值）时生效。
+     */
+    let bridged = [];
+    bridged = model.appendObservation(bridged, obs(12, 0, 0, 'chatting', '元宝'));
+    for (let i = 1; i <= 6; i += 1) {
+      bridged = model.appendObservation(bridged, obs(12, 0, i * 30, 'other', '元宝'));
+    }
+    bridged = model.appendObservation(bridged, obs(12, 3, 30, 'chatting', '元宝'));
+    const bridgedTotals = model.summarizeDay(bridged);
+
+    // 换了应用：不桥接（这一段的 end 停在 13:00:00，13:03:30 因为超阈值另起一段）
+    let crossed = [];
+    crossed = model.appendObservation(crossed, obs(13, 0, 0, 'chatting', '元宝'));
+    for (let i = 1; i <= 6; i += 1) {
+      crossed = model.appendObservation(crossed, obs(13, 0, i * 30, 'other', 'msedge'));
+    }
+    crossed = model.appendObservation(crossed, obs(13, 3, 30, 'chatting', '元宝'));
+
+    // 没认出来且已经隔了 4 分钟：也不桥接（那段时间真的没采到样）
+    let stale = [];
+    stale = model.appendObservation(stale, obs(14, 0, 0, 'chatting', '元宝'));
+    stale = model.appendObservation(stale, obs(14, 4, 0, 'other', '元宝'));
+    stale = model.appendObservation(stale, obs(14, 4, 30, 'chatting', '元宝'));
+
     return {
       segmentCount: segments.length,
       scenes: segments.map((s) => s.scene),
@@ -4375,6 +7215,7 @@ app.whenReady().then(async () => {
       firstSegmentMinutes: segments[0].minutes,
       activeMinutes: totals.activeMinutes,
       idleMinutes: totals.idleMinutes,
+      unaccountedMinutes: totals.unaccountedMinutes,
       topScene: totals.byScene[0].scene,
       topShare: totals.byScene[0].share,
       topApp: totals.byApp[0].app,
@@ -4386,27 +7227,189 @@ app.whenReady().then(async () => {
       crossDay: model.localDayOf(new Date(2025, 2, 1, 23, 59).getTime()) !== model.localDayOf(new Date(2025, 2, 2, 0, 1).getTime()),
       promptHasFacts: narrative.system.includes('只根据') && narrative.user.includes('时间线'),
       gapMs: model.SEGMENT_GAP_MS,
+      identity: {
+        count: identity.length,
+        app: identity[0].app,
+        label: identity[0].appLabel,
+        samples: identity[0].samples,
+        minutes: identity[0].minutes,
+        line: model.formatSegmentLine(identity[0]),
+        byApp: identityTotals.byApp,
+        activeMinutes: identityTotals.activeMinutes,
+      },
+      churn: {
+        count: churn.length,
+        samples: churn[0].samples,
+        minutes: churn[0].minutes,
+        app: churn[0].app,
+        labels: Object.keys(churn[0].appCounts ?? {}),
+        activeMinutes: churnTotals.activeMinutes,
+        byApp: churnTotals.byApp,
+      },
+      bridge: {
+        count: bridged.length,
+        samples: bridged[0] ? bridged[0].samples : 0,
+        minutes: bridged[0] ? bridged[0].minutes : 0,
+        unrecognized: bridged[0] ? (bridged[0].unrecognizedSamples ?? 0) : 0,
+        end: bridged[0] ? bridged[0].end : '',
+        activeMinutes: bridgedTotals.activeMinutes,
+      },
+      bridgeCrossed: { count: crossed.length, unrecognized: crossed[0] ? (crossed[0].unrecognizedSamples ?? 0) : 0 },
+      bridgeStale: { count: stale.length },
+      handover: {
+        count: handover.length,
+        firstMinutes: handover[0].minutes,
+        firstEnd: handover[0].end,
+        secondStart: handover[1].start,
+        activeMinutes: handoverTotals.activeMinutes,
+      },
+      leaky: {
+        activeMinutes: leakyTotals.activeMinutes,
+        unaccountedMinutes: leakyTotals.unaccountedMinutes,
+        spanMinutes: Math.round(((new Date(leakyTotals.lastAt) - new Date(leakyTotals.firstAt)) / 60000) * 10) / 10,
+      },
     };
   })()`);
   record(
-    '感知：时间线聚合（同场景同程序才合并 / 漏采容忍 / 隔太久另起 / idle 自成一类且不计入在电脑前）',
+    '感知：时间线聚合（同场景才合并 / 漏采容忍 / 隔太久另起 / idle 自成一类且不计入在电脑前）',
     timelineRules.segmentCount === 4 &&
       JSON.stringify(timelineRules.scenes) === JSON.stringify(['coding', 'browsing', 'browsing', 'idle']) &&
       JSON.stringify(timelineRules.samples) === JSON.stringify([3, 2, 1, 2]) &&
       timelineRules.firstSegmentMinutes === 1 &&
-      timelineRules.activeMinutes === 2 &&
+      /*
+       * ⚠️ 下面这几项的期望值随阈值变过：`SEGMENT_GAP_MS` 90s → 150s 之后，
+       * 09:06 → 09:10 之间的 120 秒空档被算成"一直在采样"，于是
+       *   · 09:10 的 browsing 段在换到 idle 时被**补到 09:12**（换段补时规则）→ 活动 4 分钟；
+       *   · 占比最高的是 browsing（3/4 = 75%）。
+       * 这正是"放宽阈值"换来的东西：不再把 2 分钟的真实空档切成两段。
+       */
+      timelineRules.activeMinutes === 4 &&
       timelineRules.idleMinutes === 0.5 &&
-      timelineRules.topScene === 'coding' &&
-      timelineRules.topApp === 'code' &&
+      timelineRules.unaccountedMinutes === 8 &&
+      timelineRules.topScene === 'browsing' &&
+      timelineRules.topShare === 0.75 &&
+      timelineRules.topApp === 'msedge' &&
       timelineRules.duration60 === '1 小时' &&
       timelineRules.duration90 === '1 小时 30 分' &&
       timelineRules.duration45 === '45 分钟' &&
-      /09:00–09:01 写代码（code）/.test(timelineRules.line) === true &&
+      /09:00–09:01 写代码（VS Code）/.test(timelineRules.line) === true &&
       timelineRules.text.includes('写代码') &&
       timelineRules.crossDay === true &&
       timelineRules.promptHasFacts === true &&
-      timelineRules.gapMs === 90000,
+      timelineRules.gapMs === 150000,
     JSON.stringify(timelineRules),
+  );
+  /*
+   * 用户实测报的问题：同一个游戏因为窗口标题在三种写法之间变，被切成十几段、
+   * 每段时长都接近 0，`byApp` 里也列成三行。合并键改用 scene 之后应当只剩一段。
+   */
+  record(
+    '感知：同一个程序换了标题不会把一段切开（合并只看场景，app 只作代表性标签）',
+    timelineRules.churn.count === 1 &&
+      timelineRules.churn.samples === 3 &&
+      timelineRules.churn.minutes === 1 &&
+      timelineRules.churn.labels.length === 3 &&
+      timelineRules.churn.app === 'PVZ Universe' &&
+      timelineRules.churn.activeMinutes === 1,
+    JSON.stringify(timelineRules.churn),
+  );
+  record(
+    '感知：换段时把上一段补到这一刻（采样间隔不再凭空消失）',
+    timelineRules.handover.count === 2 &&
+      timelineRules.handover.firstMinutes === 0.5 &&
+      timelineRules.handover.firstEnd === timelineRules.handover.secondStart &&
+      timelineRules.handover.activeMinutes === 0.5,
+    JSON.stringify(timelineRules.handover),
+  );
+  /*
+   * 用户实测报的问题：同一个应用里夹了几次"没认出来"，就被切成一串碎片
+   * （`10:58–11:01 聊天`、`11:03–11:05 聊天`…）。规则：
+   * 同一个进程 + 一直在采样 → 桥接（并把次数留痕）；换应用或隔太久 → 不桥接。
+   */
+  record(
+    '感知：「没认出来」在同一进程内被桥接（不切段、次数留痕），换应用或断采则不桥接',
+    timelineRules.bridge.count === 1 &&
+      timelineRules.bridge.samples === 8 &&
+      timelineRules.bridge.unrecognized === 6 &&
+      timelineRules.bridge.minutes === 3.5 &&
+      timelineRules.bridge.activeMinutes === 3.5 &&
+      timelineRules.bridgeCrossed.count === 2 &&
+      timelineRules.bridgeCrossed.unrecognized === 0 &&
+      timelineRules.bridgeStale.count === 2,
+    JSON.stringify({
+      bridge: timelineRules.bridge,
+      crossed: timelineRules.bridgeCrossed,
+      stale: timelineRules.bridgeStale,
+    }),
+  );
+  record(
+    '感知：时长账目自洽（跨度 = 活动 + 空闲 + 没认出来/没采样）',
+    timelineRules.leaky.activeMinutes === 0.5 &&
+      timelineRules.leaky.unaccountedMinutes === 19.5 &&
+      timelineRules.leaky.spanMinutes === 20,
+    JSON.stringify(timelineRules.leaky),
+  );
+  /*
+   * 应用身份（进程名）与友好名字（模型读的）分开之后：
+   * 身份稳定 → 一段；名字只用于显示（括号里显示最后看到的那个）。
+   */
+  record(
+    '感知：应用身份稳定（进程名）+ 友好名字只用于显示（同一程序恒为一段一行）',
+    timelineRules.identity.count === 1 &&
+      timelineRules.identity.app === 'PlantsVsZombies.exe' &&
+      timelineRules.identity.label === '植物大战僵尸 Universe' &&
+      timelineRules.identity.samples === 3 &&
+      timelineRules.identity.minutes === 1 &&
+      timelineRules.identity.byApp.length === 1 &&
+      timelineRules.identity.byApp[0].app === 'PlantsVsZombies.exe' &&
+      timelineRules.identity.byApp[0].minutes === 1 &&
+      timelineRules.identity.line.includes('植物大战僵尸 Universe'),
+    JSON.stringify(timelineRules.identity),
+  );
+  /*
+   * 用户实测报的问题（看图即知）：同一个 Edge 在时间线里显示成三个名字 ——
+   * 老观察里 `app` 存的是模型名（`Microsoft Edge`）、新观察里存进程名（`msedge`）、
+   * 模型给的友好名又可能是 `Edge`。名字不统一看起来像三件不同的事。
+   *
+   * 规则：**已知进程名一律用固定名字**（表里没有的才回退到模型读出来的那个）。
+   */
+  const appNames = await run(`(() => {
+    const model = window.petDebug.perception;
+    return {
+      edgeWithLabel: model.appDisplayName('msedge', 'Edge'),
+      edgeWithoutLabel: model.appDisplayName('msedge', ''),
+      edgeWithExe: model.appDisplayName('msedge.exe', 'Microsoft Edge'),
+      // 历史观察里 app 存的是模型名（不是进程名），也要归到同一个显示名
+      legacyEdgeLabel: model.appDisplayName('Edge', ''),
+      legacyEdgeFull: model.appDisplayName('Microsoft Edge', 'Microsoft Edge'),
+      code: model.appDisplayName('code', 'Visual Studio Code'),
+      legacyCode: model.appDisplayName('VS Code', ''),
+      unknownUsesLabel: model.appDisplayName('SomeWeirdApp', '神奇软件'),
+      unknownUsesIdentity: model.appDisplayName('SomeWeirdApp', ''),
+      empty: model.appDisplayName('', ''),
+      normalized: model.normalizeProcessName('  MSEDGE.EXE '),
+      // 时间线一行也用同一个函数（显示层与聚合层的名字必须同源）
+      line: model.timeline.formatSegmentLine({
+        start: '2025-01-09T01:00:00.000Z', end: '2025-01-09T01:02:00.000Z',
+        scene: 'browsing', app: 'msedge', appLabel: 'Edge', samples: 5, minutes: 2,
+      }),
+    };
+  })()`);
+  record(
+    '感知：同一个程序永远同一个显示名（msedge 一律显示为 Microsoft Edge，未知程序才用模型给的名字）',
+    appNames.edgeWithLabel === 'Microsoft Edge' &&
+      appNames.edgeWithoutLabel === 'Microsoft Edge' &&
+      appNames.edgeWithExe === 'Microsoft Edge' &&
+      appNames.legacyEdgeLabel === 'Microsoft Edge' &&
+      appNames.legacyEdgeFull === 'Microsoft Edge' &&
+      appNames.code === 'VS Code' &&
+      appNames.legacyCode === 'VS Code' &&
+      appNames.unknownUsesLabel === '神奇软件' &&
+      appNames.unknownUsesIdentity === 'SomeWeirdApp' &&
+      appNames.empty === '' &&
+      appNames.normalized === 'msedge' &&
+      appNames.line.includes('（Microsoft Edge）'),
+    JSON.stringify(appNames),
   );
   const timelineStatus = await run(`(async () => {
     const status = await window.petAPI.perception.status();
@@ -4522,7 +7525,7 @@ app.whenReady().then(async () => {
     JSON.stringify(scenePriority),
   );
   record(
-    '感知：习惯学习按小时聚合，并能预测当前时段（按你平时的习惯…）',
+    '感知：习惯学习按天聚合，并能预测当前时段（按你平时的习惯…）',
     perceptionModel.habitSamples === 4 &&
       perceptionModel.habitObservedHours === 1 &&
       perceptionModel.habitTop === 'coding' &&
@@ -4534,6 +7537,194 @@ app.whenReady().then(async () => {
       top: perceptionModel.habitTop,
       predict: perceptionModel.predict,
     }),
+  );
+
+  /*
+   * 习惯画像 v1 -> v2 **迁移**（纯函数，直接喂旧 JSON）。
+   *
+   * 放在这里而不是探针里：迁移是主进程读盘时做的，但逻辑本身是纯数据变换
+   * （`migrateHabitProfile`），直接喂一份 v1 JSON 就能确定性地断言 ——
+   * 不必依赖"写文件 -> 重启 -> 再读"的时序（那种测法还会被"这次采样认出来了没"影响）。
+   */
+  const habitMigration = await run(`(() => {
+    const model = window.petDebug.perception;
+    // 只有 3 个使用日的画像：窗口有 21 个名额，所以**一条都不该被裁**
+    const legacy = model.migrateHabitProfile({
+      hours: { 10: { coding: 27, reading: 5 }, 15: { browsing: 9 } },
+      observedHours: 2, samples: 41, activeDays: 3,
+      latestActiveHour: 23, earliestActiveHour: 9,
+      lastActiveDate: '2026-09-20', updatedAt: '2026-09-20T23:00:00.000Z',
+    });
+    // 使用日超过 21 个：只保留最近 21 个（老的被挤掉）
+    const crowdedDates = [];
+    for (let i = 0; i < 30; i += 1) {
+      const day = new Date(2026, 0, 1 + i);
+      // 注意：这里不能写模板字符串（整段脚本本身就在模板字符串里）
+      crowdedDates.push('2026-' + String(day.getMonth() + 1).padStart(2, '0') + '-' + String(day.getDate()).padStart(2, '0'));
+    }
+    const crowded = model.migrateHabitProfile({
+      version: 2, seen: { '*|10': { coding: crowdedDates } }, samples: 30, activeDays: 30, lastActiveDate: '2026-01-30',
+    });
+    // 坏数据一律退回空画像，不许抛
+    const bad = [
+      model.migrateHabitProfile(null),
+      model.migrateHabitProfile('not-json'),
+      model.migrateHabitProfile({ hours: 'oops', seen: { 'weekday|99': { coding: ['2026-09-26'] } } }),
+    ];
+    // v2 自己的清洗：非法日期 / 非法桶 / 去重
+    const cleaned = model.migrateHabitProfile({
+      version: 2,
+      seen: {
+        'weekday|10': { coding: ['2026-09-26', '2026-09-26', '不是日期', '2026-09-25'] },
+        'weekday|99': { coding: ['2026-09-26'] },
+        'bogus|10': { coding: ['2026-09-26'] },
+      },
+      daily: { '2026-09-26': { latestHour: 23, earliestHour: 9 }, 'x': { latestHour: 1 } },
+      samples: 5, activeDays: 2, lastActiveDate: '2026-09-26',
+    });
+    return {
+      legacy: {
+        version: legacy.version,
+        seenKeys: Object.keys(legacy.seen),
+        codingDays: legacy.seen['*|10'] ? legacy.seen['*|10'].coding : null,
+        browsingDays: legacy.seen['*|15'] ? legacy.seen['*|15'].browsing.length : null,
+        // 27 次观察 / 3 个活跃日 -> 最多 3 天
+        capped: legacy.seen['*|10'] ? legacy.seen['*|10'].coding.length : -1,
+        recentDays: Object.keys(legacy.daily).length,
+        latest: legacy.latestActiveHour,
+        earliest: legacy.earliestActiveHour,
+      },
+      crowded: {
+        days: model.habitCounts(crowded, '*|10').coding ?? null,
+        dailyDays: Object.keys(crowded.daily).length,
+        newest: model.habitActiveDays(crowded)[0] ?? '',
+        oldest: model.habitActiveDays(crowded).slice(-1)[0] ?? '',
+      },
+      bad: bad.map((item) => ({ samples: item.samples, version: item.version, keys: Object.keys(item.seen).length })),
+      cleaned: {
+        codingDates: cleaned.seen['weekday|10'] ? cleaned.seen['weekday|10'].coding : null,
+        keys: Object.keys(cleaned.seen),
+        dailyKeys: Object.keys(cleaned.daily),
+      },
+    };
+  })()`);
+  record(
+    '习惯迁移：使用日不足窗口时不裁任何东西（几个月没启动也不会丢）',
+    habitMigration.legacy.version === 2 &&
+      JSON.stringify(habitMigration.legacy.seenKeys) === JSON.stringify(['*|10', '*|15']) &&
+      habitMigration.legacy.capped === 3 &&
+      habitMigration.legacy.browsingDays === 3 &&
+      habitMigration.legacy.recentDays === 1 &&
+      habitMigration.legacy.latest === 23 &&
+      habitMigration.legacy.earliest === 9,
+    JSON.stringify(habitMigration.legacy),
+  );
+  record(
+    '习惯迁移：使用日超过 21 个时只保留最近 21 个（按"运行过的日子"裁，不按日历）',
+    habitMigration.crowded.days === 21 &&
+      habitMigration.crowded.newest === '2026-01-30' &&
+      habitMigration.crowded.oldest === '2026-01-10',
+    JSON.stringify(habitMigration.crowded),
+  );
+  record(
+    '习惯迁移：坏数据退回空画像（不抛异常）；v2 非法日期/桶被清洗且去重',
+    habitMigration.bad.every((item) => item.version === 2 && item.samples === 0 && item.keys === 0) &&
+      JSON.stringify(habitMigration.cleaned.codingDates) === JSON.stringify(['2026-09-25', '2026-09-26']) &&
+      JSON.stringify(habitMigration.cleaned.keys) === JSON.stringify(['weekday|10']) &&
+      JSON.stringify(habitMigration.cleaned.dailyKeys) === JSON.stringify(['2026-09-26']),
+    JSON.stringify({ bad: habitMigration.bad, cleaned: habitMigration.cleaned }),
+  );
+
+  /*
+   * 习惯画像 v2：四个缺口的修复各钉一条。
+   *
+   * 这四条都是"统计口径"问题，肉眼很难发现回归（她只是"学得慢一点/说得早一点"），
+   * 所以必须逐条断言：去重、衰减、可回落、分档 + 应用。
+   */
+  const habitV2 = perceptionModel.habitV2;
+  record(
+    '习惯 v2：同一天同一小时同一场景只算一天（不再被"多看两眼"刷成铁证）',
+    habitV2.dedupSamples === 5 &&
+      habitV2.dedupDays === 1 &&
+      habitV2.secondDayCoding === 2 &&
+      habitV2.constants.minDays === 3 &&
+      habitV2.constants.minSceneDays === 2,
+    JSON.stringify({
+      samples: habitV2.dedupSamples,
+      days: habitV2.dedupDays,
+      secondDay: habitV2.secondDayCoding,
+      minDays: habitV2.constants.minDays,
+    }),
+  );
+  record(
+    '习惯 v2：遗忘按「运行过的天数」算 —— 超过 21 个使用日才挤掉最早的',
+    habitV2.constants.windowDays === 21 &&
+      habitV2.windowedCoding === 21 &&
+      habitV2.windowedReading === null &&
+      habitV2.windowedDailyDays === 21,
+    JSON.stringify({
+      windowDays: habitV2.constants.windowDays,
+      coding: habitV2.windowedCoding,
+      dailyDays: habitV2.windowedDailyDays,
+    }),
+  );
+  record(
+    '习惯 v2：中间几个月没启动，旧习惯不会被时间冲掉（没启动不计入天数）',
+    habitV2.gappedCoding === 20 &&
+      habitV2.gappedReading === 1 &&
+      habitV2.gappedDailyDays === 21 &&
+      habitV2.gappedActiveDays === 22,
+    JSON.stringify({
+      coding: habitV2.gappedCoding,
+      reading: habitV2.gappedReading,
+      dailyDays: habitV2.gappedDailyDays,
+      activeDays: habitV2.gappedActiveDays,
+    }),
+  );
+  record(
+    '习惯 v2：工作日/周末分档统计，互不污染',
+    habitV2.weekendBucket?.gaming === 1 &&
+      Object.keys(habitV2.weekdayBucketOfWeekend).length === 0 &&
+      habitV2.weekdayReading?.scene === 'coding' &&
+      habitV2.weekdayReading?.days === 3 &&
+      habitV2.weekendReading === null,
+    JSON.stringify({
+      weekend: habitV2.weekendBucket,
+      weekdayAt10: habitV2.weekdayReading,
+      weekendAt10: habitV2.weekendReading,
+    }),
+  );
+  record(
+    '习惯 v2：作息会回落（取最近 21 天的中位数，不再是历史极值）且记下应用',
+    habitV2.rollingLatest === 21 &&
+      habitV2.rollingEarliest === 21 &&
+      habitV2.rollingRecentDays === 4 &&
+      habitV2.appDays === 1 &&
+      habitV2.thinHour === null &&
+      habitV2.thinText === null &&
+      JSON.stringify(habitV2.statsLines).includes('Code'),
+    JSON.stringify({
+      latest: habitV2.rollingLatest,
+      earliest: habitV2.rollingEarliest,
+      recentDays: habitV2.rollingRecentDays,
+      app: habitV2.appDays,
+      thin: habitV2.thinHour,
+    }),
+  );
+  /*
+   * 习惯建模的**离线**部分（在线那条在下面用假网关跑）：
+   * 条目由本地统计算出、模板兜底可用、解析容错（模型把两段挤在一行也要认）。
+   */
+  record(
+    '习惯建模（纯函数）：条目由本地统计算出 + 模板兜底 + 解析容错',
+    habitV2.routines.length >= 1 &&
+      habitV2.routines[0].days === 3 &&
+      habitV2.routines[0].what === '写代码' &&
+      habitV2.localModel.summary.includes('写代码') &&
+      habitV2.localModel.line.includes('写代码') &&
+      habitV2.parsedModel?.summary === '你很爱写代码。' &&
+      habitV2.parsedModel?.line === '在写代码吧？',
+    JSON.stringify({ routines: habitV2.routines, local: habitV2.localModel, parsed: habitV2.parsedModel }),
   );
   record(
     '感知：采集闸门（正常允许 / 隐私模式停 / 开关关闭停）',
@@ -4556,7 +7747,7 @@ app.whenReady().then(async () => {
     const noScreenNoCamera = Object.assign({}, base, { screen: false, camera: false });
     return {
       longOff: model.isPlanEnabled('long-session', noBehavior),
-      lateOff: model.isPlanEnabled('late-night', noBehavior),
+      sceneOff: model.isPlanEnabled('scene-change', noBehavior),
       habitWhenNoHabits: model.isPlanEnabled('habit', noHabits),
       presenceWhenNoCamera: model.isPlanEnabled('presence', noCamera),
       strangerWhenNoCamera: model.isPlanEnabled('stranger', noCamera),
@@ -4570,15 +7761,91 @@ app.whenReady().then(async () => {
     };
   })()`);
   record(
-    '感知：干预归属到具体开关（关掉行为观察后久坐/深夜不再提醒；关掉摄像头后不管在场）',
+    '感知：干预归属到具体开关（关掉行为观察后久坐/场景变化不再提醒；关掉摄像头后不管在场）',
     planOwnership.longOff === false &&
-      planOwnership.lateOff === false &&
+      planOwnership.sceneOff === false &&
       planOwnership.habitWhenNoHabits === false &&
       planOwnership.presenceWhenNoCamera === false &&
       planOwnership.strangerWhenNoCamera === false &&
       planOwnership.sensitiveWhenNoScreen === false &&
       planOwnership.allOn.every((value) => value === true),
     JSON.stringify(planOwnership),
+  );
+
+  /*
+   * 日常闲聊的多样化（需求："不仅仅基于用户习惯询问，有时候也可能换成一些问候、
+   * 最近发生的有趣的事等等，**频率不变**"）。
+   *
+   * 这一组只钉两件事，都是纯函数、可确定性复现：
+   *   1. 候选要覆盖 问候 / 习惯 / 今天的活动 / 最近的事 四类；
+   *   2. **不连着说同一类**（`lastKind` 生效），且只剩一类时允许重复（不能卡死不说）。
+   * "频率不变"由既有的 `gateIntervention` 决定，那些断言在别处，这里不重复。
+   */
+  const smallTalkModel = await run(`(() => {
+    const model = window.petDebug.perception;
+    const full = {
+      hour: 9,
+      userName: '小明',
+      habitText: '按你平时的习惯，这个点一般在写代码，今天也是吗？',
+      topActivity: { scene: 'coding', minutes: 200 },
+      recentMoment: { title: '一起熬夜赶论文', daysAgo: 1, kind: 'late-night' },
+    };
+    const candidates = model.buildSmallTalk(full);
+    const kinds = [...new Set(candidates.map((c) => c.kind))];
+    // 连续挑 10 次（固定随机源）：相邻两次不该是同一类
+    const picked = [];
+    let last = null;
+    for (const r of [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]) {
+      const item = model.pickSmallTalk(candidates, () => r, last);
+      if (!item) break;
+      picked.push(item.kind);
+      last = item.kind;
+    }
+    const obs = {
+      at: new Date().toISOString(), scene: 'coding', app: 'VS Code', activity: '写代码',
+      sensitive: false, focus: 'deep', summary: '', suggestion: '', mode: 'llm', tokens: 1,
+    };
+    const settings = model.DEFAULT_PERCEPTION_SETTINGS;
+    const quietBehavior = { idleSeconds: 5, sessionMinutes: 10, switchesLastHour: 2, hour: 9, lateNight: false, userState: 'deep' };
+    const longBehavior = Object.assign({}, quietBehavior, { sessionMinutes: 130 });
+    const talk = { kind: 'greeting', text: '早上好呀' };
+    return {
+      kinds,
+      texts: candidates.map((c) => c.text),
+      picked,
+      avoidsLast: model.pickSmallTalk(candidates, () => 0, 'greeting')?.kind ?? '',
+      onlyOneKind: model.pickSmallTalk([{ kind: 'habit', text: 'h' }], () => 0, 'habit')?.kind ?? '',
+      // 关掉习惯、今天也没记录、也没有记忆时，仍然有问候/陪伴可说
+      minimal: model.buildSmallTalk({ hour: 15, userName: '' }).map((c) => c.kind),
+      morning: model.buildSmallTalk({ hour: 7, userName: '' }).find((c) => c.kind === 'greeting')?.text ?? '',
+      planSmall: model.planIntervention({
+        observation: obs, behavior: quietBehavior, settings, previousScene: 'coding', smallTalk: talk,
+      })?.kind ?? '',
+      // 闲聊**不能**顶掉久坐提醒（优先级不变）
+      planLongWins: model.planIntervention({
+        observation: obs, behavior: longBehavior, settings, previousScene: 'coding', smallTalk: talk,
+      })?.kind ?? '',
+    };
+  })()`);
+  record(
+    '日常闲聊：候选覆盖问候/习惯/今天的活动/最近的事，且不会连着说同一类',
+    smallTalkModel.kinds.includes('greeting') &&
+      smallTalkModel.kinds.includes('habit') &&
+      smallTalkModel.kinds.includes('activity') &&
+      smallTalkModel.kinds.includes('recent') &&
+      smallTalkModel.picked.length === 10 &&
+      smallTalkModel.picked.every((kind, index) => index === 0 || kind !== smallTalkModel.picked[index - 1]) &&
+      smallTalkModel.avoidsLast !== 'greeting' &&
+      smallTalkModel.onlyOneKind === 'habit' &&
+      smallTalkModel.minimal.length > 0 &&
+      smallTalkModel.minimal.every((kind) => kind === 'greeting' || kind === 'company') &&
+      smallTalkModel.morning.includes('早'),
+    JSON.stringify(smallTalkModel),
+  );
+  record(
+    '日常闲聊：走的是原来那一档（不再只有习惯询问），且不会顶掉久坐提醒',
+    smallTalkModel.planSmall === 'small-talk' && smallTalkModel.planLongWins === 'long-session',
+    JSON.stringify({ planSmall: smallTalkModel.planSmall, planLongWins: smallTalkModel.planLongWins }),
   );
 
   /*
@@ -4694,6 +7961,119 @@ app.whenReady().then(async () => {
   })()`);
   record('感知：可以一键清空观察记录与习惯画像', perceptionCleared.samplesAfter === 0, JSON.stringify(perceptionCleared));
 
+  /*
+   * 习惯建模（把统计归纳成一段话）。
+   *
+   * 这条链路的三个环节都要真跑：
+   *   1. **输入**：把统计文本（`habitStatsLines` + 本地算出的时段）发给模型 ——
+   *      断言请求体里出现了真实的天数与时段，而不是让模型凭空写；
+   *   2. **输出**：模型回"摘要：… / 说：…"两行 -> 解析成 `summary` + `line`；
+   *   3. **降级**：模型不可用时必须退回本地模板（`source === 'template'` 且有原因）。
+   *
+   * ⚠️ 这里**刻意不调用 `sampleNow()`**：那会留下一条 `lastObservation`，
+   * 而后面"模型不可达时不写脏观察"那条用例正依赖它是 null（实测因此红过一次）。
+   * "条目要够多才出现"由纯函数断言（见上面的 habitV2）与
+   * tools/probe-habit-model.cjs（预置一份多天画像）覆盖。
+   *
+   * 另外注意 `chat: true` 是必须的：`evaluateAIUsability()` 把"对话开关"当成
+   * "能不能用大模型"的总闸（视觉理解也一样）。
+   */
+  const habitHttp = require('node:http');
+  const habitRequests = [];
+  const habitServer = habitHttp.createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      let parsed = {};
+      try { parsed = JSON.parse(body); } catch (error) { parsed = {}; }
+      habitRequests.push(parsed);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'habit-stub',
+        model: 'stub-model',
+        choices: [{
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: '摘要：你大多在工作日的上午写代码，看着挺专注的。说：这个点你一般在写代码吧？' },
+        }],
+        usage: { prompt_tokens: 30, completion_tokens: 12, total_tokens: 42 },
+      }));
+    });
+  });
+  await new Promise((resolve) => habitServer.listen(0, '127.0.0.1', resolve));
+  const habitPort = habitServer.address().port;
+
+  const habitModelRun = await run(`(async () => {
+    const perception = window.petAPI.perception;
+    const ai = window.petAPI.ai;
+    const before = await ai.status();
+    await ai.setSettings({
+      enabled: true, chat: true, memory: false,
+      provider: { kind: 'openai', baseUrl: 'http://127.0.0.1:${habitPort}/v1', model: 'stub-model', apiKey: 'sk-acceptance-habit-0001', timeoutMs: 8000 },
+    });
+    const withModel = await perception.modelHabits();
+    const after = await ai.status();
+    // 断开模型（清掉密钥）之后再建一次 -> 必须退回本地模板，且写明原因
+    await ai.setSettings({ provider: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', timeoutMs: 20000 }, clearApiKey: true });
+    const templateOnly = await perception.modelHabits();
+    return {
+      samples: withModel.habits.samples,
+      llm: withModel.habits.model,
+      template: templateOnly.habits.model,
+      tokensUsed: after.tokensUsed - before.tokensUsed,
+    };
+  })()`);
+  await new Promise((resolve) => habitServer.close(resolve));
+
+  const habitRequestBody = habitRequests[0] ?? {};
+  const habitPrompt = JSON.stringify(habitRequestBody.messages ?? []);
+  record(
+    '习惯建模：把统计交给模型 -> 拿回「摘要 + 能说出口的一句」-> 落盘成习惯模型',
+    habitRequests.length === 1 &&
+      // 输入真的是统计（不是原始 JSON、更不是截图）
+      habitPrompt.includes('样本：观察') &&
+      habitPrompt.includes('归纳出的时段') &&
+      habitModelRun.llm !== null &&
+      habitModelRun.llm.source === 'llm' &&
+      habitModelRun.llm.summary.includes('写代码') &&
+      habitModelRun.llm.line.includes('写代码') &&
+      habitModelRun.llm.error === '' &&
+      habitModelRun.llm.tokens === 42 &&
+      // 条目由**本地统计算出**，不经过模型（模型只写措辞）
+      Array.isArray(habitModelRun.llm.routines) &&
+      habitModelRun.llm.samples === habitModelRun.samples,
+    JSON.stringify({ stubCalls: habitRequests.length, model: habitModelRun.llm, promptHead: habitPrompt.slice(0, 160) }),
+  );
+  record(
+    '习惯建模：模型不可用时退回本地模板，并写明原因（面板能解释"为什么这次是模板"）',
+    habitModelRun.template !== null &&
+      habitModelRun.template.source === 'template' &&
+      habitModelRun.template.summary.length > 0 &&
+      habitModelRun.template.error.length > 0,
+    JSON.stringify({ template: habitModelRun.template }),
+  );
+  record(
+    '习惯建模：这次调用花的 token 记进了 AI 预算（不会偷偷烧额度）',
+    habitModelRun.tokensUsed >= 42,
+    JSON.stringify({ tokensUsed: habitModelRun.tokensUsed }),
+  );
+  const habitModelFile = join(aiDataDir, 'perception', 'habit-model.json');
+  let habitModelOnDisk = null;
+  try {
+    habitModelOnDisk = JSON.parse(readFileSync(habitModelFile, 'utf8'));
+  } catch (error) {
+    habitModelOnDisk = null;
+  }
+  record(
+    '习惯建模：模型落盘在 perception/habit-model.json（与统计 habits.json 分开）',
+    habitModelOnDisk !== null &&
+      typeof habitModelOnDisk.summary === 'string' &&
+      habitModelOnDisk.summary.length > 0 &&
+      habitModelOnDisk.source === 'template',
+    JSON.stringify(habitModelOnDisk),
+  );
+
+
   /* 感知日志：可审计（她看见了什么 / 为什么开口） */
   const perceptionLog = await run(`window.petAPI.perception.log(20)`);
   record(
@@ -4746,6 +8126,208 @@ app.whenReady().then(async () => {
     '感知：磁盘上不出现任何图像文件（截图只在内存里活一次）',
     perceptionFiles.every((name) => !/\.(png|jpe?g|webp|bmp|gif)$/i.test(name)),
     `dir=${capturePath.dataDir} files=${JSON.stringify(perceptionFiles.slice(0, 8))}`,
+  );
+  /*
+   * 用量记账：**所有**大模型调用都要进账，包括别的模块发出去的那些。
+   *
+   * 这条专门打"视觉理解"那一路（它是以前唯一完全没记账的调用之一）：
+   * 用假网关让一次真实截图 + 场景分析成功，然后断言
+   *   1. 本次运行的 token 涨了；
+   *   2. 分档里出现了 `vision`。
+   *
+   * ⚠️ 必须先把「用窗口信息辅助判断」关掉：验收本身是从终端跑起来的，
+   * 不关的话"前台是终端 → 固定结论"会命中，压根不会调模型。
+   */
+  const usageHttp = require('node:http');
+  const usageRequests = [];
+  const usageServer = usageHttp.createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      let parsed = {};
+      try { parsed = JSON.parse(body); } catch (error) { parsed = {}; }
+      usageRequests.push(parsed);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'usage-stub',
+        model: 'stub-model',
+        choices: [{
+          index: 0,
+          finish_reason: 'stop',
+          message: {
+            role: 'assistant',
+            content: '{"scene":"coding","app":"Code","activity":"写代码","focus":"deep","sensitive":false,"summary":"在编辑器里写代码","suggestion":"","url":""}',
+          },
+        }],
+        usage: { prompt_tokens: 900, completion_tokens: 30, total_tokens: 930 },
+      }));
+    });
+  });
+  await new Promise((resolve) => usageServer.listen(0, '127.0.0.1', resolve));
+  const usagePort = usageServer.address().port;
+
+  const usageRun = await run(`(async () => {
+    const ai = window.petAPI.ai;
+    const perception = window.petAPI.perception;
+    await perception.setSettings({ windowContext: false });
+    await ai.setSettings({
+      enabled: true, chat: true,
+      provider: { kind: 'openai', baseUrl: 'http://127.0.0.1:${usagePort}/v1', model: 'stub-model', apiKey: 'sk-acceptance-usage-0001', timeoutMs: 8000 },
+    });
+    const before = await ai.status();
+    const sample = await perception.sampleNow();
+    const after = await ai.status();
+    // 前台进程名（与视觉路径用的是同一个来源）—— 用来核对应用**身份**
+    const foreground = (await perception.status()).windowContext.foregroundProcess;
+    await ai.setSettings({ clearApiKey: true });
+    await perception.setSettings({ windowContext: true });
+    return {
+      beforeSession: before.sessionTokens,
+      afterSession: after.sessionTokens,
+      usage: after.sessionUsage,
+      scene: sample.lastObservation ? sample.lastObservation.scene : '',
+      mode: sample.lastObservation ? sample.lastObservation.mode : '',
+      app: sample.lastObservation ? sample.lastObservation.app : '',
+      appLabel: sample.lastObservation ? (sample.lastObservation.appLabel ?? '') : '',
+      foreground,
+    };
+  })()`);
+  await new Promise((resolve) => usageServer.close(resolve));
+  record(
+    '用量记账：视觉理解（别的模块发的调用）也进"本次运行"的账，并按用途分档',
+    usageRun.afterSession - usageRun.beforeSession >= 930 &&
+      usageRun.usage.some((item) => item.purpose === 'vision' && item.tokens >= 930) &&
+      // 场景具体是什么取决于跑验收时前台是哪个窗口（会被窗口证据纠正），只要求"认出来了"
+      usageRun.scene !== '' &&
+      usageRun.scene !== 'other' &&
+      usageRun.mode === 'llm',
+    JSON.stringify({ ...usageRun, stubCalls: usageRequests.length }),
+  );
+  /*
+   * 模型说"Code"，但真实身份必须是**进程名** —— 否则同一个程序会被读成好几种名字
+   * （实测：一个游戏被读成 PVZ / Plants Vs. Zombies / 植物大战僵尸 三种写法），
+   * 时间线被切碎、"主要程序"列成好几行。
+   */
+  record(
+    '感知：应用**身份**用进程名（模型给的名字只作 appLabel 显示）',
+    usageRun.app !== '' &&
+      usageRun.app === usageRun.foreground &&
+      usageRun.foreground !== 'Code' &&
+      usageRun.appLabel === 'Code',
+    JSON.stringify({ app: usageRun.app, appLabel: usageRun.appLabel, foreground: usageRun.foreground }),
+  );
+
+  /*
+   * 模型复核闸门（用户实测后定的省 token 策略）：
+   * 换了应用立刻调模型，否则最多每 `modelRefreshMs` 调一次；
+   * 中间的采样**沿用上一次的判断**，但照样记一条观察 —— 时间线因此不再断。
+   *
+   * 这条用一个假网关数调用次数：
+   *   连续三次手动采样（同一个窗口、未到复核间隔）→ 只应该调 **1 次**模型，
+   *   第 2、3 次是复用的观察（`mode: 'local'`、`tokens: 0`、场景与上一次相同），
+   *   而习惯样本数要涨 3（证明"没花 token 也照样在记"）。
+   */
+  const gateHttp = require('node:http');
+  const gateRequests = [];
+  const gateServer = gateHttp.createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      let parsed = {};
+      try { parsed = JSON.parse(body); } catch (error) { parsed = {}; }
+      gateRequests.push(parsed);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'gate-stub',
+        model: 'stub-model',
+        choices: [{
+          index: 0,
+          finish_reason: 'stop',
+          message: {
+            role: 'assistant',
+            content: '{"scene":"coding","app":"Code","activity":"写代码","focus":"deep","sensitive":false,"summary":"在编辑器里写代码","suggestion":"","url":""}',
+          },
+        }],
+        usage: { prompt_tokens: 900, completion_tokens: 30, total_tokens: 930 },
+      }));
+    });
+  });
+  await new Promise((resolve) => gateServer.listen(0, '127.0.0.1', resolve));
+  const gatePort = gateServer.address().port;
+
+  /*
+   * 第一步：**先保证"刚刚有过一次模型判断"**。
+   *
+   * 为什么要有这一步：闸门比的是"距上次模型调用多久"，而上一条用例（用量记账）
+   * 刚刚调过一次模型 —— 如果直接进第二步，`now - lastModelAt` 本来就在阈值内，
+   * 于是"一次都没调"也能通过，断言就失去意义了（第一版就是这么写的，实测拿到
+   * `stubCalls: 0` 才发现）。这一步不断言，只把状态摆正。
+   */
+  const gateSetup = await run(`(async () => {
+    const ai = window.petAPI.ai;
+    const perception = window.petAPI.perception;
+    // 关掉窗口上下文：这样"前台进程"恒为空 → 后面的采样之间不可能出现"换了应用"
+    await perception.setSettings({ windowContext: false, modelRefreshMs: 30000 });
+    await ai.setSettings({
+      enabled: true, chat: true,
+      provider: { kind: 'openai', baseUrl: 'http://127.0.0.1:${gatePort}/v1', model: 'stub-model', apiKey: 'sk-acceptance-gate-0001', timeoutMs: 8000 },
+    });
+    const status = await perception.sampleNow();
+    return {
+      scene: status.lastObservation ? status.lastObservation.scene : '',
+      mode: status.lastObservation ? status.lastObservation.mode : '',
+      samples: status.habits.samples,
+    };
+  })()`);
+  const gateCallsAfterSetup = gateRequests.length;
+
+  const gateRun = await run(`(async () => {
+    const ai = window.petAPI.ai;
+    const perception = window.petAPI.perception;
+    // 复核间隔拉到 10 分钟：窗口没变 → 这三次都该沿用上一次的判断
+    await perception.setSettings({ modelRefreshMs: 600000 });
+    const before = await ai.status();
+    const beforeStatus = await perception.status();
+    const first = await perception.sampleNow();
+    const second = await perception.sampleNow();
+    const third = await perception.sampleNow();
+    const after = await ai.status();
+    await ai.setSettings({ clearApiKey: true });
+    await perception.setSettings({ windowContext: true, modelRefreshMs: 300000 });
+    const pick = (status) => ({
+      mode: status.lastObservation ? status.lastObservation.mode : '',
+      scene: status.lastObservation ? status.lastObservation.scene : '',
+      tokens: status.lastObservation ? status.lastObservation.tokens : -1,
+      at: status.lastObservation ? status.lastObservation.at : '',
+    });
+    return {
+      first: pick(first),
+      second: pick(second),
+      third: pick(third),
+      samplesBefore: beforeStatus.habits.samples,
+      samplesAfter: third.habits.samples,
+      tokensUsed: after.sessionTokens - before.sessionTokens,
+    };
+  })()`);
+  await new Promise((resolve) => gateServer.close(resolve));
+  record(
+    '感知：窗口没变就不重复调模型（复核间隔内 0 次调用，其余沿用上一次判断但照样记观察）',
+    // 三次手动采样**一次都没调模型**（与 setup 之后的计数一致）
+    gateRequests.length === gateCallsAfterSetup &&
+    gateRun.first.mode === 'local' &&
+    gateRun.second.mode === 'local' &&
+    gateRun.third.mode === 'local' &&
+    // 沿用上一次的判断：场景与 setup 那次一致（**具体是什么场景取决于跑验收时的真实屏幕**，
+    // 所以只要求"三次都一样且不为空"，不写死某个场景），token 记 0（一眼看出这条没花钱）
+    gateRun.second.scene === gateSetup.scene &&
+    gateRun.second.scene !== '' &&
+    gateRun.first.scene === gateRun.second.scene &&
+    gateRun.third.scene === gateRun.second.scene &&
+    gateRun.second.tokens === 0 &&
+    // 没花 token 也照样在记：习惯样本 +3（时间线/习惯不会因为省钱而断）
+    gateRun.samplesAfter === gateRun.samplesBefore + 3 &&
+    gateRun.tokensUsed === 0,
+    JSON.stringify({ ...gateRun, setup: gateSetup, stubCalls: gateRequests.length, callsAfterSetup: gateCallsAfterSetup }),
   );
 
   /* ------------------ 成长、记忆与反思（4.1 / 4.2） ------------------ */
@@ -5173,6 +8755,56 @@ app.whenReady().then(async () => {
   await run(`(async () => { await window.petAPI.growth.setSettings({ palace: true, reflection: true, policyAdapt: true }); return true; })()`);
 
   /*
+   * 收尾：把验收自己装进来的两个探针插件**卸载干净**（连同 build/ 下的源目录）。
+   *
+   * 这一步本身就是一条覆盖：卸载 -> 目录消失 -> 清单回到空 -> 渲染层不再有记录。
+   * 放在最后是因为托盘菜单与聊天窗口的用例还要用到它们（插件子菜单、面板页签）。
+   */
+  const fixtureCleanup = await run(`(async () => {
+    const click = await window.petAPI.plugins.uninstall('${clickProbeId}');
+    const plain = await window.petAPI.plugins.uninstall('${plainProbeId}');
+    await new Promise((r) => setTimeout(r, 800));
+    const records = window.petDebug.plugins.getLoadedPlugins();
+    return {
+      click: { ok: click.ok, error: click.error || null },
+      plain: { ok: plain.ok, error: plain.error || null },
+      // 渲染层里还留着验收期间用 host.activate 造的合成插件（boom / timer-probe 之类），
+      // 所以这里查的是"两个探针还在不在"（随包的待办插件仍然应当在）
+      hasClick: records.some((r) => r.id === '${clickProbeId}'),
+      hasPlain: records.some((r) => r.id === '${plainProbeId}'),
+      hasTodo: records.some((r) => r.id === 'todo-plugin'),
+      list: (await window.petAPI.plugins.list()).length,
+    };
+  })()`);
+  const manifestPluginsLeft = (() => {
+    try {
+      const parsed = JSON.parse(readFileSync(join(root, 'assets', 'config', 'plugins.json'), 'utf8'));
+      return (parsed.plugins || []).length;
+    } catch (error) {
+      return -1;
+    }
+  })();
+  record(
+    '收尾：验收装的探针插件被卸干净（目录 / 清单 / 渲染层三处都不剩），随包的待办插件还在',
+    fixtureCleanup.click.ok === true &&
+      fixtureCleanup.plain.ok === true &&
+      !existsSync(join(root, 'plugins', clickProbeId)) &&
+      !existsSync(join(root, 'plugins', plainProbeId)) &&
+      fixtureCleanup.hasClick === false &&
+      fixtureCleanup.hasPlain === false &&
+      fixtureCleanup.list === 1 &&
+      fixtureCleanup.hasTodo === true &&
+      manifestPluginsLeft === 1,
+    JSON.stringify({ cleanup: fixtureCleanup, manifestLeft: manifestPluginsLeft }),
+  );
+  try {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+    rmSync(join(root, 'plugins', '_acceptance-nested'), { recursive: true, force: true });
+  } catch (error) {
+    console.error('CLEANUP_FAILED', error);
+  }
+
+  /*
    * 尺寸用例会把 settings.json 改成 100%（并触发一次真实写盘）——
    * 这正是"设置会持久化"的证据，但不能让验收污染用户配置：
    * 这里把验收开始前读到的值写回去，保证跑完验收后桌宠大小不变。
@@ -5213,7 +8845,12 @@ app.whenReady().then(async () => {
   finish({ fatal: String((error && error.stack) || error) });
 });
 
+/*
+ * 全局超时：整套验收是**顺序执行**的端到端流程（真开窗口、真等动画、真写盘），
+ * 用例只会越加越多，所以这个值要留够余量 —— 太紧的结果不是"发现问题"，
+ * 而是"跑到一半被掐断、后半段一条都没跑"（fatal: ACCEPTANCE_TIMEOUT）。
+ */
 setTimeout(() => {
   finish({ fatal: 'ACCEPTANCE_TIMEOUT' });
-}, 240000);
+}, 420000);
 

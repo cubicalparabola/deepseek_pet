@@ -15,6 +15,11 @@ import {
   type LogPayload,
   type PetBootstrap,
   type PluginCodePayload,
+  type PluginEnabledPayload,
+  type PluginPanelActionPayload,
+  type PluginTimerPayload,
+  type PluginTimerTickPayload,
+  type PluginUIContributionPayload,
   type RuntimeInfo,
   type StateChangedPayload,
   type TrayStatePayload,
@@ -33,6 +38,7 @@ import type {
   InteractionKind,
   MemorySnapshot,
 } from '../shared/ai-types';
+import type { NoteBox, NoteFileEntry, NotePreview } from '../shared/notes';
 import type {
   PerceptionLogItem,
   PerceptionSettingsPatch,
@@ -48,8 +54,22 @@ import type {
 } from '../shared/growth-types';
 import type { PetAction } from '../shared/action-types';
 import type { PetDisplayState } from '../shared/behavior-config';
-import type { DiscoveredPlugin, PluginRecord } from '../shared/plugin-types';
-import type { Logger } from '../shared/logger';
+import type {
+  DiscoveredPlugin,
+  PluginInstallResult,
+  PluginMailRequest,
+  PluginMailResult,
+  PluginNetRequest,
+  PluginNetResponse,
+  PluginNotificationRequest,
+  PluginPanelView,
+  PluginProcessRequest,
+  PluginProcessResult,
+  PluginPythonInfo,
+  PluginPythonRequest,
+  PluginRecord,
+  PluginUIEvent,
+} from '../shared/plugin-types';import type { Logger } from '../shared/logger';
 import { IpcError, describeError, serializeError } from '../shared/errors';
 
 export interface IpcManagerDependencies {
@@ -67,7 +87,7 @@ export interface IpcManagerDependencies {
   hideWindow(): void;
   setAlwaysOnTop(value: boolean): void;
   setIgnoreMouseEvents(ignore: boolean, forward: boolean): void;
-  showContextMenu(context: { region?: string; animationId?: string | null }): void;
+  showContextMenu(): void;
   updateTrayState(state: TrayStatePayload): void;
   /** 当前尺寸 + 设置快照。 */
   getSettingsState(): PetSettingsState;
@@ -90,6 +110,12 @@ export interface IpcManagerDependencies {
   /** 设置窗口专用：应用尺寸并把最新状态推回设置窗口。 */
   setScaleFromSettingsWindow(scale: number): PetSettingsState;
   setAlwaysOnTopFromSettingsWindow(value: boolean): PetSettingsState;
+  /** 设置窗口专用：拖到边缘是否自动收起。 */
+  setDockOnEdgeFromSettingsWindow(value: boolean): PetSettingsState;
+  /** 设置窗口专用：重载插件，返回发现到的插件个数。 */
+  reloadPluginsFromSettingsWindow(): number;
+  /** 聊天窗口要一份当前的插件面板快照。 */
+  listPluginPanels(): readonly PluginPanelView[];
   openConfigFolder(): boolean;
   closeSettingsWindow(): boolean;
   /** 打开设置窗口（托盘菜单与 renderer 共用）。 */
@@ -98,6 +124,39 @@ export interface IpcManagerDependencies {
   fetchPluginCode(id: string): Promise<PluginCodePayload | null>;
   reloadPlugin(id: string): Promise<PluginCodePayload | null>;
   listPlugins(): readonly PluginRecord[];
+  /**
+   * 运行期启停一个插件（写盘 + 重新发现），返回启停后的清单。
+   *
+   * 这是"插件可随时关闭"的唯一入口：设置窗口、托盘菜单、桌宠窗口都调它。
+   */
+  setPluginEnabled(id: string, enabled: boolean): readonly PluginRecord[];
+  /** 设置窗口专用：与 `setPluginEnabled` 同源（会顺手把清单推回设置窗口）。 */
+  setPluginEnabledFromSettingsWindow(id: string, enabled: boolean): readonly PluginRecord[];
+  /**
+   * 安装插件（`directory` 省略时主进程弹目录选择框）。
+   *
+   * 校验、复制、登记全在主进程：渲染层给不了路径也读不了磁盘，
+   * 只有"用户亲手在原生对话框里挑的那个文件夹"能被安装。
+   */
+  installPlugin(directory?: string): PluginInstallResult;
+  /** 卸载插件：停用 -> 删目录 -> 从清单移除。 */
+  uninstallPlugin(id: string): PluginInstallResult;
+  /** 插件运行期能力（权限执法在 Main，见 plugin-runtime.ts）。 */
+  pluginNet: (pluginId: string, request: PluginNetRequest) => Promise<PluginNetResponse>;
+  pluginProcess: (pluginId: string, request: PluginProcessRequest) => Promise<PluginProcessResult>;
+  pluginWhich: (pluginId: string, command: string) => Promise<string | null>;
+  pluginPythonInfo: (pluginId: string) => Promise<PluginPythonInfo>;
+  pluginPythonRun: (pluginId: string, request: PluginPythonRequest) => Promise<PluginProcessResult>;
+  pluginNotify: (pluginId: string, request: PluginNotificationRequest) => boolean;
+  /** 往「交互」收件箱投递消息与文件（权限 `mail`）。 */
+  pluginMail: (pluginId: string, request: PluginMailRequest) => PluginMailResult;
+  pluginOpenExternal: (pluginId: string, url: string) => Promise<boolean>;
+  pluginStartTimer: (payload: PluginTimerPayload) => boolean;
+  pluginCancelTimer: (pluginId: string, timerId: string) => boolean;
+  pluginSetUIContribution: (payload: PluginUIContributionPayload) => void;
+  pluginPanelAction: (payload: PluginPanelActionPayload) => boolean;
+  /** 打开聊天窗口并切到某个插件的面板。 */
+  openPluginPanel: (pluginId: string, panelId: string) => boolean;
   onRendererLog(payload: LogPayload): void;
   onAnimationChanged(payload: AnimationChangedPayload): void;
   onStateChanged(payload: StateChangedPayload): void;
@@ -116,6 +175,8 @@ export interface IpcManagerDependencies {
   aiHistory(): readonly ChatTurn[];
   aiMemory(): MemorySnapshot;
   aiClearMemory(): MemorySnapshot;
+  /** 立刻按保留期清理一次记忆明细流水（调试/验收）。 */
+  aiPruneMemory(): { readonly days: number; readonly logSections: number };
   aiOpenMemoryLog(): boolean;
   aiDiary(): DiarySnapshot;
   aiDiaryGet(date: string): DiaryEntry | null;
@@ -125,8 +186,31 @@ export interface IpcManagerDependencies {
   /** 立刻查一次余额并返回最新状态。 */
   aiRefreshBalance(): Promise<AIStatusView>;
   aiInteraction(kind: InteractionKind): void;
+  /** 互动动画播完后结算心情（真正加 mood 的那一步）。 */
+  aiInteractionSettled(kind: InteractionKind): void;
   aiResetEmotion(): AIStatusView;
   aiSetPresence(presence: 'visible' | 'collapsed' | 'hidden'): AIStatusView;
+
+  /* --------------------- 小纸条（她的收纳夹） --------------------- */
+  aiNotes(): NoteBox;
+  aiNoteCompose(): Promise<NoteBox>;
+  aiNoteRead(): NoteBox;
+  /** 删掉一条纸条（只删记录，不删文件）。 */
+  aiNoteDelete(id: string): NoteBox;
+  aiNoteClear(): NoteBox;
+  /** 打开某条纸条附带的文件（只接受纸条 id + 附件序号）。 */
+  aiNoteOpenFile(id: string, fileIndex?: number): boolean;
+  aiNoteOpenDir(): boolean;
+  /** 收纳夹里的文件清单。 */
+  aiNoteFiles(): readonly NoteFileEntry[];
+  /** 读一个文件的内容给界面看（只接受文件名）。 */
+  aiNoteFilePreview(name: string): NotePreview;
+  /** 用系统默认程序打开收纳夹里的文件（只接受文件名）。 */
+  aiNoteFileOpen(name: string): boolean;
+  /** 删掉收纳夹里的文件（只接受文件名）。 */
+  aiNoteFileDelete(name: string): { readonly ok: boolean; readonly reason?: string };
+  /** 弹文件选择框把文件收进收纳夹；null = 用户取消。 */
+  aiNoteFileImport(): Promise<NoteBox | null>;
 
   /* --------------------- 环境与用户感知（3.1~3.6） --------------------- */
   getPerceptionStatus(): PerceptionStatus;
@@ -135,6 +219,8 @@ export interface IpcManagerDependencies {
   perceptionView(mode: PerceptionViewMode): Promise<PerceptionViewResult>;
   perceptionAuthorizeCamera(authorized: boolean): PerceptionStatus;
   perceptionClearData(): PerceptionStatus;
+  /** 立刻做一次习惯建模（会调用大模型；返回最新状态）。 */
+  perceptionModelHabits(): Promise<PerceptionStatus>;
   perceptionOpenLog(): boolean;
   perceptionSampleNow(): Promise<PerceptionStatus>;
   /** 读某天的时间线（不传 = 今天）。 */
@@ -282,7 +368,7 @@ export class IpcManager {
     /*
      * 这几个通道只被 `src/settings/` 那个普通窗口调用。
      * 桌宠窗口的 preload 同样能 invoke 它们，但桌宠页面本身不需要、也不会调用；
-     * 真正的隔离来自"方法面"：设置窗口的 preload 只暴露这 4 个方法。
+     * 真正的隔离来自"方法面"：设置窗口的 preload 只暴露这几个方法。
      */
     this.handle(IpcChannels.SettingsWindowShow, () => this.deps.showSettingsWindow());
     this.handle(IpcChannels.SettingsWindowSetScale, (_event, scale) => {
@@ -297,16 +383,20 @@ export class IpcManager {
     this.handle(IpcChannels.SettingsWindowSetAlwaysOnTop, (_event, value) =>
       this.deps.setAlwaysOnTopFromSettingsWindow(asBoolean(value, true)),
     );
+    this.handle(IpcChannels.SettingsWindowSetDockOnEdge, (_event, value) =>
+      this.deps.setDockOnEdgeFromSettingsWindow(asBoolean(value, true)),
+    );
+    this.handle(IpcChannels.SettingsWindowReloadPlugins, () => this.deps.reloadPluginsFromSettingsWindow());
+    this.handle(IpcChannels.ChatWindowPanelsGet, () => this.deps.listPluginPanels());
     this.handle(IpcChannels.SettingsWindowOpenConfig, () => this.deps.openConfigFolder());
     this.handle(IpcChannels.SettingsWindowClose, () => this.deps.closeSettingsWindow());
 
-    this.handle(IpcChannels.ContextMenuShow, (_event, payload) => {
-      const record = asRecord(payload) ?? {};
-      const animationId = record.animationId;
-      this.deps.showContextMenu({
-        region: asString(record.region, 'body'),
-        animationId: typeof animationId === 'string' ? animationId : null,
-      });
+    /*
+     * 右键菜单：不再需要 renderer 上报"点击区域 / 当前动画"
+     * （菜单里那两行信息已按需求删掉），所以这里也不解析 payload。
+     */
+    this.handle(IpcChannels.ContextMenuShow, () => {
+      this.deps.showContextMenu();
       return true;
     });
     this.handle(IpcChannels.TrayStateSelect, (_event, payload) => {
@@ -402,6 +492,7 @@ export class IpcManager {
     this.handle(IpcChannels.AIChatHistory, () => this.deps.aiHistory());
     this.handle(IpcChannels.AIMemoryGet, () => this.deps.aiMemory());
     this.handle(IpcChannels.AIMemoryClear, () => this.deps.aiClearMemory());
+    this.handle(IpcChannels.AIMemoryPrune, () => this.deps.aiPruneMemory());
     this.handle(IpcChannels.AIMemoryOpenLog, () => this.deps.aiOpenMemoryLog());
     this.handle(IpcChannels.AIDiaryList, () => this.deps.aiDiary());
     this.handle(IpcChannels.AIDiaryGet, (_event, date) => this.deps.aiDiaryGet(asString(date)));
@@ -409,11 +500,46 @@ export class IpcManager {
     this.handle(IpcChannels.AIDiaryOpenDir, () => this.deps.aiOpenDiaryDir());
     this.handle(IpcChannels.AITestConnection, async () => this.deps.aiTest());
     this.handle(IpcChannels.AIBalanceRefresh, async () => this.deps.aiRefreshBalance());
+    /*
+     * 小纸条（她的收纳夹）。写操作返回**最新快照**，窗口直接用它刷新。
+     * 注意**没有"写纸条"**：用户不能留言（需求），只能查看与打开文件。
+     */
+    this.handle(IpcChannels.AINoteList, () => this.deps.aiNotes());
+    this.handle(IpcChannels.AINoteCompose, async () => this.deps.aiNoteCompose());
+    this.handle(IpcChannels.AINoteRead, () => this.deps.aiNoteRead());
+    this.handle(IpcChannels.AINoteDelete, (_event, id) => this.deps.aiNoteDelete(asString(id)));
+    this.handle(IpcChannels.AINoteClear, () => this.deps.aiNoteClear());
+    this.handle(IpcChannels.AINoteOpenFile, (_event, payload) => {
+      // 兼容两种调用：老的是裸 id，新的是 { id, fileIndex }（一条消息可以有多个附件）
+      const record = asRecord(payload);
+      if (record) {
+        return this.deps.aiNoteOpenFile(
+          asString(record.id),
+          typeof record.fileIndex === 'number' ? record.fileIndex : undefined,
+        );
+      }
+      return this.deps.aiNoteOpenFile(asString(payload));
+    });
+    this.handle(IpcChannels.AINoteOpenDir, () => this.deps.aiNoteOpenDir());
+    this.handle(IpcChannels.AINoteFiles, () => this.deps.aiNoteFiles());
+    this.handle(IpcChannels.AINoteFilePreview, (_event, name) => this.deps.aiNoteFilePreview(asString(name)));
+    this.handle(IpcChannels.AINoteFileOpen, (_event, name) => this.deps.aiNoteFileOpen(asString(name)));
+    this.handle(IpcChannels.AINoteFileDelete, (_event, name) => this.deps.aiNoteFileDelete(asString(name)));
+    this.handle(IpcChannels.AINoteFileImport, async () => this.deps.aiNoteFileImport());
     this.handle(IpcChannels.AIInteraction, (_event, kind) => {
-      const allowed: readonly InteractionKind[] = ['click', 'doubleclick', 'drag', 'chat', 'diary', 'gift'];
-      const value = asString(kind, 'click') as InteractionKind;
-      if (!allowed.includes(value)) return false;
+      const value = this.readInteractionKind(kind);
+      if (value === null) return false;
       this.deps.aiInteraction(value);
+      return true;
+    });
+    /*
+     * 互动动画播完 -> 才加心情（需求：互动动画播放结束才能加 mood 值）。
+     * 校验与 `AIInteraction` 完全一致，避免两个入口对"合法 kind"的口径分叉。
+     */
+    this.handle(IpcChannels.AIInteractionSettled, (_event, kind) => {
+      const value = this.readInteractionKind(kind);
+      if (value === null) return false;
+      this.deps.aiInteractionSettled(value);
       return true;
     });
     this.handle(IpcChannels.AIResetEmotion, () => this.deps.aiResetEmotion());
@@ -462,6 +588,7 @@ export class IpcManager {
       this.deps.perceptionAuthorizeCamera(asBoolean(authorized, false)),
     );
     this.handle(IpcChannels.PerceptionClearData, () => this.deps.perceptionClearData());
+    this.handle(IpcChannels.PerceptionModelHabits, async () => this.deps.perceptionModelHabits());
     this.handle(IpcChannels.PerceptionOpenLog, () => this.deps.perceptionOpenLog());
     this.handle(IpcChannels.PerceptionSampleNow, async () => this.deps.perceptionSampleNow());
     this.handle(IpcChannels.PerceptionTimelineGet, async (_event, date) => {
@@ -550,7 +677,128 @@ export class IpcManager {
       return true;
     });
 
+    /*
+     * 运行期启停（"插件可随时关闭"）。
+     *
+     * 三条入口（桌宠窗口 / 设置窗口 / 托盘菜单）都落到 `deps.setPluginEnabled`，
+     * 因此不存在"某个入口忘了回收插件资源"这种分叉。
+     */
+    this.handle(IpcChannels.PluginSetEnabled, (_event, payload) => {
+      const record = asRecord(payload);
+      if (!record) throw new IpcError('plugin toggle payload must be an object', {
+        code: 'IPC_HANDLER_FAILED',
+        module: 'IpcManager',
+      });
+      return this.deps.setPluginEnabled(asString(record.id), asBoolean(record.enabled, true));
+    });
+    this.handle(IpcChannels.SettingsWindowSetPluginEnabled, (_event, payload) => {
+      const record = asRecord(payload);
+      if (!record) throw new IpcError('plugin toggle payload must be an object', {
+        code: 'IPC_HANDLER_FAILED',
+        module: 'IpcManager',
+      });
+      return this.deps.setPluginEnabledFromSettingsWindow(asString(record.id), asBoolean(record.enabled, true));
+    });
+    this.handle(IpcChannels.PluginInstall, (_event, payload) => {
+      const record = asRecord(payload) ?? {};
+      const directory = typeof record.directory === 'string' && record.directory.trim() !== ''
+        ? record.directory
+        : undefined;
+      return this.deps.installPlugin(directory);
+    });
+    this.handle(IpcChannels.PluginUninstall, (_event, payload) => {
+      const record = asRecord(payload) ?? {};
+      return this.deps.uninstallPlugin(asString(record.id));
+    });
+
+    /*
+     * 插件运行期能力：IPC 层只做参数形状校验，**权限执法在 plugin-runtime**。
+     * 校验放在这里是为了"插件传来一个 undefined 也不要让主进程抛"。
+     */
+    this.handle(IpcChannels.PluginNet, async (_event, payload) => {
+      const record = asRecord(payload) ?? {};
+      const pluginId = asString(record.pluginId);
+      const request = (asRecord(record.request) ?? {}) as unknown as PluginNetRequest;
+      return this.deps.pluginNet(pluginId, request);
+    });
+    this.handle(IpcChannels.PluginProcess, async (_event, payload) => {
+      const record = asRecord(payload) ?? {};
+      const pluginId = asString(record.pluginId);
+      const request = (asRecord(record.request) ?? {}) as unknown as PluginProcessRequest;
+      if (asString(record.action) === 'which') {
+        return this.deps.pluginWhich(pluginId, asString(request.command));
+      }
+      return this.deps.pluginProcess(pluginId, request);
+    });
+    this.handle(IpcChannels.PluginPython, async (_event, payload) => {
+      const record = asRecord(payload) ?? {};
+      const pluginId = asString(record.pluginId);
+      const action = asString(record.action, 'info');
+      if (action === 'run') {
+        const request = (asRecord(record.request) ?? {}) as unknown as PluginPythonRequest;
+        return this.deps.pluginPythonRun(pluginId, request);
+      }
+      return this.deps.pluginPythonInfo(pluginId);
+    });
+    this.handle(IpcChannels.PluginNotify, (_event, payload) => {
+      const record = asRecord(payload) ?? {};
+      const request = (asRecord(record.request) ?? {}) as unknown as PluginNotificationRequest;
+      return this.deps.pluginNotify(asString(record.pluginId), request);
+    });
+    this.handle(IpcChannels.PluginMailSend, (_event, payload) => {
+      const record = asRecord(payload) ?? {};
+      const request = (asRecord(record.request) ?? {}) as unknown as PluginMailRequest;
+      return this.deps.pluginMail(asString(record.pluginId), request);
+    });
+    this.handle(IpcChannels.PluginOpenExternal, async (_event, payload) => {
+      const record = asRecord(payload) ?? {};
+      return this.deps.pluginOpenExternal(asString(record.pluginId), asString(record.url));
+    });
+    this.handle(IpcChannels.PluginTimer, (_event, payload) => {
+      const record = asRecord(payload) ?? {};
+      const pluginId = asString(record.pluginId);
+      const timerId = asString(record.timerId);
+      if (asString(record.action, 'start') === 'cancel') {
+        return this.deps.pluginCancelTimer(pluginId, timerId);
+      }
+      return this.deps.pluginStartTimer({
+        pluginId,
+        timerId,
+        kind: asString(record.kind, 'after') === 'every' ? 'every' : 'after',
+        intervalMs: typeof record.intervalMs === 'number' ? record.intervalMs : 0,
+      });
+    });
+    this.handle(IpcChannels.PluginUIContribute, (_event, payload) => {
+      const record = asRecord(payload);
+      if (!record) return false;
+      this.deps.pluginSetUIContribution(record as unknown as PluginUIContributionPayload);
+      return true;
+    });
+    this.handle(IpcChannels.PluginPanelAction, (_event, payload) => {
+      const record = asRecord(payload);
+      if (!record) return false;
+      return this.deps.pluginPanelAction(record as unknown as PluginPanelActionPayload);
+    });
+    this.handle(IpcChannels.PluginOpenPanel, (_event, payload) => {
+      const record = asRecord(payload) ?? {};
+      return this.deps.openPluginPanel(asString(record.pluginId), asString(record.panelId));
+    });
+
     this.logger.info('ipc channels registered');
+  }
+
+  /**
+   * 校验 Renderer 报上来的互动类型。
+   *
+   * 两条互动通道（`AIInteraction` / `AIInteractionSettled`）共用它：
+   * 口径分叉过一次就会变成"上报记了、结算没记"这类很难查的偏差。
+   *
+   * @returns 合法的 kind；非法时返回 null（调用方直接回 false，不落地任何副作用）
+   */
+  private readInteractionKind(kind: unknown): InteractionKind | null {
+    const allowed: readonly InteractionKind[] = ['click', 'doubleclick', 'drag', 'chat', 'diary', 'gift'];
+    const value = asString(kind, 'click') as InteractionKind;
+    return allowed.includes(value) ? value : null;
   }
 
   /** 统一包装：类型校验失败 / 业务异常都转成结构化错误返回给 Renderer。 */
@@ -589,8 +837,52 @@ export class IpcManager {
     this.broadcast(IpcChannels.CommandSetBehaviorPaused, paused);
   }
 
+  /**
+   * 把 AI 状态（情绪 / 预算）推给**桌宠窗口**。
+   *
+   * 与设置窗口/聊天窗口各自的那条推送分开：那两个窗口是"给人看的"，
+   * 桌宠窗口要它是因为**行为**依赖情绪 —— 需求"心情低于阈值时随机池全变 sad"
+   * 的判定发生在渲染层的 BehaviorManager 里，它需要一个心情读数
+   * （见 Renderer.wireMoodMirror）。状态变化本来就不频繁（心跳/互动/聊天），
+   * 这里只推给它自己的窗口，不会放大成广播风暴。
+   */
+  public pushAIStatusToPet(status: AIStatusView): void {
+    this.broadcast(IpcChannels.CommandAIStatus, status);
+  }
+
   public requestPluginReload(): void {
     this.broadcast(IpcChannels.CommandReloadPlugins, {});
+  }
+
+  /**
+   * 通知桌宠渲染层：某个插件被启用/停用。
+   *
+   * 为什么不是"整体重载"：用户点一下开关，不该让**所有**插件重新 activate 一遍
+   * （那会让别的插件丢状态、重新请求网络）。这里只动目标插件：
+   * 启用时把它的静态信息捎过去让渲染层取代码并 activate，停用时渲染层回收。
+   */
+  public notifyPluginEnabled(payload: PluginEnabledPayload): void {
+    this.broadcast(IpcChannels.CommandPluginEnabled, payload);
+  }
+
+  /** 通知桌宠渲染层：插件界面事件（菜单点击 / 通知点击 / 面板动作）。 */
+  public notifyPluginUIEvent(event: PluginUIEvent): void {
+    this.broadcast(IpcChannels.CommandPluginUIEvent, event);
+  }
+
+  /** 通知桌宠渲染层：插件的定时器到点了（定时器由 Main 持有）。 */
+  public notifyPluginTimer(payload: PluginTimerTickPayload): void {
+    this.broadcast(IpcChannels.CommandPluginTimer, payload);
+  }
+
+  /**
+   * 通知桌宠渲染层：某个插件被**卸载**了。
+   *
+   * 与"停用"不同：卸载之后渲染层要连记录一起忘掉（清单里已经没有它了），
+   * 并清掉它的 localStorage 命名空间（插件自己的数据不该留在别人的机器上）。
+   */
+  public notifyPluginRemoved(id: string): void {
+    this.broadcast(IpcChannels.CommandPluginRemoved, { id });
   }
 
   public setAnimation(animationId: string): void {

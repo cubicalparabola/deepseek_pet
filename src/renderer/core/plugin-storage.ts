@@ -21,7 +21,6 @@ export class PluginStorage implements PluginStorageAPI {
     this.prefix = `${NAMESPACE}:${pluginId}:`;
     this.logger = logger;
   }
-
   public get<T>(key: string, fallback?: T): T | undefined {
     try {
       const raw = window.localStorage.getItem(this.prefix + key);
@@ -61,4 +60,30 @@ export class PluginStorage implements PluginStorageAPI {
     }
     return result;
   }
+}
+
+/**
+ * 清空某个插件的**全部**存储（卸载插件时调用）。
+ *
+ * 为什么卸载要连数据一起清：插件已经从磁盘上删掉了，它的键却永远留在用户
+ * 的 localStorage 里 —— 既占地方，也让人无法回答"卸载干净了没有"。
+ * 返回清掉的键数（写日志用），任何异常都吞掉：卸载不该因为清理失败而失败。
+ */
+export function purgePluginStorage(pluginId: string): number {
+  const prefix = `${NAMESPACE}:${pluginId}:`;
+  let removed = 0;
+  try {
+    const keys: string[] = [];
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const key = window.localStorage.key(index);
+      if (key && key.startsWith(prefix)) keys.push(key);
+    }
+    for (const key of keys) {
+      window.localStorage.removeItem(key);
+      removed += 1;
+    }
+  } catch {
+    // 存储不可用时什么都不做：卸载流程本身不该被它拖住
+  }
+  return removed;
 }

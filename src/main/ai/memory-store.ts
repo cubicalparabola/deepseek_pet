@@ -359,9 +359,92 @@ export class MemoryStore {
       .map((hit) => `[${hit.day.slice(5)}] ${hit.text.slice(0, 120)}`);
   }
 
+  /**
+   * 清掉**超期的明细流水**（保留期由 `AISettings.keepMemoryDays` 决定）。
+   *
+   * 清三样：`events-*.jsonl`、`chat-*.jsonl`（按天整文件删）与 `memory-log.md`
+   * 里对应日期的段落（它是前两者的可读渲染，留着过期的会让文件只增不减）。
+   *
+   * **不清**什么：`profile.json`（长期事实：已经整理过的结论，有 200 条上限）、
+   * `nodes.json` / `palace.md`（记忆宫殿：Curated 数据，另有压缩机制）。
+   * 也就是说这里清的是"原始流水"，那才是真正会无限增长的部分。
+   *
+   * @param keepDays <= 0 = 永久保留（什么都不做）
+   * @returns 删掉的天数与日志段落数（供日志/验收断言）
+   */
+  public pruneOldData(keepDays: number, now: number = Date.now()): { days: number; logSections: number } {
+    if (!Number.isFinite(keepDays) || keepDays <= 0) return { days: 0, logSections: 0 };
+    const cutoff = todayKey(new Date(now - Math.floor(keepDays) * 86400000));
+
+    let days = 0;
+    /*
+     * ⚠️ 用 `filter` 而不是"遇到没超期的就 break"：`availableDays()` 返回的是**倒序**
+     * （新的在前），第一个就是今天 —— 一旦 break，过期的那几天永远轮不到（实测踩过）。
+     */
+    const expired = this.availableDays().filter((day) => day < cutoff);
+    for (const day of expired) {
+      try {
+        rmSync(this.eventsFile(day), { force: true });
+        rmSync(this.chatFile(day), { force: true });
+        days += 1;
+      } catch (error) {
+        this.logger.warn('pruning a memory day failed', { error: describeError(error), data: { day } });
+      }
+    }
+
+    const logSections = this.trimLog(cutoff, now);
+    if (days > 0 || logSections > 0) {
+      this.logger.info('memory detail pruned', { data: { days, logSections, keepDays, cutoff } });
+    }
+    return { days, logSections };
+  }
+
+  /**
+   * 按"日期小节"裁剪记忆日志。
+   *
+   * 格式约定（`appendLog` + `rollDayIfNeeded` 产生）：正文前有一段前言，
+   * 之后每天一个 `## YYYY-MM-DD` 小节；**没有年份的行**（首日、前言）无法可靠判期，
+   * 一律保留 —— 宁可多留一点，也不要把"今天"误删。
+   */
+  private trimLog(cutoff: string, now: number): number {
+    if (!existsSync(this.logFile)) return 0;
+    try {
+      const lines = readFileSync(this.logFile, 'utf8').split('\n');
+      const kept: string[] = [];
+      let dropping = false;
+      let dropped = 0;
+      let currentDate = '';
+      for (const line of lines) {
+        const header = /^##\s+(\d{4}-\d{2}-\d{2})\s*$/.exec(line.trim());
+        if (header?.[1]) {
+          currentDate = header[1];
+          dropping = currentDate < cutoff;
+          if (dropping) dropped += 1;
+          else kept.push(line);
+          continue;
+        }
+        if (dropping) {
+          if (line.trim() !== '') dropped += 1;
+          continue;
+        }
+        kept.push(line);
+      }
+      // 只有真的删掉了东西才回写（避免每次开机都改文件时间）
+      if (currentDate !== '' && dropped > 0) {
+        const head = `- ${stamp(new Date(now))} · 按保留期清理了 ${cutoff} 之前的记忆流水\n`;
+        // 清理记录追加在末尾（它属于"现在"，不属于任何被删小节）
+        const text = `${kept.join('\n').replace(/\s+$/, '')}\n${head}`;
+        writeFileSync(this.logFile, text, 'utf8');
+      }
+      return currentDate === '' ? 0 : dropped;
+    } catch (error) {
+      this.logger.warn('trimming memory log failed', { error: describeError(error) });
+      return 0;
+    }
+  }
+
   /** 某一天的事件（顺序）。日记按天写，需要按日期取数。 */
-  public eventsOn(date: string): MemoryEvent[] {
-    if (date === this.today) {
+  public eventsOn(date: string): MemoryEvent[] {    if (date === this.today) {
       this.rollDayIfNeeded();
       return [...this.todayEvents];
     }

@@ -14,21 +14,13 @@
  * 用法：npx electron tools/diag-bubble.cjs
  * 输出：build/bubble/*.png + build/bubble.json
  */
-const { app, BrowserWindow, Menu } = require('electron');
+const { app, BrowserWindow } = require('electron');
 const { writeFileSync, mkdirSync } = require('node:fs');
 const { join } = require('node:path');
 
 const root = join(__dirname, '..');
 const outDir = join(root, 'build', 'bubble');
 const outFile = join(root, 'build', 'bubble.json');
-
-const built = [];
-const originalBuild = Menu.buildFromTemplate;
-Menu.buildFromTemplate = function patched(template) {
-  const menu = originalBuild.call(this, template);
-  built.push({ template, menu });
-  return menu;
-};
 
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -47,25 +39,32 @@ app.whenReady().then(async () => {
   mkdirSync(outDir, { recursive: true });
   const js = (code) => win.webContents.executeJavaScript(code, true);
 
-  /** 从最近的托盘模板里找到气泡子菜单项并触发它的 click（等价于用户点击）。 */
-  const clickBubbleMenu = async (label) => {
-    const before = built.length;
-    // 触发一次托盘菜单重建
-    await js('(() => { window.petAPI.tray && true; return true; })()');
-    await wait(200);
-    let entry = [...built].reverse().find((e) => e.template?.some((x) => x?.label === '对话气泡（测试）'));
-    if (!entry || built.length === before) {
-      // 强制重建：切换一次置顶状态会刷新托盘
-      await js(`window.petAPI.settings.setAlwaysOnTop(true)`);
-      await wait(400);
-      entry = [...built].reverse().find((e) => e.template?.some((x) => x?.label === '对话气泡（测试）'));
-    }
-    const top = entry?.template?.find((x) => x?.label === '对话气泡（测试）');
-    const item = Array.isArray(top?.submenu) ? top.submenu.find((s) => s.label === label) : null;
-    if (!item?.click) return { found: false, label };
-    item.click();
-    return { found: true, label };
-  };
+  /**
+   * 显示/隐藏气泡。
+   *
+   * 以前是"从托盘模板里找到「对话气泡（测试）」子菜单并点它" ——
+   * 那个子菜单已按需求从菜单里删掉，所以这里直接调**同一条底层 IPC**
+   * （`bubble.set` 就是被删掉的菜单项当时做的事：显示/隐藏气泡）。
+   */
+  const longSample = [
+    '欢迎回来～我是鲸鱼娘。',
+    '',
+    '这是一段用来测试对话气泡的长文本。气泡会随着桌宠的大小一起缩放：把设置里的滚动条拖大或拖小，气泡和文字都会按比例跟着变。',
+    '',
+    '当文字超过一屏时，气泡内部会出现滚动条，可以用鼠标滚轮或拖动滚动条查看后面的内容，文字不会溢出气泡的描边。',
+    '',
+    '下面是一些占位内容，用来把文本撑长：',
+    '一、气泡的尾巴指向桌宠的头顶；',
+    '二、气泡在桌宠上方，窗口会向上扩展，宠物的脚不会移动；',
+    '三、气泡宽度是宠物宽度的 1.25 倍；',
+    '四、文字区避开了气泡底部的尾巴位置。',
+    '',
+    '如果你能看到这一段，说明滚动已经到底了。谢谢测试！',
+  ].join('\n');
+
+  const showBubble = (text) =>
+    js(`window.petAPI.bubble.set({ visible: true, text: ${JSON.stringify(text)}, ready: false }).then(() => true)`);
+  const hideBubble = () => js(`window.petAPI.bubble.set(null).then(() => true)`);
 
   const snap = () =>
     js(`(() => {
@@ -185,12 +184,12 @@ app.whenReady().then(async () => {
   };
 
   // ---------- 0) 基线：无气泡时的宠物屏幕位置 ----------
-  await clickBubbleMenu('隐藏气泡');
+  await hideBubble();
   await wait(900);
   const petBefore = await petScreenRect();
 
   // ---------- 1) 显示长文本气泡 ----------
-  const click1 = await clickBubbleMenu('显示长文（测滚动）');
+  const click1 = await showBubble(longSample);
   await wait(1200);
   const longState = await log('长文本气泡已显示');
   const petWithBubble = await petScreenRect();
@@ -218,11 +217,11 @@ app.whenReady().then(async () => {
   }
 
   // ---------- 4) 短句 + 隐藏 ----------
-  await clickBubbleMenu('显示短句');
+  await showBubble('今天也一起加油吧！');
   await wait(900);
   const shortState = await log('短句气泡');
   const shotShort = await shoot('bubble-short', shortState.bubbleRect);
-  await clickBubbleMenu('隐藏气泡');
+  await hideBubble();
   await wait(900);
   const hiddenState = await log('已隐藏');
   const petAfter = await petScreenRect();
@@ -250,10 +249,10 @@ app.whenReady().then(async () => {
   await setScale(0.6);
   await wait(900);
   const petBaselineAgain = await petScreenRect();
-  await clickBubbleMenu('显示短句');
+  await showBubble('今天也一起加油吧！');
   await wait(900);
   const petShown = await petScreenRect();
-  await clickBubbleMenu('隐藏气泡');
+  await hideBubble();
   await wait(900);
   const petHidden = await petScreenRect();
   const roundTripDelta = {
@@ -264,7 +263,6 @@ app.whenReady().then(async () => {
   };
   const roundTripStable = Object.values(roundTripDelta).every((v) => v <= ANCHOR_TOLERANCE);
 
-  Menu.buildFromTemplate = originalBuild;
   report.summary = {
     clickLong: click1,
     shotLong,

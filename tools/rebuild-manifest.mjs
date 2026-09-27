@@ -2,10 +2,10 @@
 /**
  * 按素材重建 `assets/config/animations.json` 与 `assets/config/behavior.json`。
  *
- * 动画清单（共 27 条动画，39 个 webm）按需求分四类：
+ * 动画清单（共 28 条动画，40 个 webm）按需求分四类：
  *
  *   状态动画 3：idle（正常默认）/ lie（下方收起默认）/ watch（右侧收起默认）
- *   随机动画 10：roll / hot / sleep / peek / bomb / play / shake / sing / spin / swim
+ *   随机动画 11：roll / hot / sleep / peek / bomb / play / play_tail / shake / sing / spin / swim
  *   触发动画 11：catch_down / catch_right / hungry / remind / talk / sad / offline /
  *                shy / overheat / work / read
  *   点击动画 3：cute / fawning / stroke（**不可打断**：必须播完才能再点）
@@ -42,6 +42,7 @@ const ONE_SHOTS = [
   { id: 'roll', label: '翻滚', category: 'random', priority: 45, cooldown: 5000, tags: ['random', 'action'] },
   { id: 'hot', label: '好热', category: 'random', priority: 35, cooldown: 6000, tags: ['random', 'state'] },
   { id: 'play', label: '玩耍', category: 'random', priority: 45, cooldown: 6000, tags: ['random', 'show'] },
+  { id: 'play_tail', label: '玩尾巴', category: 'random', priority: 45, cooldown: 6000, tags: ['random', 'show'] },
   { id: 'shake', label: '甩水', category: 'random', priority: 45, cooldown: 5000, tags: ['random', 'action'] },
   { id: 'sing', label: '唱歌', category: 'random', priority: 30, cooldown: 5000, tags: ['random', 'show'] },
   { id: 'spin', label: '转圈', category: 'random', priority: 45, cooldown: 5000, tags: ['random', 'action'] },
@@ -159,44 +160,41 @@ for (const item of PERSISTENT) {
 writeFileSync(outFile, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
 
 /* -------------------------------------------------------------------------- */
-/* behavior.json：显示状态 -> 默认动画 + 随机池 + 间隔                          */
+/* behavior.json：显示状态 -> 默认动画 + 随机池 / 随机小动作 + 间隔              */
 /* -------------------------------------------------------------------------- */
 
 const behavior = {
   version: 1,
   states: {
     normal: { label: '正常', defaultAnimation: 'idle', pools: ['normal-random'] },
-    'docked-bottom': { label: '下方收起', defaultAnimation: 'sleep', pools: ['docked-bottom-random'] },
-    'docked-right': { label: '右侧收起', defaultAnimation: 'watch', pools: ['docked-right-random'] },
+    /*
+     * 收起状态**没有随机池**：她安静维持默认姿势，只有"随机小动作"会在默认姿势
+     * 循环过程中插一小段（sleep 里插 lie、watch 里插 peek），播完回到同一个默认姿势。
+     */
+    'docked-bottom': {
+      label: '下方收起',
+      defaultAnimation: 'sleep',
+      pools: [],
+      fidget: { animations: ['lie'], intervalMs: [180000, 480000], loopCountRange: [1, 3] },
+    },
+    'docked-right': {
+      label: '右侧收起',
+      defaultAnimation: 'watch',
+      pools: [],
+      fidget: { animations: ['peek'], intervalMs: [180000, 480000], loopCountRange: [1, 2] },
+    },
     hidden: { label: '隐藏', defaultAnimation: null, pools: [] },
   },
   pools: {
     'normal-random': {
       label: '随机小动作',
-      animations: ['roll', 'hot', 'bomb', 'lie', 'play', 'shake', 'sing', 'spin', 'swim'],
+      // lie / peek 不在这里：它们只由收起时的"随机小动作"触发
+      animations: ['roll', 'hot', 'bomb', 'play', 'play_tail', 'shake', 'sing', 'spin', 'swim'],
       intervalMs: [25000, 60000],
       initialDelayMs: 15000,
       cooldownMs: 8000,
       // 池里的三段式成员压成一两轮：趴下歇一会儿就自己爬起来，不是一直趴着
       persistentLoopCountRange: [1, 2],
-      onlyWhenIdle: true,
-    },
-    'docked-bottom-random': {
-      // 下方收起的随机动画是 **lie**（用户要求与 sleep 对调角色）
-      label: '收起时趴一会儿',
-      animations: ['lie'],
-      intervalMs: [180000, 480000],
-      initialDelayMs: 60000,
-      cooldownMs: 30000,
-      persistentLoopCountRange: [1, 2],
-      onlyWhenIdle: true,
-    },
-    'docked-right-random': {
-      label: '收起时偷看',
-      animations: ['peek'],
-      intervalMs: [180000, 480000],
-      initialDelayMs: 60000,
-      cooldownMs: 30000,
       onlyWhenIdle: true,
     },
   },

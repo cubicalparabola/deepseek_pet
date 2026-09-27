@@ -2,7 +2,7 @@
 /**
  * 端到端检查**动画系统这一次的大改**（需求 6.2）：
  *
- *   1. 新动画是否都在（27 条：状态 3 / 随机 10 / 触发 11 / 点击 3）；
+ *   1. 新动画是否都在（28 条：状态 3 / 随机 11 / 触发 11 / 点击 3）；
  *   2. 三段式"loop 随机次数"是否真的随机（2~5）；
  *   3. loop 阶段被打断 -> **先播 end 再播新动画**；end 阶段被打断 -> 立刻让位；
  *   4. 点击动画**不可打断**（连 force 也不行）；
@@ -61,11 +61,11 @@ app.whenReady().then(async () => {
     };
   })()`);
   step(
-    '动画清单：27 条，四类（状态 3 / 随机 10 / 触发 11 / 点击 3）',
+    '动画清单：28 条，四类（状态 3 / 随机 11 / 触发 11 / 点击 3）',
     catalog,
-    catalog.total === 27 &&
+    catalog.total === 28 &&
       catalog.counts.state === 3 &&
-      catalog.counts.random === 10 &&
+      catalog.counts.random === 11 &&
       catalog.counts.trigger === 11 &&
       catalog.counts.click === 3,
   );

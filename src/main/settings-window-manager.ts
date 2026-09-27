@@ -25,6 +25,7 @@ import type { PetSettingsState } from '../shared/pet-size';
 import type { AIStatusView } from '../shared/ai-types';
 import type { PerceptionStatus } from '../shared/perception-types';
 import type { GrowthStatus } from '../shared/growth-types';
+import type { PluginRecord } from '../shared/plugin-types';
 import {
   SETTINGS_BOOTSTRAP_FLAG,
   SETTINGS_WINDOW_FLAG,
@@ -47,6 +48,13 @@ export interface SettingsWindowOptions {
   readonly getPerceptionStatus: () => PerceptionStatus;
   /** 成长与反思状态快照（成长面板的初始数据 + 推送更新）。 */
   readonly getGrowthStatus: () => GrowthStatus;
+  /**
+   * 插件清单（含**被关掉的**插件）。
+   *
+   * 设置窗口是"插件可随时关闭"的主界面入口：关掉一个插件要能立刻看到它变成
+   * 灰的（状态 `disabled`），并且还能再打开。只给启用中的插件就做不到这一点。
+   */
+  readonly getPluginRecords: () => readonly PluginRecord[];
 }
 
 /**
@@ -81,6 +89,7 @@ export class SettingsWindowManager {
       this.pushAIStatus();
       this.pushPerceptionStatus();
       this.pushGrowthStatus();
+      this.pushPlugins();
       return;
     }
     this.create();
@@ -131,6 +140,16 @@ export class SettingsWindowManager {
     this.sendToWindow(IpcChannels.CommandGrowthStatus, this.options.getGrowthStatus(), 'growth status');
   }
 
+  /**
+   * 把最新插件清单推给设置窗口。
+   *
+   * 三条路径都会调它：设置窗口自己点了开关、托盘菜单点了开关、桌宠窗口里
+   * 插件自己崩了被标记 failed —— 三处必须看到同一份清单。
+   */
+  public pushPlugins(): void {
+    this.sendToWindow(IpcChannels.CommandPluginsChanged, this.options.getPluginRecords(), 'plugin records');
+  }
+
   private sendToWindow(channel: string, payload: unknown, what: string): void {
     if (!this.exists()) return;
     const window = this.window as BrowserWindow;
@@ -177,6 +196,7 @@ export class SettingsWindowManager {
       ai: this.options.getAIStatus(),
       perception: this.options.getPerceptionStatus(),
       growth: this.options.getGrowthStatus(),
+      plugins: this.options.getPluginRecords(),
     };
 
     const webPreferences: BrowserWindowConstructorOptions['webPreferences'] = {

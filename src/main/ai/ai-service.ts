@@ -51,21 +51,46 @@ import { DiaryService, todayKey, type DiaryContext } from './diary-service';
 import { buildRollingSummaryMessages, fallbackRollingSummary, sanitizeSummary } from '../../shared/memory-summary';
 import { EmotionService } from './emotion-service';
 import { extractFactsFromModelOutput, extractFactsHeuristic } from './fact-extract';
-import { LLMClient, LLMError, type LLMMessage } from './llm-client';
+import {
+  LLMClient,
+  LLMError,
+  type LLMCompletionResult,
+  type LLMMessage,
+  type LLMPurpose,
+  type LLMToolResult,
+} from './llm-client';
+import { MEMORY_TOOLS, TOOL_HINT, executeTool } from './tools';
+import { NoteService, type MailDelivery, type MailDeliveryResult, type NoteChange } from './note-service';
+import type { NoteBox } from '../../shared/notes';
+import {
+  buildNoteMessages,
+  localNoteDraft,
+  sanitizeNote,
+  splitNoteOutput,
+  type NoteContext,
+} from '../../shared/notes';
 import { supportsBalanceQuery } from '../../shared/balance';
 import { classifyOffline } from '../../shared/pet-triggers';
+import type { MemoryNode } from '../../shared/growth-types';
 import { localDiary, localReply } from './local-replies';
 import { MemoryStore } from './memory-store';
 
 /** 桌宠"要说话"时的回调（由 controller 接到气泡 + 动画上）。 */
-export interface SpeakRequest {
-  readonly text: string;
+export interface SpeakRequest {  readonly text: string;
   readonly animation: string | null;
   /** 回复 / 主动搭话 / 系统提示。 */
   readonly kind: 'reply' | 'proactive' | 'system';
   /** 消息级别（系统消息用）。 */
   readonly level?: 'info' | 'warn' | 'error';
 }
+
+/**
+ * 一次对话里最多允许几轮工具调用。
+ *
+ * 取 2：绝大多数情况一轮就够（查一次 → 回答）；模型偶尔会"再查一次确认细节"，
+ * 给两轮即可。再多就是烧 token + 用户干等，而收益极小。
+ */
+const MAX_TOOL_ROUNDS = 2;
 
 export interface AIServiceOptions {
   /** 数据根目录（`%APPDATA%\DesktopPet`）。 */
@@ -78,12 +103,27 @@ export interface AIServiceOptions {
   /** 状态变化回调（推给设置窗口/聊天窗口）。 */
   readonly onStatus?: (status: AIStatusView) => void;
   /**
+   * 新日记写完的回调（推给「交互」窗口的日记页）。
+   *
+   * 为什么需要它：日记现在有两处入口 —— 设置窗口的 AI 面板与「交互」窗口，
+   * 而且每天到点还会自动写一篇。没有这条回调的话，正开着的日记页会一直停在旧清单上
+   * （"刚写完的那篇看不见"），直到窗口重开。
+   */
+  readonly onDiaryWritten?: (entry: DiaryEntry) => void;
+  /**
    * 「主人今天在做什么」的一段紧凑文本（由感知模块的时间线提供）。
    *
    * 用回调而不是缓存：每轮对话都要**当时最新**的那一段；感知模块被关掉/还没数据时
    * 返回空串，聊天与日记里就自然没有这一块（不硬塞"今天没有记录"这种噪声）。
    */
   readonly getDailyTimeline?: () => string;
+  /**
+   * 记忆宫殿的节点（"她记得的经历"）。
+   *
+   * 只在**模型主动调用 `recall_memory` 工具时**才会被读（需求 7.3）——
+   * 平时不注入提示词，也不进上下文。
+   */
+  readonly getPalaceNodes?: () => readonly MemoryNode[];
 }
 
 export class AIService {
@@ -93,11 +133,20 @@ export class AIService {
   private readonly memory: MemoryStore;
   private readonly emotion: EmotionService;
   private readonly diary: DiaryService;
+  private readonly notes: NoteService;
   private readonly llm: LLMClient;
 
   private busy = false;
   private lastError = '';
   private calls = 0;
+  /**
+   * **本次运行**的大模型用量（进程启动起算，关掉就清零）。
+   *
+   * 与 `budget.used`（持久化的累计）分开：用户既想知道"这个月花了多少"，
+   * 也想知道"这次开着它花了多少、花在哪"。按用途分档由 `sessionUsage` 记。
+   */
+  private sessionTokens = 0;
+  private sessionUsage: Partial<Record<LLMPurpose, number>> = {};
   /** 自上次记忆整理以来新增的对话轮数。 */
   private turnsSinceConsolidate = 0;
   /** 余额快照（DeepSeek 官方 `GET /user/balance`）；没查过时为 null。 */
@@ -126,7 +175,27 @@ export class AIService {
       isEnabled: () => this.isDiaryEnabled(),
       onWritten: (entry) => this.handleDiaryWritten(entry),
     });
-    this.llm = new LLMClient(this.config.get().provider, options.logger);
+    /*
+     * 记账挂在这里：`LLMClient` 是所有大模型请求的唯一出口，
+     * 因此视觉理解、每日反思、习惯建模这些**别的模块**发的请求也会被算进来
+     * （以前它们不进预算，面板上的数字是偏乐观的）。
+     */
+    this.llm = new LLMClient(this.config.get().provider, {
+      logger: options.logger,
+      onUsage: (usage) => this.recordUsage(usage.tokens, usage.purpose),
+    });
+    /*
+     * 小纸条（留言箱）：落盘 + 生成她的回信。
+     *
+     * 放在最后构造，因为它要用到 `llm`（她怎么说话）、`memory`（她记得什么）
+     * 与 `emotion`（她现在的状态）—— 也就是"她能说什么"的全部来源。
+     */
+    this.notes = new NoteService({
+      dataDir: options.dataDir,
+      logger: options.logger,
+      composeDraft: () => this.composeNoteDraft(),
+      onChanged: (box, change) => this.handleNotesChanged(box, change),
+    });
   }
 
   /* ------------------------------------------------------------------ */
@@ -153,6 +222,14 @@ export class AIService {
     this.emotion.load();
     // 日记同理：没打开就不建目录（load 只读索引，不 mkdir）
     this.diary.load();
+    /*
+     * 小纸条：**无条件加载**。
+     *
+     * 与记忆/日记不同，纸条是**用户自己写下的内容**（不是"她在记你"）：
+     * 关掉 AI 总开关时把它藏起来，用户会以为"我的留言丢了"。
+     * 她的回信会退化成模板文案（大模型不可用时），但你的字一定还在。
+     */
+    this.notes.load();
     this.llm.updateConfig(this.settings.provider);
     if (this.settings.memory) {
       this.memory.recordEvent('system', 'AI 模块已加载', {
@@ -166,10 +243,24 @@ export class AIService {
     this.emotion.startHeartbeat();
     this.diary.startScheduler();
     this.startBalanceScheduler();
+    // 启动时清一次超期的记忆流水（每天最多一次；0 天 = 用户选了永久保留）
+    this.pruneMemory();
     // 启动时补一次"昨天没写的日记"（程序不是 24 小时开着的）
     void this.diary.dueCheck().catch((error: unknown) => {
       this.logger.warn('diary catch-up failed', { error: describeError(error) });
     });
+    /*
+     * 有未读纸条就提醒一句（**一次**，不重复刷屏）：纸条是"她留给你的"，
+     * 你若一直没看，她该说一声。
+     */
+    const unread = this.notes.unread;
+    if (unread > 0) {
+      this.options.onSpeak?.({
+        text: unread === 1 ? '我给你留了一张小纸条，记得看哦～' : `我给你留了 ${unread} 张小纸条，记得看哦～`,
+        animation: this.pickAnimation('greeting'),
+        kind: 'proactive',
+      });
+    }
     this.emitStatus();
   }
 
@@ -220,6 +311,10 @@ export class AIService {
       busy: this.busy,
       calls: this.calls,
       tokensUsed: settings.budget.used,
+      sessionTokens: this.sessionTokens,
+      sessionUsage: Object.entries(this.sessionUsage)
+        .map(([purpose, tokens]) => ({ purpose, tokens: tokens ?? 0 }))
+        .sort((a, b) => b.tokens - a.tokens),
       dataDir: this.options.dataDir,
       emotion: this.emotion.get(),
       presence: this.emotion.presence,
@@ -424,10 +519,14 @@ export class AIService {
     this.emitStatus();
   }
 
+  /**
+   * 记录一次互动：**只记互动本身**（记忆事件 + 回应统计），不加心情。
+   *
+   * 心情为什么拆出去：需求要求"互动动画播放结束才能加 mood 值"，
+   * 而用户碰她的这一刻动画才刚开始请求/加载 —— 加心情由
+   * `settleInteraction()` 在动画播完后完成（渲染层通过 `AIInteractionSettled` 上报）。
+   */
   public notifyInteraction(kind: InteractionKind): AIStatusView {
-    const before = this.emotion.get().mood;
-    this.emotion.interact(kind);
-    const after = this.emotion.get();
     if (this.settings.memory) {
       const label: Record<InteractionKind, string> = {
         click: '主人点了点我',
@@ -437,10 +536,28 @@ export class AIService {
         diary: '主人看了日记',
         gift: '主人给了我好东西',
       };
-      this.memory.recordEvent('interaction', label[kind] ?? '主人互动了一下', { moodBefore: before, moodAfter: after.mood });
+      // 这里只记"互动当时的情绪"，mood 的涨落由 settleInteraction 记（那时才算得出来）
+      this.memory.recordEvent('interaction', label[kind] ?? '主人互动了一下', {
+        mood: this.emotion.get().mood,
+      });
     }
-    // 心情掉破 20 或涨破 80 时额外记一笔（日记里能看出起伏）
-    if (before >= 20 && after.mood < 20) {
+    this.emitStatus();
+    return this.status();
+  }
+
+  /**
+   * 结算一次互动：**真正加心情**（互动动画播完后由渲染层调用）。
+   *
+   * 与 `notifyInteraction` 分开是刻意的：拖动、收起状态下点击、动画请求被冷却拒绝
+   * 这些"没有动画可等"的互动也照样要涨心情 —— 所以"记互动"与"加心情"
+   * 必须能各自独立发生，而不是捆在一次调用里。
+   */
+  public settleInteraction(kind: InteractionKind): AIStatusView {
+    const before = this.emotion.get().mood;
+    this.emotion.interact(kind);
+    const after = this.emotion.get();
+    // 心情掉破 20 时额外记一笔（日记里能看出起伏）
+    if (this.settings.memory && before >= 20 && after.mood < 20) {
       this.memory.recordEvent('emotion', `心情掉到 ${after.mood}（${moodLabel(after.mood).label}）`);
     }
     this.emitStatus();
@@ -450,6 +567,27 @@ export class AIService {
   public resetEmotion(): AIStatusView {
     this.emotion.reset();
     if (this.settings.memory) this.memory.recordEvent('system', '情绪已重置');
+    this.emitStatus();
+    return this.status();
+  }
+
+  /**
+   * 记一笔 token 到"总账"和"本次运行"。
+   *
+   * 由 `LLMClient` 的 `onUsage` 回调触发，所以**每一次**成功的大模型调用都会走到这里；
+   * 各调用点不需要（也不应该）再自己 `addUsage` —— 那样会重复计数。
+   *
+   * 两份账：
+   * - `budget.used`：**持久化**的累计（跨重启，用来执行用户的 token 预算）；
+   * - `sessionTokens` / `sessionUsage`：**本次运行**的用量（按用途分档），
+   *   回答"她这一次开着花了多少、花在哪" —— 关掉程序就清零。
+   */
+  public recordUsage(tokens: number, purpose: LLMPurpose = 'other'): AIStatusView {
+    if (!Number.isFinite(tokens) || tokens <= 0) return this.status();
+    const value = Math.round(tokens);
+    this.config.addUsage(value);
+    this.sessionTokens += value;
+    this.sessionUsage[purpose] = (this.sessionUsage[purpose] ?? 0) + value;
     this.emitStatus();
     return this.status();
   }
@@ -465,8 +603,16 @@ export class AIService {
       return { ok: false, reply: '（没听清，主人再说一次？）', mode: 'local', tokens: 0, error: '空消息', mood: this.emotion.get().mood, satiety: this.emotion.get().satiety };
     }
 
-    // 说话也算互动（2.3）
+    /*
+     * 说话也算互动（2.3）。
+     *
+     * 聊天的心情**立刻加**（不等动画）：她的回复动画要等模型回来之后才挑
+     * （见 `pickAnimation('reply')`），而且挑哪一条本身依赖心情 ——
+     * 等它播完再涨心情会变成"这次回复的反应按上一次的心情挑"。
+     * 「等动画播完再加」只针对点击/双击那类**互动反应动画**。
+     */
     this.notifyInteraction('chat');
+    this.settleInteraction('chat');
     if (this.settings.memory) {
       this.memory.recordTurn({ at: new Date().toISOString(), role: 'user', text: message });
     }
@@ -481,16 +627,10 @@ export class AIService {
       this.busy = true;
       this.emitStatus();
       try {
-        const result = await this.llm.complete({
-          messages: this.buildMessages(message),
-          maxTokens: this.settings.provider.maxTokens,
-        });
+        const result = await this.completeWithTools(this.buildMessages(message));
         reply = sanitizeReply(result.text);
         mode = 'llm';
         tokens = result.totalTokens;
-        this.calls += 1;
-        this.config.addUsage(tokens);
-        this.emotion.refreshTokens();
         this.lastError = '';
       } catch (llmError) {
         error = llmError instanceof LLMError ? llmError.message : describeError(llmError);
@@ -517,6 +657,8 @@ export class AIService {
       if (heuristic.length > 0) this.memory.mergeFacts(heuristic);
       this.turnsSinceConsolidate += 1;
       void this.maybeConsolidate();
+      // 长跑时也会跨天：顺手确认一次"今天清过没有"（内部有日期标记，开销可忽略）
+      this.pruneMemory();
     }
 
     const animation = this.pickAnimation('reply');
@@ -537,6 +679,80 @@ export class AIService {
       mood: this.emotion.get().mood,
       satiety: this.emotion.get().satiety,
     };
+  }
+
+  /**
+   * 一次"带工具的对话"：模型可以先查记忆，再回答（需求 7.3）。
+   *
+   * 为什么不是每轮都把记忆宫殿塞进提示词：那会白白占上下文与 token，
+   * 而她绝大多数时候并不需要回忆"过去一起经历的事"。改成工具调用后，
+   * **只有用户提到相关内容时**模型才会去查一次，我们执行本地检索再把内容回传。
+   *
+   * 循环有**硬上限**（`MAX_TOOL_ROUNDS`）：模型偶尔会反复查同一个东西，
+   * 不设上限就会一直烧 token、用户也一直等。到上限就用现有文本作答。
+   *
+   * 记账：每一轮请求都 `calls += 1` 并累计 usage（这一轮可能发了 2~3 次请求）。
+   */
+  private async completeWithTools(messages: LLMMessage[]): Promise<LLMCompletionResult> {
+    const conversation: LLMMessage[] = [...messages];
+    let result = await this.requestCompletion(conversation, true);
+    let totalTokens = result.totalTokens;
+
+    let rounds = 0;
+    while (result.toolCalls.length > 0 && rounds < MAX_TOOL_ROUNDS) {
+      rounds += 1;
+      const results: LLMToolResult[] = result.toolCalls.map((call) =>
+        executeTool(call, {
+          getPalaceNodes: () => this.options.getPalaceNodes?.() ?? [],
+          onToolRun: (info) => {
+            // 她查了什么、查到没有 —— 写进记忆事件，事后可审计
+            this.memory.recordEvent('system', `她查了记忆宫殿（${info.query}）：${info.hits} 条相关`, {
+              tool: info.name,
+              hits: info.hits,
+            });
+          },
+        }),
+      );
+      this.logger.info('memory tool executed', {
+        data: {
+          round: rounds,
+          calls: result.toolCalls.map((call) => call.name).join(','),
+          hits: results.map((item) => (item.ok ? 'ok' : 'miss')).join(','),
+        },
+      });
+      conversation.push({ role: 'assistant', content: result.text, toolCalls: result.toolCalls });
+      conversation.push({ role: 'user', content: '', toolResults: results });
+
+      const next = await this.requestCompletion(conversation, true);
+      totalTokens += next.totalTokens;
+      result = next;
+    }
+
+    return { ...result, totalTokens };
+  }
+
+  /** 发一次请求并记账（工具调用会走多轮，所以独立出来）。 */
+  private async requestCompletion(
+    messages: readonly LLMMessage[],
+    withTools: boolean,
+  ): Promise<LLMCompletionResult> {
+    /*
+     * `reasoningEffort: 'none'` + 至少 480 token 的正文预算。
+     *
+     * 为什么：她的回复本来就要求"1~3 句中文"，但**推理模型会先写几百字思考**，
+     * 而默认的 220 token 连思考都不够 —— 实测会出现"空内容"（回复直接消失，
+     * 界面上看起来就是她不理人）。关掉推理既有正文预算，又更快更省。
+     */
+    const result = await this.llm.complete({
+      messages,
+      maxTokens: Math.max(this.settings.provider.maxTokens, 480),
+      reasoningEffort: 'none',
+      purpose: withTools ? 'chat-tools' : 'chat',
+      ...(withTools ? { tools: MEMORY_TOOLS } : {}),
+    });
+    this.calls += 1;
+    this.emotion.refreshTokens();
+    return result;
   }
 
   /** 组装 messages：人格 + 情绪 + 记忆 + 输出约束 + 最近对话。 */
@@ -584,6 +800,8 @@ export class AIService {
       '只输出你对主人说的那句话本身，1~3 句，可以用颜文字；',
       '不要写旁白、不要加引号、不要用 Markdown、不要提"作为 AI"。',
     );
+    // 告诉她"有工具可用、什么时候用"（不然模型不会主动去查记忆宫殿）
+    systemLines.push('', TOOL_HINT);
 
     const history: LLMMessage[] = settings.memory
       ? context.recentTurns
@@ -668,10 +886,11 @@ export class AIService {
             { role: 'user', content: transcript },
           ],
           temperature: 0,
-          maxTokens: 400,
+          maxTokens: 640,
+      reasoningEffort: 'none',
+          purpose: 'facts',
         });
         this.calls += 1;
-        this.config.addUsage(result.totalTokens);
         this.emotion.refreshTokens();
         const facts = extractFactsFromModelOutput(result.text);
         if (facts.length > 0) {
@@ -726,10 +945,11 @@ export class AIService {
           { role: 'user', content: messages.user },
         ],
         temperature: 0.3,
-        maxTokens: 500,
+        maxTokens: 700,
+      reasoningEffort: 'none',
+        purpose: 'summary',
       });
       this.calls += 1;
-      this.config.addUsage(result.totalTokens);
       this.emotion.refreshTokens();
       const summary = sanitizeSummary(result.text);
       if (summary !== '') {
@@ -887,10 +1107,11 @@ export class AIService {
           },
         ],
         temperature: 0.9,
-        maxTokens: 600,
+        maxTokens: 900,
+      reasoningEffort: 'none',
+        purpose: 'diary',
       });
       this.calls += 1;
-      this.config.addUsage(result.totalTokens);
       this.emotion.refreshTokens();
       const body = sanitizeDiary(result.text);
       if (body.trim() === '') return fallback();
@@ -918,8 +1139,191 @@ export class AIService {
       animation: this.pickAnimation('greeting'),
       kind: 'proactive',
     });
+    /*
+     * 日记**不再**记进小纸条（需求："日记不要记到小纸条"）。
+     * 日记留在 `diary/`（设置窗口与「交互」窗口都能看），小纸条只放她自己记的事与收好的文件。
+     * 旧数据里已经记过的 `kind: 'diary'` 纸条仍然能读、能删，只是不再新增。
+     */
+    try {
+      this.options.onDiaryWritten?.(entry);
+    } catch (error) {
+      // 推给界面的回调失败不该影响"日记已经写好"这件事
+      this.logger.warn('onDiaryWritten handler failed', { error: describeError(error) });
+    }
     this.emitStatus();
   }
+
+  /* ------------------------------------------------------------------ */
+  /* 小纸条（她的收纳夹）                                                 */
+  /* ------------------------------------------------------------------ */
+
+  public get noteService(): NoteService {
+    return this.notes;
+  }
+
+  public noteBox(): NoteBox {
+    return this.notes.snapshot();
+  }
+
+  /** 你点了「让她记一件」：让她自己挑一件重要的事记下来。 */
+  public async composeNote(): Promise<NoteBox> {
+    return this.notes.composeDraft();
+  }
+
+  public markNotesRead(): NoteBox {
+    return this.notes.markAllRead();
+  }
+
+  public clearNotes(): NoteBox {
+    return this.notes.clear();
+  }
+
+  /** 删掉一条纸条（只删记录，文件要单独在「文件」页签里删）。 */
+  public removeNote(id: string): NoteBox {
+    return this.notes.remove(id);
+  }
+
+  /**
+   * 把一个文件收进收纳夹（`notes/files/`）并记一条纸条。
+   *
+   * 这是"后续整理的文件都放到这个系统里"的入口：文件被**复制**进收纳夹，
+   * 纸条上带回新路径与大小。目前有两个调用方：
+   * 「收纳文件…」按钮（你挑一个文件交给她收着）与将来的"整理文件"功能。
+   */
+  public async fileNote(input: {
+    readonly sourcePath: string;
+    readonly name?: string;
+    readonly title?: string;
+    readonly text?: string;
+  }): Promise<NoteBox> {
+    return this.notes.record({
+      kind: 'file',
+      title: input.title,
+      text: input.text ?? '',
+      files: [{ sourcePath: input.sourcePath, ...(input.name !== undefined ? { name: input.name } : {}) }],
+    });
+  }
+
+  /**
+   * 把一个**内存里的文件**投递到收件箱（插件路径，权限 `mail`）。
+   *
+   * 与 `fileNote` 的区别只有"内容从哪来"：那个复制磁盘上的源文件，
+   * 这个直接写 Buffer —— 插件拿不到文件系统，只能把内容交上来。
+   */
+  public deliverMail(delivery: MailDelivery): MailDeliveryResult {
+    return this.notes.deliver(delivery);
+  }
+
+  /**
+   * 组装"记一件"的上下文：她此刻的状态 + 她记得的事 + 今天在做什么 + 已经记过的。
+   *
+   * 与聊天/日记用的是同一批真实数据源 —— 她记下来的东西也必须有出处。
+   */
+  private buildNoteContext(): NoteContext {
+    const settings = this.settings;
+    const context = settings.memory
+      ? this.memory.buildContext('')
+      : { facts: [], pastSnippets: [], todayEvents: [], recentTurns: [], factCount: 0, summary: '' };
+    return {
+      userName: settings.userName,
+      petName: settings.petName,
+      emotion: this.emotion.get(),
+      facts: context.facts,
+      timeline: this.options.getDailyTimeline?.() ?? '',
+      recentNotes: this.notes.snapshot().notes
+        .slice(0, 5)
+        .map((note) => ({ title: note.title, text: note.text.slice(0, 60) })),
+      hour: new Date().getHours(),
+    };
+  }
+
+  /** 生成一条"她记的"纸条文案：优先大模型，不可用/失败走本地兜底。 */
+  private async composeNoteDraft(): Promise<{ title: string; text: string; source: 'llm' | 'template'; tokens: number }> {
+    const context = this.buildNoteContext();
+    const fallback = (): { title: string; text: string; source: 'template'; tokens: number } => {
+      const draft = localNoteDraft(`${context.hour}|${context.emotion.mood}|${context.petName}`);
+      return { ...draft, source: 'template', tokens: 0 };
+    };
+    if (!evaluateAIUsability(this.settings).usable) return fallback();
+
+    const messages = buildNoteMessages(context);
+    try {
+      const result = await this.llm.complete({
+        messages: [
+          { role: 'system', content: messages.system },
+          { role: 'user', content: messages.user },
+        ],
+        temperature: 0.85,
+        maxTokens: 400,
+      reasoningEffort: 'none',
+        purpose: 'note',
+      });
+      this.calls += 1;
+      this.emotion.refreshTokens();
+      const parsed = splitNoteOutput(sanitizeNote(result.text), '一件重要的事');
+      if (parsed.text === '') return fallback();
+      return { ...parsed, source: 'llm', tokens: result.totalTokens };
+    } catch (error) {
+      this.logger.warn('llm note draft failed; using local template', { error: describeError(error) });
+      this.lastError = describeError(error);
+      this.emitStatus();
+      return fallback();
+    }
+  }
+
+  /**
+   * 收件箱变了：记一条记忆事件，必要时冒个泡。
+   *
+   * - **她自己记的**（`manual`）：冒一句"我记在收件箱里了"；
+   * - **插件投递的**（`sender.kind === 'plugin'`）：不冒泡（插件自己可以用 `ui.say` 说），
+   *   但要记进记忆，这样"某个插件往这里放了东西"在时间线上查得到；
+   * - **文件/日记旧数据**：不冒泡（写日记时已经说过话了，避免连着两句）。
+   */
+  private handleNotesChanged(_box: NoteBox, change: NoteChange): void {
+    const note = change.added[0];
+    if (note) {
+      const attachment = note.files.map((file) => file.name).join('、');
+      this.memory.recordEvent('chat', `我在交互里记下了：${note.title}`, {
+        kind: note.kind,
+        source: note.source,
+        from: note.sender.id ?? note.sender.kind,
+        ...(attachment === '' ? {} : { files: attachment }),
+      });
+      if (note.kind === 'manual') {
+        this.options.onSpeak?.({
+          text: '我把这件事记在交互里啦～',
+          animation: this.pickAnimation('greeting'),
+          kind: 'proactive',
+        });
+      }
+    }
+    this.emitStatus();
+  }
+
+  /**
+   * 记忆**明细流水**的保留期清理（每天最多一次）。
+   *
+   * 与感知的 `retentionDays`、反思的 `keepReflectionDays` 同一套路数：
+   * 原始流水按天增长（实测 30–43KB/天），必须有清理；而"整理过的结论"
+   * （长期事实、记忆宫殿）另有各自的容量控制，不在这里动。
+   *
+   * @param force 手动触发（调试/验收入口），忽略"今天已经清过"的标记
+   */
+  public pruneMemory(force = false): { days: number; logSections: number } {
+    const keepDays = this.settings.keepMemoryDays;
+    if (!force && keepDays <= 0) return { days: 0, logSections: 0 };
+    const today = todayKey();
+    if (!force && this.lastMemoryPruneDay === today) return { days: 0, logSections: 0 };
+    this.lastMemoryPruneDay = today;
+    const result = this.memory.pruneOldData(force ? keepDays : keepDays);
+    if (result.days > 0 || result.logSections > 0) {
+      this.memory.recordEvent('system', `按保留期（${keepDays} 天）清理了 ${result.days} 天的记忆流水`);
+    }
+    return result;
+  }
+
+  /** 记忆明细清理的日期标记（一天只做一次）。 */
+  private lastMemoryPruneDay = '';
 
   /* ------------------------------------------------------------------ */
   /* 连通性自检                                                          */
@@ -946,11 +1350,12 @@ export class AIService {
           { role: 'system', content: '你是一只桌宠。只回一句话。' },
           { role: 'user', content: '用一句话跟我打个招呼。' },
         ],
-        maxTokens: 60,
+        maxTokens: 240,
+      reasoningEffort: 'none',
+        purpose: 'speak-up',
         timeoutMs: Math.min(15000, this.settings.provider.timeoutMs),
       });
       this.calls += 1;
-      this.config.addUsage(result.totalTokens);
       this.emotion.refreshTokens();
       this.lastError = '';
       return {

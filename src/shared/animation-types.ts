@@ -18,7 +18,7 @@ export type AnimationType = 'video' | 'image';
  * 分类只描述"这条动画由谁来播"，播放机制完全一样 ——
  * 具体行为（默认动画 / 随机池 / 间隔）在 `assets/config/behavior.json` 里配置。
  *
- * - `state`   状态动画：某个显示状态下的默认循环（idle / lie / watch）
+ * - `state`   状态动画：某个显示状态下的默认循环（idle / sleep / watch）
  * - `random`  随机动画：无人打扰时自己随机播
  * - `trigger` 触发动画：由某个事件触发（心情低 / 私密内容 / 没网 / 感知到工作…）
  * - `click`   点击动画：用户点击的反应，**不可打断**（必须播完才能再点）
@@ -191,6 +191,49 @@ function loopCountFrom(
   return typeof fixed === 'number' && Number.isFinite(fixed) && fixed > 0 ? Math.floor(fixed) : 0;
 }
 
+/* -------------------------------------------------------------------------- */
+/* 点击反应动画                                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 点击反应动画的候选集合。
+ *
+ * 需求：**点击不再按身体区域区分**，点一下从这三条里随机挑一条。
+ * 它们都是 `interruptible: false` 的硬锁（必须播完），因此"随机挑"不会出现
+ * 「挑中的那条播到一半又被下一次点击换掉」的抖动。
+ *
+ * 为什么放在共享层而不是渲染层常量：它是**纯数据 + 纯函数**，
+ * 验收可以直接钉死"点一下只会是这三条之一"，不必复刻渲染层的挑选逻辑。
+ */
+export const CLICK_REACTIONS: readonly string[] = ['cute', 'fawning', 'stroke'];
+
+/**
+ * 随机挑一条点击反应动画。
+ *
+ * 两条规则按顺序生效：
+ *   1. 只从**清单里真实存在**的候选里挑（素材被删/改名时不会挑到不存在的 id）；
+ *   2. 优先挑**不在冷却里**的那条 —— 三条的冷却分别是 3s/3s/4s，
+ *      纯粹均匀随机的话，连点很容易随到一条正在冷却的，表现就是"点了没反应"。
+ *      全部都在冷却时退回完整候选集（与不做这个优化相比不更差）。
+ *
+ * @param known 清单里已有的动画 id
+ * @param random 注入随机源，便于验收断言分布与边界
+ * @param isOnCooldown 查询某条动画当前是否在冷却中
+ * @returns 选中的动画 id；候选全都不存在时返回 null
+ */
+export function pickClickReaction(
+  known: readonly string[],
+  random: () => number = Math.random,
+  isOnCooldown?: (animationId: string) => boolean,
+): string | null {
+  const candidates = CLICK_REACTIONS.filter((id) => known.includes(id));
+  if (candidates.length === 0) return null;
+  const ready = isOnCooldown ? candidates.filter((id) => !isOnCooldown(id)) : candidates;
+  const pool = ready.length > 0 ? ready : candidates;
+  const index = Math.min(pool.length - 1, Math.max(0, Math.floor(random() * pool.length)));
+  return pool[index] ?? null;
+}
+
 /**
  * 动画的渲染微调。
  *
@@ -295,7 +338,7 @@ export interface PlayOptions {
    * 覆盖这次播放的"循环几轮"（只对**三段式**动画有意义）。
    *
    * 为什么需要按次覆盖：同一个三段式动画在不同场合要的持续时间完全不同 ——
-   *   - 它作为**状态的默认动画**时（收起的 watch / lie）要 `'forever'`：一直保持姿势，
+   *   - 它作为**状态的默认动画**时（收起的 watch / sleep）要 `'forever'`：一直保持姿势，
    *     只在离开这个状态时才播 end；
    *   - 它作为**随机池成员**时（正常状态的 lie）只该播一两轮就自己爬起来；
    *   - 它被**触发**时（"主人不在呀"演一次 lie）用定义里的默认轮数。

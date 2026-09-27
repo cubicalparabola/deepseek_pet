@@ -9,7 +9,23 @@
 
 import type { PetAction, ActionResult } from './action-types';
 import type { PetState } from './state-types';
-import type { DiscoveredPlugin, PluginRecord } from './plugin-types';
+import type {
+  DiscoveredPlugin,
+  PluginInstallResult,
+  PluginMailRequest,
+  PluginMailResult,
+  PluginMenuItem,
+  PluginNetRequest,
+  PluginNetResponse,
+  PluginNotificationRequest,
+  PluginPanelView,
+  PluginProcessRequest,
+  PluginProcessResult,
+  PluginPythonInfo,
+  PluginPythonRequest,
+  PluginRecord,
+  PluginUIEvent,
+} from './plugin-types';
 import type { AnimationManifest } from './animation-types';
 import type { BehaviorConfig, PetDisplayState } from './behavior-config';
 import type { PetSettingsState, PetSizeInfo } from './pet-size';
@@ -35,6 +51,7 @@ import type {
   PerceptionViewResult,
 } from './perception-types';
 import type { TimelineTextResult } from './timeline-types';
+import type { NoteBox, NoteFileEntry, NotePreview } from './notes';
 import type {
   GrowthSettingsPatch,
   GrowthStatus,
@@ -106,14 +123,27 @@ export const IpcChannels = {
    */
   PointerPosition: 'pet:pointer-position',
 
-  /* 设置窗口（独立的小窗口，只暴露尺寸/置顶） */
+  /*
+   * 设置窗口（独立的小窗口，只暴露"外观与行为"这类配置项）。
+   *
+   * 为什么这些动作从托盘菜单搬到了设置窗口：
+   * 菜单是**日常动作**（说话、看日记、看记忆），设置窗口是**配置**。
+   * 「调整大小 / 总是置顶 / 拖到边缘收起 / 重载插件 / 打开配置目录」都是
+   * 调一次就不动的配置，留在菜单里既不常用，还会把"和她说句话"挤到下面。
+   */
   SettingsWindowShow: 'pet:settings-window-show',
   SettingsWindowSetScale: 'pet:settings-window-set-scale',
   SettingsWindowSetAlwaysOnTop: 'pet:settings-window-set-always-on-top',
+  /** 拖到屏幕边缘是否自动收起（`shared/dock.ts`）。 */
+  SettingsWindowSetDockOnEdge: 'pet:settings-window-set-dock-on-edge',
+  /** 重载插件（重新发现 + 重新读插件代码），返回插件个数。 */
+  SettingsWindowReloadPlugins: 'pet:settings-window-reload-plugins',
   SettingsWindowOpenConfig: 'pet:settings-window-open-config',
   SettingsWindowClose: 'pet:settings-window-close',
   /** 聊天窗口关闭（隐藏，不销毁）。 */
   ChatWindowClose: 'pet:chat-window-close',
+  /** 聊天窗口 -> Main：要一份当前的插件面板快照（窗口复用/重开时对账用）。 */
+  ChatWindowPanelsGet: 'pet:chat-window-panels-get',
   CommandSettingsChanged: 'pet:command-settings-changed',
 
   /* 菜单 / 托盘 */
@@ -138,6 +168,48 @@ export const IpcChannels = {
   PluginActivated: 'pet:plugin-activated',
   PluginDeactivated: 'pet:plugin-deactivated',
   PluginError: 'pet:plugin-error',
+  /**
+   * 运行期启停单个插件（Renderer / 设置窗口 / 托盘菜单共用这一条）。
+   *
+   * 这是"插件可随时关闭"的唯一实现路径：Main 原子写回 `plugins.json`，
+   * 再把新的清单推给渲染层（启 = 现场加载代码并 activate；停 = 立刻回收）。
+   */
+  PluginSetEnabled: 'pet:plugin-set-enabled',
+
+  /* ------------------------- 插件运行期能力（按权限执法） -------------------------
+   *
+   * 渲染层的 PluginHost 只能通过下面这几条通道触达系统能力，
+   * 而**执法点在 Main**：插件没声明（或被用户收窄掉）的权限一律拒绝。
+   * 之所以要过 Main：渲染层 CSP 是 `connect-src 'none'`（模板里也读不到磁盘），
+   * 联网/起进程/发通知本来就只能在主进程做。
+   */
+  PluginNet: 'pet:plugin-net',
+  PluginProcess: 'pet:plugin-process',
+  PluginPython: 'pet:plugin-python',
+  PluginNotify: 'pet:plugin-notify',
+  /** 往「交互」收件箱投递消息与文件（权限 `mail`）。 */
+  PluginMailSend: 'pet:plugin-mail-send',
+  /** 用系统默认浏览器打开链接（权限 `ui`；面板里的 `<a>` 也走这条）。 */
+  PluginOpenExternal: 'pet:plugin-open-external',
+  /** 主进程计时的定时器（停用插件时由 Main 直接清表）。 */
+  PluginTimer: 'pet:plugin-timer',
+  /** 上报插件的界面贡献（菜单项 + 面板），Main 负责挂到托盘菜单与聊天窗口。 */
+  PluginUIContribute: 'pet:plugin-ui-contribute',
+  /** 打开聊天窗口并切到某个插件面板。 */
+  PluginOpenPanel: 'pet:plugin-open-panel',
+  /** 聊天窗口 -> Main：用户点了插件面板里的 `data-plugin-action`。 */
+  PluginPanelAction: 'pet:plugin-panel-action',
+  /** 设置窗口专用：启停插件（与 `PluginSetEnabled` 同源）。 */
+  SettingsWindowSetPluginEnabled: 'pet:settings-window-set-plugin-enabled',
+  /**
+   * 安装插件：把一个**插件文件夹**复制进 `plugins/` 并登记。
+   *
+   * `directory` 省略时由 Main 弹目录选择框（正常路径）；显式给路径用于自动化验收，
+   * 以及"从某个已知目录安装"的脚本入口。校验与复制全在 Main（渲染层碰不到磁盘）。
+   */
+  PluginInstall: 'pet:plugin-install',
+  /** 卸载插件：停用 -> 删目录 -> 从清单移除（内置示例不可卸载）。 */
+  PluginUninstall: 'pet:plugin-uninstall',
 
   /* --------------- AI 认知与人格（2.1~2.4） ---------------
    *
@@ -156,6 +228,13 @@ export const IpcChannels = {
   AIMemoryGet: 'pet:ai-memory-get',
   /** 清空记忆（事实 + 流水，profile 一并重置）。 */
   AIMemoryClear: 'pet:ai-memory-clear',
+  /**
+   * 立刻按保留期清理一次记忆**明细流水**（调试/验收入口）。
+   *
+   * 与 `PerceptionSampleNow` 同一性质：日常是她自己每天清一次，
+   * 而"每天一次"在几秒内没法被验收，所以开一个手动入口。
+   */
+  AIMemoryPrune: 'pet:ai-memory-prune',
   /** 在文件管理器里打开记忆日志。 */
   AIMemoryOpenLog: 'pet:ai-memory-open-log',
   /** 日记列表（2.4）。 */
@@ -170,8 +249,16 @@ export const IpcChannels = {
   AITestConnection: 'pet:ai-test',
   /** 立刻查一次余额（DeepSeek `GET /user/balance`：唯一的额度接口）。 */
   AIBalanceRefresh: 'pet:ai-balance-refresh',
-  /** Renderer -> Main：发生了一次互动（点击/拖动…），用于情绪上涨。 */
+  /** Renderer -> Main：发生了一次互动（点击/拖动…），用于记录互动本身。 */
   AIInteraction: 'pet:ai-interaction',
+  /**
+   * Renderer -> Main：这次互动的**动画播完了**，现在才真正加心情（2.3）。
+   *
+   * 为什么与 `AIInteraction` 分成两条：互动这件事（记忆事件、回应统计）必须在
+   * 用户碰她的那一刻就记下来，而 mood 必须等互动动画播完再加 —— 否则
+   * "点一下"的心情值先跳上去、动画还在加载/播放，数值反馈与看到的动作对不上。
+   */
+  AIInteractionSettled: 'pet:ai-interaction-settled',
   /** 把情绪重置为初始值（调试/后悔药）。 */
   AIResetEmotion: 'pet:ai-reset-emotion',
   /**
@@ -185,6 +272,40 @@ export const IpcChannels = {
   AIOpenChat: 'pet:ai-open-chat',
   /** 让桌宠主动说一句话（聊天窗口的「让她说句话」，也是"主动搭话"的手动入口）。 */
   AISpeakUp: 'pet:ai-speak-up',
+
+  /* --------------- 小纸条（她的收纳夹） ---------------
+   *
+   * 像"她的资料夹"：内容是她的（她记的事、收好的文件），**用户不能留言**，
+   * 但可以查看并**删掉** —— 删单条、删文件、查看文件内容、打开文件夹、标记看过、清空。
+   * 纸条与文件都住在主进程（要落盘），窗口只是查看的地方。
+   *
+   * 路径安全：渲染层只递**纸条 id** 或**文件名**，绝对路径永远由主进程自己解析，
+   * 并校验解析结果仍落在 `notes/files/` 内。
+   */
+  /** 读收纳夹（倒序 + 未看条数 + 目录）。 */
+  AINoteList: 'pet:ai-note-list',
+  /** 让她自己挑一件重要的事记下来。 */
+  AINoteCompose: 'pet:ai-note-compose',
+  /** 全部标记为看过。 */
+  AINoteRead: 'pet:ai-note-read',
+  /** 删掉一条纸条（只删记录，不删文件）。 */
+  AINoteDelete: 'pet:ai-note-delete',
+  /** 清空纸条记录（`files/` 里的文件不动）。 */
+  AINoteClear: 'pet:ai-note-clear',
+  /** 用系统默认程序打开某条纸条附带的文件（只接受**纸条 id**，不接受任意路径）。 */
+  AINoteOpenFile: 'pet:ai-note-open-file',
+  /** 在文件管理器里打开收纳夹目录。 */
+  AINoteOpenDir: 'pet:ai-note-open-dir',
+  /** 收纳夹里的文件清单（扫 `notes/files/`，最新修改在前）。 */
+  AINoteFiles: 'pet:ai-note-files',
+  /** 读一个文件的内容给界面看（只接受**文件名**，主进程校验落在 files/ 内）。 */
+  AINoteFilePreview: 'pet:ai-note-file-preview',
+  /** 用系统默认程序打开收纳夹里的某个文件（只接受**文件名**）。 */
+  AINoteFileOpen: 'pet:ai-note-file-open',
+  /** 删掉收纳夹里的某个文件（只接受**文件名**）。 */
+  AINoteFileDelete: 'pet:ai-note-file-delete',
+  /** 弹系统文件选择框，把选中的文件收进收纳夹（`notes/files/`）。 */
+  AINoteFileImport: 'pet:ai-note-file-import',
 
   /* --------------- 环境与用户感知（3.1~3.6） ---------------
    *
@@ -201,8 +322,10 @@ export const IpcChannels = {
   PerceptionViewNow: 'pet:perception-view',
   /** 摄像头授权（只能由界面上显式按钮置为 true）。 */
   PerceptionCameraAuthorize: 'pet:perception-camera-authorize',
-  /** 清空感知数据（观察记录 + 习惯画像）。 */
+  /** 清空感知数据（观察记录 + 习惯画像 + 习惯模型）。 */
   PerceptionClearData: 'pet:perception-clear',
+  /** 立刻做一次习惯建模（把统计归纳成一段话；会调用大模型）。 */
+  PerceptionModelHabits: 'pet:perception-model-habits',
   /** 在文件管理器里打开感知日志文件。 */
   PerceptionOpenLog: 'pet:perception-open-log',
   /** 立刻采一次（验收与手动调试用）。 */
@@ -248,6 +371,18 @@ export const IpcChannels = {
   CommandAction: 'pet:command-action',
   CommandSetBehaviorPaused: 'pet:command-set-behavior-paused',
   CommandReloadPlugins: 'pet:command-reload-plugins',
+  /** Main -> 桌宠渲染层：某个插件被启用/停用（现场加载或回收，不用整体重载）。 */
+  CommandPluginEnabled: 'pet:command-plugin-enabled',
+  /** Main -> 桌宠渲染层：插件界面事件（菜单点击 / 通知点击 / 面板动作）。 */
+  CommandPluginUIEvent: 'pet:command-plugin-ui-event',
+  /** Main -> 桌宠渲染层：插件的定时器到点了。 */
+  CommandPluginTimer: 'pet:command-plugin-timer',
+  /** Main -> 聊天窗口：插件面板快照变了（注册/更新/下线）。 */
+  CommandPluginPanels: 'pet:command-plugin-panels',
+  /** Main -> 设置窗口：插件清单或状态变了（开关后立刻回显）。 */
+  CommandPluginsChanged: 'pet:command-plugins-changed',
+  /** Main -> 桌宠渲染层：某个插件被**卸载**了（连记录一起忘掉，并清掉它的存储）。 */
+  CommandPluginRemoved: 'pet:command-plugin-removed',
   CommandSetAnimation: 'pet:command-set-animation',
   CommandSizeChanged: 'pet:command-size-changed',
   CommandBubble: 'pet:command-bubble',
@@ -255,6 +390,14 @@ export const IpcChannels = {
   CommandAIStatus: 'pet:command-ai-status',
   /** Main -> 聊天窗口：一条新消息（用户/宠物/系统提示）。 */
   CommandChatMessage: 'pet:command-chat-message',
+  /** Main -> 聊天窗口：留言箱变了（新的纸条 / 未读变化）。 */
+  CommandNotes: 'pet:command-notes',
+  /** Main -> 聊天窗口：日记清单变了（刚写好一篇 / 打开窗口时对账）。 */
+  CommandDiary: 'pet:command-diary',
+  /** Main -> 聊天窗口：切到哪个视图（聊天 / 小纸条）。 */
+  CommandChatView: 'pet:command-chat-view',
+  /** Main -> 聊天窗口：切到某个插件的面板（托盘菜单点了插件动作时用）。 */
+  CommandChatPanel: 'pet:command-chat-panel',
   /** Main -> 感知状态变化（设置窗口的感知面板靠它刷新）。 */
   CommandPerceptionStatus: 'pet:command-perception-status',
   /** Main -> 渲染层：请采集一帧摄像头画面并回传（3.5）。 */
@@ -381,6 +524,52 @@ export interface PluginStatePayload {
   readonly error?: string;
 }
 
+/** Main -> 渲染层：单个插件的启停指令（`entry` 是启用时要用到的静态信息）。 */
+export interface PluginEnabledPayload {
+  readonly id: string;
+  readonly enabled: boolean;
+  /** 启用时附带插件静态信息（渲染层据此取代码并激活）；停用时为 null。 */
+  readonly entry: DiscoveredPlugin | null;
+}
+
+/** 插件定时器请求（渲染层 -> Main）。定时器由主进程持有，停用插件时直接清表。 */
+export interface PluginTimerPayload {
+  readonly pluginId: string;
+  readonly timerId: string;
+  readonly kind: 'after' | 'every';
+  readonly intervalMs: number;
+}
+
+/** 插件定时器到点（Main -> 渲染层）。 */
+export interface PluginTimerTickPayload {
+  readonly pluginId: string;
+  readonly timerId: string;
+  readonly kind: 'after' | 'every';
+}
+
+/** 插件的界面贡献快照（渲染层 -> Main；每次都是该插件的**全量**覆盖）。 */
+export interface PluginUIContributionPayload {
+  readonly pluginId: string;
+  readonly menuItems: readonly PluginMenuItem[];
+  readonly panels: readonly PluginPanelView[];
+}
+
+/** 插件面板动作（聊天窗口 -> Main -> 桌宠渲染层里的插件）。 */
+export interface PluginPanelActionPayload {
+  readonly pluginId: string;
+  readonly panelId: string;
+  readonly actionId: string;
+  readonly fields: Readonly<Record<string, string>>;
+}
+
+/** Main -> 聊天窗口：请切到某个插件面板。 */
+export interface PluginPanelTargetPayload {
+  readonly pluginId: string;
+  readonly panelId: string;
+}
+
+export type PluginUIEventPayload = PluginUIEvent;
+
 export interface TrayStatePayload {
   readonly visible?: boolean;
   readonly behaviorPaused?: boolean;
@@ -396,14 +585,18 @@ export interface TrayStatePayload {
   readonly animations?: readonly AnimationSummary[];
   /** AI 状态（仅供主进程构造「AI（认知与人格）」子菜单使用）。 */
   readonly ai?: AIStatusView;
+  /** 小纸条未读数（仅供主进程构造「小纸条…」菜单项使用）。 */
+  readonly noteUnread?: number;
   /** 在场状态（可见 / 收起 / 隐藏），子菜单据此显示"收起/展开"。 */
   readonly presence?: PetPresence;
   /** 显示状态（收起方向 / 是否隐藏）：菜单据此显示"收起（右侧）/ 展开"。 */
   readonly display?: PetDisplayState;
-  /** 感知状态（仅供主进程构造「感知（环境与用户）」子菜单使用）。 */
+  /** 感知状态（仅供主进程构造菜单顶部的"感知：<场景> · 在不在"读数）。 */
   readonly perception?: PerceptionStatus;
-  /** 成长状态（仅供主进程构造「成长与记忆」子菜单使用）。 */
+  /** 成长状态（仅供主进程构造菜单顶部的"记得的经历 N 段 · 一起 N 天"读数）。 */
   readonly growth?: GrowthStatus;
+  /** 插件注册的菜单项（「插件」子菜单里按插件分组；点击回流给插件）。 */
+  readonly pluginMenu?: readonly PluginMenuEntryPayload[];
 }
 
 /** 菜单展示用的动画摘要（主进程从 Manifest 解析）。 */
@@ -413,6 +606,21 @@ export interface AnimationSummary {
   readonly priority: number;
   readonly loop: boolean;
   readonly type: string;
+}
+
+/**
+ * 托盘「插件」子菜单里的一条**插件自定义动作**（由插件通过 `context.ui.registerMenuItem` 注册）。
+ *
+ * 说明：这条只描述"要画一个什么菜单项"，点击后由 Main 把事件转回渲染层里
+ * 真正跑着的插件（见 `CommandPluginUIEvent`）—— Main 不执行任何插件代码。
+ */
+export interface PluginMenuEntryPayload {
+  readonly pluginId: string;
+  readonly pluginName: string;
+  readonly id: string;
+  readonly label: string;
+  readonly hint?: string;
+  readonly checked?: boolean;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -453,7 +661,8 @@ export interface WindowAPI {
 }
 
 export interface MenuAPI {
-  showContextMenu(payload: { region?: string; animationId?: string | null }): void;
+  /** 弹出桌宠右键菜单（内容全在主进程，不需要 renderer 传上下文）。 */
+  showContextMenu(): void;
 }
 
 export interface TrayAPI {
@@ -470,6 +679,13 @@ export interface ActionAPI {
 
 export interface PluginBridgeAPI {
   list(): Promise<readonly PluginRecord[]>;
+  /**
+   * 重新发现插件（**启用中的**清单）。
+   *
+   * 为什么需要它：整体重载必须拿到**最新**清单 —— 否则"新放进来的插件"
+   * 与"刚被关掉的插件"都要等到重启才生效（渲染层手里那份是启动时的快照）。
+   */
+  discover(): Promise<readonly DiscoveredPlugin[]>;
   fetchCode(id: string): Promise<PluginCodePayload | null>;
   reload(id: string): Promise<void>;
   notifyActivated(payload: PluginStatePayload): void;
@@ -477,6 +693,50 @@ export interface PluginBridgeAPI {
   notifyError(payload: { id: string; hook: string; message: string }): void;
   /** 主进程主动要求重新加载全部插件时触发。 */
   onReloadRequested(handler: () => void): () => void;
+
+  /* --------------------- 运行期启停（"插件可随时关闭"） ---------------------
+   *
+   * 与 `reload` 的区别：`reload` 是"重新读一遍代码"（整体重载），
+   * `setEnabled` 是**只动一个插件**：停用 = 立刻回收（退订、清定时器、
+   * 杀子进程、下线菜单与面板）；启用 = 现场取代码并 activate。
+   * 结果一律落盘到 `assets/config/plugins.json`，重启后保持。
+   */
+  setEnabled(id: string, enabled: boolean): Promise<readonly PluginRecord[]>;
+  /** 订阅启停指令（Main 是发起方，渲染层负责执行）。 */
+  onEnabled(handler: (payload: PluginEnabledPayload) => void): () => void;
+
+  /**
+   * 安装 / 卸载插件。
+   *
+   * 安装：把一个插件文件夹复制进 `plugins/` 并登记（`directory` 省略时弹目录选择框）；
+   * 卸载：停用 -> 删目录 -> 从清单移除。**内置示例（`plugins/examples/*`）不可卸载**。
+   * 校验、复制、删除全部在 Main 完成 —— 渲染层与插件都碰不到磁盘。
+   */
+  install(directory?: string): Promise<PluginInstallResult>;
+  uninstall(id: string): Promise<PluginInstallResult>;
+  /** 订阅"某个插件被卸载了"（渲染层据此忘掉记录并清掉它的 localStorage 命名空间）。 */
+  onRemoved(handler: (payload: { id: string }) => void): () => void;
+
+  /* --------------------- 受权限约束的系统能力（执法在 Main） --------------------- */
+  net(pluginId: string, request: PluginNetRequest): Promise<PluginNetResponse>;
+  process(pluginId: string, request: PluginProcessRequest): Promise<PluginProcessResult>;
+  which(pluginId: string, command: string): Promise<string | null>;
+  pythonInfo(pluginId: string): Promise<PluginPythonInfo>;
+  pythonRun(pluginId: string, request: PluginPythonRequest): Promise<PluginProcessResult>;
+  notify(pluginId: string, request: PluginNotificationRequest): Promise<boolean>;
+  /** 往「交互」收件箱投递消息与文件（权限 `mail`）。 */
+  mail(pluginId: string, request: PluginMailRequest): Promise<PluginMailResult>;
+  openExternal(pluginId: string, url: string): Promise<boolean>;
+  startTimer(pluginId: string, timer: Omit<PluginTimerPayload, 'pluginId'>): Promise<boolean>;
+  cancelTimer(pluginId: string, timerId: string): Promise<boolean>;
+  /** 上报界面贡献（全量覆盖该插件的菜单项与面板）。 */
+  contributeUI(contribution: PluginUIContributionPayload): void;
+  /** 打开聊天窗口并切到某个插件面板。 */
+  openPanel(pluginId: string, panelId: string): Promise<boolean>;
+  /** 订阅界面事件（菜单点击 / 通知点击 / 面板动作）。 */
+  onUIEvent(handler: (payload: PluginUIEvent) => void): () => void;
+  /** 订阅定时器 tick。 */
+  onTimer(handler: (payload: PluginTimerTickPayload) => void): () => void;
 }
 
 /** 对话气泡 API（托盘菜单与验收脚本共用；第一版不做自动触发）。 */
@@ -552,6 +812,8 @@ export interface AIAPI {
   memory(): Promise<MemorySnapshot>;
   /** 清空记忆（保留配置文件）。 */
   clearMemory(): Promise<MemorySnapshot>;
+  /** 立刻按保留期清理一次记忆明细流水（返回清了几天/几段）。 */
+  pruneMemory(): Promise<{ readonly days: number; readonly logSections: number }>;
   /** 在系统文件管理器里打开记忆日志文件。 */
   openMemoryLog(): Promise<boolean>;
   /** 日记列表（2.4）。 */
@@ -571,14 +833,53 @@ export interface AIAPI {
    * 余额不足 / key 无效还会让她演 offline。
    */
   refreshBalance(): Promise<AIStatusView>;
-  /** 上报一次互动（点击/拖动/双击），用于情绪上涨。 */
+  /** 上报一次互动（点击/拖动/双击）：记忆与回应统计用，**不加心情**。 */
   notifyInteraction(kind: InteractionKind): void;
+  /**
+   * 互动动画播完后结算心情（真正加 mood 的那一步）。
+   *
+   * 渲染层在两种时机调用它：
+   * - 互动动画自然播完（`animation:end`）；
+   * - 这次互动**没有动画可等**（拖动、收起状态下点击只展开、动画被冷却/优先级拒绝）
+   *   —— 这时在互动那一刻直接调用，心情不会因为"没动画"而丢掉。
+   */
+  notifyInteractionSettled(kind: InteractionKind): void;
   /** 把情绪重置回初始值。 */
   resetEmotion(): Promise<AIStatusView>;
   /** 切换在场状态（收起 = 安静待着：点击穿透 + 行为暂停 + 情绪下降更快）。 */
   setPresence(presence: PetPresence): Promise<AIStatusView>;
   /** 打开聊天窗口（桌宠窗口/托盘共用）。 */
   openChatWindow(): Promise<boolean>;
+  /**
+   * 小纸条（她的收纳夹）—— 与聊天窗口的 `chatAPI` 共用同一批 IPC。
+   *
+   * 桌宠窗口也开放这一面：它是"她的内容"（和日记/记忆同类），
+   * 而且自动化验收就是从桌宠窗口驱动这些能力的。
+   * **没有"写纸条"**：用户不能留言，只能查看（需求）。
+   */
+  notes(): Promise<NoteBox>;
+  /** 让她自己记一件重要的事。 */
+  composeNote(): Promise<NoteBox>;
+  /** 全部标记为看过。 */
+  markNotesRead(): Promise<NoteBox>;
+  /** 删掉一条纸条（只删记录，收纳夹里的文件不动）。 */
+  deleteNote(id: string): Promise<NoteBox>;
+  /** 清空纸条记录（不收走文件）。 */
+  clearNotes(): Promise<NoteBox>;
+  /** 打开某条纸条附带的文件（传纸条 id；一条消息可能有多个附件，`fileIndex` 指明第几个）。 */
+  openNoteFile(id: string, fileIndex?: number): Promise<boolean>;
+  /** 在文件管理器里打开收纳夹目录。 */
+  openNotesDir(): Promise<boolean>;
+  /** 收纳夹里的文件清单（扫 `notes/files/`）。 */
+  noteFiles(): Promise<readonly NoteFileEntry[]>;
+  /** 读一个文件的内容给界面看（传文件名）。 */
+  previewNoteFile(name: string): Promise<NotePreview>;
+  /** 用系统默认程序打开收纳夹里的文件（传文件名）。 */
+  openNoteFileByName(name: string): Promise<boolean>;
+  /** 删掉收纳夹里的文件（传文件名；不可撤销）。 */
+  deleteNoteFile(name: string): Promise<{ readonly ok: boolean; readonly reason?: string }>;
+  /** 弹系统文件选择框，把选中的文件收进收纳夹；返回 null 表示用户取消了。 */
+  importNoteFile(): Promise<NoteBox | null>;
   /** 订阅状态变化（情绪心跳会定期推送）。 */
   onStatus(handler: (status: AIStatusView) => void): () => void;
   /** 订阅"宠物主动说话 / 系统提示"（聊天窗口与桌宠窗口都可订阅）。 */
@@ -603,8 +904,15 @@ export interface PerceptionAPI {
   viewNow(mode: PerceptionViewMode): Promise<PerceptionViewResult>;
   /** 摄像头授权开关（界面上必须是**显式**按钮，不允许偷偷打开）。 */
   authorizeCamera(authorized: boolean): Promise<PerceptionStatus>;
-  /** 清空她观察到的一切（观察记录 + 习惯画像）。 */
+  /** 清空她观察到的一切（观察记录 + 习惯画像 + 习惯模型）。 */
   clearData(): Promise<PerceptionStatus>;
+  /**
+   * 立刻做一次习惯建模（把统计归纳成一段话）。
+   *
+   * 会调用大模型（没配密钥/不可用时走本地模板），因此是**显式**动作；
+   * 平时每天 `habitModelHour` 之后自动做一次。
+   */
+  modelHabits(): Promise<PerceptionStatus>;
   /** 打开感知日志文件（人可读那份）。 */
   openLog(): Promise<boolean>;
   /** 立刻采一次（验收/调试入口）。 */

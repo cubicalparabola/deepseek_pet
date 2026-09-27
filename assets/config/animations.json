@@ -69,6 +69,23 @@
       "className": "anim-play"
     }
   },
+  "play_tail": {
+    "type": "video",
+    "source": "animations/play_tail.webm",
+    "loop": false,
+    "priority": 45,
+    "interruptible": true,
+    "cooldown": 6000,
+    "category": "random",
+    "label": "玩尾巴",
+    "tags": [
+      "random",
+      "show"
+    ],
+    "render": {
+      "className": "anim-play_tail"
+    }
+  },
   "shake": {
     "type": "video",
     "source": "animations/shake.webm",

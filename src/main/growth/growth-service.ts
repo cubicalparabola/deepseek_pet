@@ -396,6 +396,7 @@ export class GrowthService {
         ],
         temperature: 0.8,
         maxTokens: 160,
+            purpose: 'reflection',
       });
       const text = result.text.trim().slice(0, 300);
       this.options.onSpeak?.(text === '' ? fallback : text, 'talk');
@@ -511,6 +512,7 @@ export class GrowthService {
             ],
             temperature: 0.6,
             maxTokens: 500,
+            purpose: 'reflection',
           });
           const parsed = parseReflection(result.text);
           if (parsed.body.trim() !== '') {

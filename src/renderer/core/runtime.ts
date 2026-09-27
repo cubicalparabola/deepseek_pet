@@ -210,10 +210,11 @@ export class RuntimeCapabilities {
     }
   }
 
-  public showContextMenu(context: { region?: string; animationId?: string | null }): void {
+  /** 请主进程弹出桌宠右键菜单（菜单内容全在主进程，renderer 不需要传上下文）。 */
+  public showContextMenu(): void {
     if (!this.bridge) return;
     try {
-      this.bridge.menu.showContextMenu(context);
+      this.bridge.menu.showContextMenu();
     } catch (error) {
       this.logger.warn('opening context menu failed', { error });
     }
@@ -271,6 +272,16 @@ export class RuntimeCapabilities {
 
   public pluginBridge() {
     return this.bridge?.plugins;
+  }
+
+  /**
+   * 对话气泡桥。
+   *
+   * 插件要"说句话"（`context.ui.say`）时走它：气泡的几何与窗口尺寸都在 Main
+   * （必须把窗口变大才能显示气泡），渲染层只把文本交上去。
+   */
+  public bubble() {
+    return this.bridge?.bubble;
   }
 
   /**

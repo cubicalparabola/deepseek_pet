@@ -175,13 +175,34 @@
 .perception-log-text { flex: 1; line-height: 1.5; word-break: break-word; }
 .perception-empty { color: var(--muted); font-size: 11.5px; }
 
+/* ----------------------------- 习惯模型 ----------------------------- */
+
+/*
+ * 条目列表：每条是"时段：场景（应用）· N 天"。
+ * 这些数字全部来自本地统计（模型只写上面那段摘要），所以用等宽数字更好对齐。
+ */
+.perception-habit-model-list {
+  display: flex; flex-direction: column; gap: 3px;
+  margin: 0; padding: 0; list-style: none;
+  max-height: 180px; overflow-y: auto;
+}
+
+.perception-habit-model-item {
+  color: var(--text); font-size: 11.5px; line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  word-break: break-word; user-select: text;
+}
+
 /* ------------------------------- 滚动条 ------------------------------- */
 
 .perception-list,
+.perception-habit-model-list,
 .perception-view-result { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
 .perception-list::-webkit-scrollbar,
+.perception-habit-model-list::-webkit-scrollbar,
 .perception-view-result::-webkit-scrollbar { width: 8px; }
 .perception-list::-webkit-scrollbar-thumb,
+.perception-habit-model-list::-webkit-scrollbar-thumb,
 .perception-view-result::-webkit-scrollbar-thumb { border-radius: 4px; background: var(--line); }
 
 /* ---------------------------- 窄窗口折叠 ---------------------------- */

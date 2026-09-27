@@ -20,6 +20,8 @@
     <link rel="stylesheet" href="./perception-panel.css" />
     <!-- 成长与反思面板的样式（内容由 growth-panel.ts 动态挂载） -->
     <link rel="stylesheet" href="./growth-panel.css" />
+    <!-- 插件管理面板的样式（内容由 plugin-panel.ts 动态挂载） -->
+    <link rel="stylesheet" href="./plugin-panel.css" />
   </head>
   <body>
     <main class="panel">
@@ -53,11 +55,23 @@
       <div class="actions">
         <button id="reset" type="button" class="ghost">恢复默认大小</button>
         <button id="open-config" type="button" class="ghost">打开配置目录</button>
+        <button id="reload-plugins" type="button" class="ghost">重载插件</button>
       </div>
+
+      <p id="action-status" class="hint" hidden></p>
 
       <label class="switch">
         <input id="always-on-top" type="checkbox" />
         <span>总是置顶（盖在其它窗口之上）</span>
+      </label>
+
+      <!--
+        拖到边缘自动收起：以前只在托盘菜单里（菜单现在只放日常动作，配置都收在这里）。
+        关掉之后她可以停在屏幕中间、不再一松手就贴边。
+      -->
+      <label class="switch">
+        <input id="dock-on-edge" type="checkbox" />
+        <span>拖到边缘自动收起（贴边待着，再点一下就展开）</span>
       </label>
 
       <p class="hint">
@@ -87,6 +101,14 @@
         以及她每天的反思与"她据此把自己调安静了多少"（4.2 的可解释性）。
       -->
       <section id="growth-panel-root" aria-label="成长、记忆与反思"></section>
+
+      <!--
+        插件管理：内容由 src/settings/plugin-panel.ts 动态挂载到这里。
+        单独一个面板的理由：插件有"开/关"这个状态（关掉即可回收它的一切），
+        而上面几个面板全是纯配置 —— 混在一起会让"我到底还开着哪些插件"变得看不出来。
+        上面那个「重载插件」按钮保持原样（只做整体重载，不管单个插件的开关）。
+      -->
+      <section id="plugin-panel-root" aria-label="插件"></section>
     </main>
 
     <footer class="footer">

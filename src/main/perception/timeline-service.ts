@@ -142,6 +142,7 @@ export class TimelineService {
       date: timeline.date,
       activeMinutes: timeline.totals.activeMinutes,
       idleMinutes: timeline.totals.idleMinutes,
+      unaccountedMinutes: timeline.totals.unaccountedMinutes,
       byScene: timeline.totals.byScene,
       byApp: timeline.totals.byApp,
       recent: timeline.segments.slice(-recentLimit),
@@ -185,7 +186,9 @@ export class TimelineService {
           { role: 'user', content: messages.user },
         ],
         temperature: 0.8,
-        maxTokens: 300,
+        maxTokens: 600,
+        reasoningEffort: 'none',
+        purpose: 'timeline',
       });
       const narrative = stripWrappingQuotes(result.text).slice(0, 400);
       if (narrative !== '') {

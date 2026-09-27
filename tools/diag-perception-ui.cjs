@@ -67,15 +67,17 @@ app.whenReady().then(async () => {
       hasAuth: !!document.getElementById('perception-camera-authorize'),
       hasView: !!document.getElementById('perception-view-scene'),
       hasLog: !!document.getElementById('perception-log-list'),
+      // 「立刻采样一次」从托盘菜单搬进了这个面板（菜单只留日常动作）
+      hasSample: !!document.getElementById('perception-sample-now'),
       hasTimeline: !!document.getElementById('perception-timeline-list'),
       hasNarrate: !!document.getElementById('perception-timeline-narrate'),
       mounted: !!document.querySelector('#perception-panel-root .perception-panel'),
     };
   })()`);
   step(
-    '设置窗口的「环境与用户感知」面板已挂载（含"今天在做什么"时间线）',
+    '设置窗口的「环境与用户感知」面板已挂载（含"今天在做什么"时间线与立刻采样）',
     panel,
-    panel.mounted && panel.sections >= 5 && panel.hasPrivacy && panel.hasAuth && panel.hasTimeline && panel.hasNarrate,
+    panel.mounted && panel.sections >= 5 && panel.hasPrivacy && panel.hasAuth && panel.hasTimeline && panel.hasNarrate && panel.hasSample,
   );
 
   /*

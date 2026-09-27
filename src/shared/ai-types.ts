@@ -105,6 +105,14 @@ export interface AISettings {
   readonly diaryHour: number;
   /** 每 N 轮对话整理一次长期记忆（0 = 不自动整理，只靠日记时整理）。 */
   readonly consolidateEvery: number;
+  /**
+   * 记忆**明细流水**的保留天数（`events-*.jsonl` / `chat-*.jsonl` / `memory-log.md`）。
+   *
+   * 默认 180 天，与反思的 `keepReflectionDays` 对齐；`0` = 永久保留。
+   * 长期事实（`profile.json`）与记忆宫殿节点**不受它影响** —— 那些是"整理过的结论"，
+   * 而这里清的是"原始流水"（它才是无限增长的那部分）。
+   */
+  readonly keepMemoryDays: number;
   readonly provider: AIProviderConfig;
   readonly budget: AITokenBudget;
   readonly balance: AIBalanceSettings;
@@ -137,6 +145,7 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
   userName: '',
   diaryHour: 22,
   consolidateEvery: 6,
+  keepMemoryDays: 180,
   provider: {
     kind: 'openai',
     baseUrl: 'https://api.openai.com/v1',
@@ -172,6 +181,8 @@ export interface AISettingsPatch {
   readonly userName?: string;
   readonly diaryHour?: number;
   readonly consolidateEvery?: number;
+  /** 记忆明细流水的保留天数（0 = 永久保留）。 */
+  readonly keepMemoryDays?: number;
   readonly provider?: Partial<AIProviderConfig>;
   readonly budget?: Partial<AITokenBudget>;
   readonly balance?: Partial<AIBalanceSettings>;
@@ -206,7 +217,18 @@ export interface AIStatusView {
   readonly busy: boolean;
   /** 累计调用次数 / 累计 token。 */
   readonly calls: number;
+  /**
+   * **持久化**的累计 token（跨重启，用户的 token 预算按它算）。
+   *
+   * 它统计的是**所有**大模型调用：聊天、日记、小纸条、事实整理、前情摘要、
+   * 视觉理解、每日反思、习惯建模……（记账挂在 `LLMClient` 这个唯一出口上，
+   * 调用点不可能漏记。）
+   */
   readonly tokensUsed: number;
+  /** **本次运行**花掉的 token（进程启动起算，关掉程序就清零）。 */
+  readonly sessionTokens: number;
+  /** 本次运行按用途分档（`chat` / `vision` / `reflection` / …），按 token 从多到少。 */
+  readonly sessionUsage: readonly { readonly purpose: string; readonly tokens: number }[];
   /** 数据目录（记忆日志、日记都在里面）。 */
   readonly dataDir: string;
   /** 情绪快照（2.3）。情绪开关关闭时 `mood` 仍给出中性值。 */
@@ -519,6 +541,7 @@ export function sanitizeAISettings(raw: unknown, fallback: AISettings = DEFAULT_
     userName: str(record.userName, fallback.userName, 40),
     diaryHour: Math.round(num(record.diaryHour, fallback.diaryHour, 0, 23)),
     consolidateEvery: Math.round(num(record.consolidateEvery, fallback.consolidateEvery, 0, 100)),
+    keepMemoryDays: Math.round(num(record.keepMemoryDays, fallback.keepMemoryDays, 0, 3650)),
     provider: {
       kind,
       baseUrl: str(providerRaw.baseUrl, fallback.provider.baseUrl, 400).trim(),
@@ -610,6 +633,8 @@ export function createDefaultAIStatus(dataDir = ''): AIStatusView {
     busy: false,
     calls: 0,
     tokensUsed: 0,
+    sessionTokens: 0,
+    sessionUsage: [],
     dataDir,
     emotion: {
       mood: 62,

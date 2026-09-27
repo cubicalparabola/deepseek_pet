@@ -15,8 +15,8 @@
  */
 
 import { app, dialog, screen, session, shell } from 'electron';
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import {
   resolveAppRoot,
   resolvePetConfig,
@@ -53,7 +53,7 @@ import type {
   TrayStatePayload,
 } from '../shared/ipc';
 import type { PetAction } from '../shared/action-types';
-import type { PluginRecord } from '../shared/plugin-types';
+import type { PluginInstallResult, PluginRecord, PluginStatus } from '../shared/plugin-types';
 import { createLoggerFactory, type LogEntry } from '../shared/logging';
 import { attachUtf8Console, writeUtf8 } from './console-encoding';
 import {
@@ -65,23 +65,28 @@ import {
 } from '../shared/pet-size';
 import { createFileSink } from './log-file-sink';
 import { SettingsStore } from './settings-store';
+import { resolveDataDir, type DataDirResolution } from './data-dir';
 import { SettingsWindowManager } from './settings-window-manager';
 import { FALLBACK_ASPECT_RATIO, resolvePetSize } from './pet-size';
 import { resolveBubbleLayout, type BubblePayload, type BubbleState } from '../shared/bubble';
-import type { AIStatusView, DiaryEntry, PetPresence } from '../shared/ai-types';
+import type { AIStatusView, DiaryEntry, DiarySnapshot, PetPresence } from '../shared/ai-types';
 import { createDefaultAIStatus } from '../shared/ai-types';
-import type { PerceptionStatus, PerceptionViewMode } from '../shared/perception-types';
+import type { NoteBox, NotePreview } from '../shared/notes';
+import type { ChatView } from '../shared/chat-window';
+import type { PerceptionStatus } from '../shared/perception-types';
 import { DEFAULT_PERCEPTION_SETTINGS, isRecognizedScene } from '../shared/perception-types';
-import { sceneLabel } from '../shared/perception';
-import { PerceptionService, viewModeLabel } from './perception/perception-service';
+import { HABIT_KIND_ANY, HABIT_WINDOW_DAYS } from '../shared/perception';
+import { PerceptionService } from './perception/perception-service';
 import { GrowthService } from './growth/growth-service';
-import type { GrowthStatus } from '../shared/growth-types';
+import type { GrowthStatus, MemoryNodeKind } from '../shared/growth-types';
 import { DEFAULT_GROWTH_SETTINGS } from '../shared/growth-types';
 import { registerAssetProtocolHandler, registerAssetScheme } from './asset-protocol';
 import { AIService } from './ai/ai-service';
 import { ChatWindowManager } from './chat-window-manager';
 import { IpcManager } from './ipc-manager';
 import { PluginManager } from './plugin-manager';
+import { PluginInstaller } from './plugin-installer';
+import { PluginRuntime } from './plugin-runtime';
 import { TrayManager } from './tray-manager';
 import { WindowManager } from './window-manager';
 import { BubbleController } from './bubble-controller';
@@ -97,6 +102,23 @@ class DesktopPetApplication {
   private settingsWindow: SettingsWindowManager | null = null;
   private ipcManager: IpcManager | null = null;
   private pluginManager: PluginManager | null = null;
+  /**
+   * 插件运行期能力（网络代理 / 进程与 Python / 定时器 / 通知 / 界面贡献）。
+   *
+   * 为什么单独一个服务而不是塞进 PluginManager：后者只做"发现与编译"这类
+   * 静态工作，而这里是**有状态、要回收**的运行时（子进程、定时器、面板快照）。
+   * 分开之后，"停用插件"就有一处明确的兑现点（`PluginRuntime.revoke`）。
+   */
+  private pluginRuntime: PluginRuntime | null = null;
+  /**
+   * 插件的**安装与卸载**（唯一会动插件目录的地方）。
+   *
+   * 与 PluginManager（只读：发现/编译/清单）分开：写盘、删目录、规模校验
+   * 是另一类风险，放在一个文件里更看得清它到底会改什么。
+   */
+  private pluginInstaller: PluginInstaller | null = null;
+  /** 渲染层上报的插件状态（active / failed 只有它知道），与主进程清单合并后展示。 */
+  private readonly pluginLiveStatus = new Map<string, { status: PluginStatus; error?: string }>();
   private bubbleController: BubbleController | null = null;
   /** AI 认知与人格（2.1~2.4）：大模型、记忆、情绪、日记都在这里。 */
   private aiService: AIService | null = null;
@@ -122,6 +144,8 @@ class DesktopPetApplication {
   private bootstrapData: PetBootstrap | null = null;
   private settingsStore: SettingsStore | null = null;
   private settings: PetSettings = { ...DEFAULT_PET_SETTINGS };
+  /** 数据目录的解析结果（自检与日志要回答"记忆存在哪"）。 */
+  private dataDirInfo: DataDirResolution | null = null;
   private sizeInfo: PetSizeInfo | null = null;
   private quitting = false;
   private readonly pendingLogs: LogEntry[] = [];
@@ -195,6 +219,28 @@ class DesktopPetApplication {
     this.loadAnimationManifest();
     this.loadBehaviorConfig();
 
+    /*
+     * 数据目录：优先项目目录下的 `data/`（需求："记忆不要放 C 盘"），
+     * 解析时顺带把老 userData 里的记忆**一次性复制**过来。
+     * 必须早于任何服务构造 —— 它们全部通过 `aiDataDir()` 取路径。
+     */
+    const dataDir = resolveDataDir({
+      appRoot: this.config.appRoot,
+      userDataDir: app.getPath('userData'),
+      logger: this.loggerFactory.create('DataDir'),
+      envOverride: process.env.DESKTOP_PET_AI_DATA_DIR,
+    });
+    resolvedDataDir = dataDir.dir;
+    this.dataDirInfo = dataDir;
+    this.logger.info('data dir resolved', {
+      data: {
+        dir: dataDir.dir,
+        source: dataDir.source,
+        migrated: dataDir.migrated.join(','),
+        note: dataDir.note,
+      },
+    });
+
     // 设置（尺寸 / 置顶）：存放于 assets/config/settings.json，与其它配置在一起
     this.settingsStore = new SettingsStore({
       configPath: this.config.configPath,
@@ -211,6 +257,56 @@ class DesktopPetApplication {
       logger: this.loggerFactory.create('PluginManager'),
     });
     this.pluginManager.discoverPlugins();
+
+    /*
+     * 插件运行期能力（"插件要碰系统，就必须先声明权限"）。
+     *
+     * 必须早于 `createChatWindow()`：聊天窗口的启动数据里要带插件面板快照。
+     * 权限执法与"停用即回收"都在这个服务里，见 src/main/plugin-runtime.ts。
+     */
+    this.pluginRuntime = new PluginRuntime({
+      config: this.config,
+      logger: this.loggerFactory.create('PluginRuntime'),
+      permissionsOf: (id) => this.pluginManager?.getEffectivePermissions(id) ?? [],
+      // 有目录 = 这个插件存在且处于启用状态（停用的插件拿不到任何能力）
+      dirOf: (id) => this.pluginManager?.getDiscoveredPlugin(id)?.dir ?? null,
+      nameOf: (id) => this.pluginManager?.getPluginRecord(id)?.name ?? id,
+      emitUIEvent: (event) => this.ipcManager?.notifyPluginUIEvent(event),
+      emitTimer: (payload) => this.ipcManager?.notifyPluginTimer(payload),
+      onUIContributionChanged: () => this.handlePluginUIContributionChanged(),
+      /*
+       * `mail` 权限的最后一公里：插件投递的消息与附件落进「交互」收件箱。
+       *
+       * 接在 AI 认知层（收件箱是它的东西），投完顺手刷新界面 ——
+       * 用户正开着「交互」窗口时应当立刻看到新消息（未读徽标也会亮）。
+       */
+      deliverMail: (delivery) => {
+        const service = this.aiService;
+        if (!service) return { ok: false, files: [], error: '收件箱未就绪（AI 模块还没起来）' };
+        const result = service.deliverMail(delivery);
+        this.refreshAISurfaces();
+        return result;
+      },
+    });
+
+    /*
+     * 安装器：用户装上来的插件放在 `plugins/<id>/`，与内置示例同一个根。
+     *
+     * 卸载时顺手清 `data/plugins/<id>/`（将来插件要存大文件的地方）：
+     * 代码删了、数据还留着，用户不会觉得"卸载干净了"。
+     */
+    this.pluginInstaller = new PluginInstaller({
+      config: this.config,
+      logger: this.loggerFactory.create('PluginInstaller'),
+      plugins: this.pluginManager,
+      purgeData: (id) => {
+        const dir = join(aiDataDir(), 'plugins', id);
+        if (existsSync(dir)) {
+          rmSync(dir, { recursive: true, force: true });
+          this.logger.info('plugin data purged', { data: { id, dir } });
+        }
+      },
+    });
 
     /*
      * AI 认知与人格（2.1~2.4）。
@@ -256,6 +352,18 @@ class DesktopPetApplication {
         this.settingsWindow?.pushState();
         return state;
       },
+      /*
+       * 拖到边缘自动收起 / 重载插件：以前只在托盘菜单里，现在搬到设置窗口
+       * （需求：菜单留给日常动作，配置项收进设置）。实现与托盘那条**同源**，
+       * 所以不存在"菜单里改了、设置里没改"的分叉。
+       */
+      setDockOnEdgeFromSettingsWindow: (value) => {
+        const state = this.applyDockOnEdge(value);
+        this.settingsWindow?.pushState();
+        return state;
+      },
+      reloadPluginsFromSettingsWindow: () => this.triggerPluginReload(),
+      listPluginPanels: () => this.pluginRuntime?.getPanelViews() ?? [],
       openConfigFolder: () => this.settingsWindow?.openConfigFolder() ?? false,
       closeSettingsWindow: () => {
         this.settingsWindow?.hide();
@@ -278,12 +386,72 @@ class DesktopPetApplication {
       showWindow: () => this.showPet(),
       hideWindow: () => this.hidePet(),
       setIgnoreMouseEvents: (ignore, forward) => this.windowManager?.setIgnoreMouseEvents(ignore, forward),
-      showContextMenu: (context) => this.trayManager?.showContextMenu(context),
+      showContextMenu: () => this.trayManager?.showContextMenu(),
       updateTrayState: (state) => this.applyTrayState(state),
       discoverPlugins: () => this.pluginManager?.discoverPlugins() ?? [],
       fetchPluginCode: async (id) => this.pluginManager?.loadPlugin(id) ?? null,
       reloadPlugin: async (id) => this.pluginManager?.reloadPlugin(id) ?? null,
-      listPlugins: () => this.pluginManager?.getLoadedPlugins() ?? [],
+      listPlugins: () => this.currentPluginRecords(),
+      /* ---------------------- 插件运行期（可随时关闭） ---------------------- */
+      setPluginEnabled: (id, enabled) => this.togglePlugin(id, enabled),
+      setPluginEnabledFromSettingsWindow: (id, enabled) => {
+        const records = this.togglePlugin(id, enabled);
+        // 设置窗口是发起方，但托盘菜单/桌宠窗口也可能改了同一份清单 —— 一律以推送回读为准
+        this.settingsWindow?.pushPlugins();
+        return records;
+      },
+      pluginNet: async (pluginId, request) =>
+        this.pluginRuntime?.net(pluginId, request) ?? {
+          ok: false,
+          status: 0,
+          headers: {},
+          body: '',
+          truncated: false,
+          error: '插件运行时未就绪',
+        },
+      pluginProcess: async (pluginId, request) =>
+        this.pluginRuntime?.runProcess(pluginId, request) ?? {
+          ok: false,
+          code: null,
+          stdout: '',
+          stderr: '',
+          timedOut: false,
+          truncated: false,
+          error: '插件运行时未就绪',
+        },
+      pluginWhich: async (pluginId, command) => this.pluginRuntime?.which(pluginId, command) ?? null,
+      pluginPythonInfo: async (pluginId) =>
+        this.pluginRuntime?.pythonInfo(pluginId) ?? {
+          ok: false,
+          interpreter: null,
+          version: null,
+          error: '插件运行时未就绪',
+        },
+      pluginPythonRun: async (pluginId, request) =>
+        this.pluginRuntime?.pythonRun(pluginId, request) ?? {
+          ok: false,
+          code: null,
+          stdout: '',
+          stderr: '',
+          timedOut: false,
+          truncated: false,
+          error: '插件运行时未就绪',
+        },
+      pluginNotify: (pluginId, request) => this.pluginRuntime?.notify(pluginId, request) ?? false,
+      pluginMail: (pluginId, request) =>
+        this.pluginRuntime?.sendMail(pluginId, request) ?? {
+          ok: false,
+          files: [],
+          error: '插件运行时未就绪',
+        },
+      pluginOpenExternal: async (pluginId, url) => this.pluginRuntime?.openExternal(pluginId, url) ?? false,
+      pluginStartTimer: (payload) => this.pluginRuntime?.startTimer(payload) ?? false,
+      pluginCancelTimer: (pluginId, timerId) => this.pluginRuntime?.cancelTimer(pluginId, timerId) ?? false,
+      pluginSetUIContribution: (payload) => this.pluginRuntime?.setUIContribution(payload.pluginId, payload),
+      pluginPanelAction: (payload) => this.pluginRuntime?.handlePanelAction(payload) ?? false,
+      openPluginPanel: (pluginId, panelId) => this.openPluginPanel(pluginId, panelId),
+      installPlugin: (directory) => this.installPlugin(directory),
+      uninstallPlugin: (id) => this.uninstallPlugin(id),
       onRendererLog: (payload) => this.handleRendererLog(payload),
       onAnimationChanged: (payload) => this.handleAnimationChanged(payload),
       onStateChanged: (payload) => this.handleStateChanged(payload),
@@ -316,6 +484,8 @@ class DesktopPetApplication {
       aiHistory: () => this.aiService?.history() ?? [],
       aiMemory: () => this.aiService?.memorySnapshot() ?? emptyMemorySnapshot(),
       aiClearMemory: () => this.aiService?.clearMemory() ?? emptyMemorySnapshot(),
+      // 立刻按保留期清一次记忆明细（调试/验收入口；日常是她每天自动清一次）
+      aiPruneMemory: () => this.aiService?.pruneMemory(true) ?? { days: 0, logSections: 0 },
       aiOpenMemoryLog: () => this.openPath(this.aiService?.memoryLogFile ?? ''),
       aiDiary: () => this.aiService?.diarySnapshot() ?? { items: [], dataDir: '', todayWritten: false, diaryHour: 22 },
       aiDiaryGet: (date) => this.aiService?.getDiary(date) ?? null,
@@ -337,6 +507,61 @@ class DesktopPetApplication {
         // 用户碰了她 = 对刚才那次主动开口的"回应"（4.2 的反馈信号）
         this.growth?.recordUserActivity();
       },
+      /*
+       * 互动动画播完 -> 才加心情（需求："互动动画播放结束才能加 mood 值"）。
+       * 渲染层在动画 `ended` 之后报这一条；没有动画可等的互动（拖动等）
+       * 它会在互动那一刻直接报过来，所以这里不需要任何兜底判定。
+       */
+      aiInteractionSettled: (kind) => {
+        this.aiService?.settleInteraction(kind);
+      },
+      /* --------------------- 小纸条（她的收纳夹） --------------------- */
+      aiNotes: () => this.aiService?.noteBox() ?? emptyNoteBox(),
+      aiNoteCompose: async () => {
+        const box = (await this.aiService?.composeNote()) ?? emptyNoteBox();
+        this.refreshAISurfaces();
+        return box;
+      },
+      aiNoteRead: () => {
+        const box = this.aiService?.markNotesRead() ?? emptyNoteBox();
+        this.refreshAISurfaces();
+        return box;
+      },
+      aiNoteDelete: (id) => {
+        const box = this.aiService?.removeNote(id) ?? emptyNoteBox();
+        this.refreshAISurfaces();
+        return box;
+      },
+      aiNoteClear: () => {
+        const box = this.aiService?.clearNotes() ?? emptyNoteBox();
+        this.refreshAISurfaces();
+        return box;
+      },
+      /*
+       * 打开文件只接受**消息 id**：路径由主进程从自己存的记录里查出来。
+       * 这样渲染层即使被注入也无法用它打开任意路径（安全边界留在主进程）。
+       * 一条消息可以有多个附件，`fileIndex` 指明打开哪一个（缺省第一个）。
+       */
+      aiNoteOpenFile: (id, fileIndex) => {
+        const note = this.aiService?.noteService.find(id) ?? null;
+        const files = note?.files ?? [];
+        const index = typeof fileIndex === 'number' && Number.isInteger(fileIndex) && fileIndex >= 0 ? fileIndex : 0;
+        const file = files[index];
+        if (!file) return false;
+        return this.openPath(file.path);
+      },
+      aiNoteOpenDir: () => this.openPath(this.aiService?.noteService.dataDir ?? ''),
+      /* 附件：只认文件名，路径由 NoteService 自己解析并校验落在 files/ 内 */
+      aiNoteFiles: () => this.aiService?.noteService.listFiles() ?? [],
+      aiNoteFilePreview: (name) =>
+        this.aiService?.noteService.readFilePreview(name) ??
+        ({ ok: false, name, size: 0, preview: 'other', reason: '收纳夹还没准备好。' } satisfies NotePreview),
+      aiNoteFileOpen: (name) => {
+        const entry = this.aiService?.noteService.listFiles().find((item) => item.name === name) ?? null;
+        return entry ? this.openPath(entry.path) : false;
+      },
+      aiNoteFileDelete: (name) => this.aiService?.noteService.deleteFile(name) ?? { ok: false, reason: '收纳夹还没准备好。' },
+      aiNoteFileImport: () => this.importNoteFile(),
       aiResetEmotion: () => this.aiService?.resetEmotion() ?? this.aiStatus(),
       aiSetPresence: (presence) => {
         this.applyPresenceFromUI(presence);
@@ -356,6 +581,14 @@ class DesktopPetApplication {
         return status;
       },
       perceptionClearData: () => this.perception?.clearData() ?? this.perceptionStatus(),
+      /*
+       * 「立刻建模」：`force` 会绕过"样本没涨就跳过"的判断 ——
+       * 用户点了按钮就是想现在看到结果（哪怕只是把刚才那次采样算进去）。
+       */
+      perceptionModelHabits: async () => {
+        await this.perception?.modelHabits(true);
+        return this.perceptionStatus();
+      },
       perceptionOpenLog: () => this.openPath(this.perception?.logPath ?? ''),
       perceptionSampleNow: async () => this.perception?.tick(Date.now(), true) ?? this.perceptionStatus(),
       perceptionTimeline: async (date) =>
@@ -457,6 +690,7 @@ class DesktopPetApplication {
       getAIStatus: () => this.aiStatus(),
       getPerceptionStatus: () => this.perceptionStatus(),
       getGrowthStatus: () => this.growthStatus(),
+      getPluginRecords: () => this.currentPluginRecords(),
     });
   }
 
@@ -495,10 +729,33 @@ class DesktopPetApplication {
         const ai = this.aiService?.status();
         return { petName: ai?.settings.petName ?? '鲸鱼娘', userName: ai?.settings.userName ?? '' };
       },
+      // "最近发生的事"这一类闲聊只用**真实记忆**（记忆宫殿里最近的节点）
+      getRecentMoment: () => this.recentMomentForSmallTalk(),
     });
     this.perception.load();
     this.perception.start();
     this.logger.info('perception module ready', { data: { summary: this.perception.describe() } });
+  }
+
+  /**
+   * "最近发生的事"：从记忆宫殿里挑一条**值得提一句**的真实记忆。
+   *
+   * 三条取舍：
+   * - **只用真实节点**：拿不到就返回 null，她会去说别的（绝不编一件）；
+   * - **跳过 first-meet / habit**：前者不是"最近的事"，后者由习惯询问那一档负责；
+   * - **超过两周的不提**：那时候说"最近"就不诚实了。
+   */
+  private recentMomentForSmallTalk(): { title: string; daysAgo: number; kind: MemoryNodeKind } | null {
+    const nodes = this.growth?.getNodes() ?? [];
+    for (const node of nodes) {
+      if (node.kind === 'first-meet' || node.kind === 'habit') continue;
+      const at = Date.parse(node.at);
+      if (!Number.isFinite(at)) continue;
+      const daysAgo = Math.max(0, Math.floor((Date.now() - at) / 86400000));
+      if (daysAgo > 14) return null;
+      return { title: node.title, daysAgo, kind: node.kind };
+    }
+    return null;
   }
 
   /**
@@ -548,36 +805,6 @@ class DesktopPetApplication {
       this.settingsWindow?.getWindow() ?? null,
     ].filter((window): window is NonNullable<typeof window> => window !== null);
     this.perception?.applyContentProtection(windows, settings.hideFromCapture);
-  }
-
-  /**
-   * "她看见了什么？"——把感知状态整理成一段可读文本（托盘菜单入口）。
-   *
-   * 与记忆一样，感知必须**可审计**：用户点一下就能看到她掌握了什么信息、
-   * 最近一次为什么开口。这是"感知"能被接受的前提。
-   */
-  private perceptionDigest(): string {
-    const status = this.perceptionStatus();
-    const observation = status.lastObservation;
-    const lines = [
-      status.capturing ? '感知中' : `暂停感知（${status.pausedReason || '未开启'}）`,
-      observation
-        ? (isRecognizedScene(observation.scene)
-            ? `最近看到：${sceneLabel(observation.scene)}${observation.app ? `（${observation.app}）` : ''}${observation.sensitive ? ' · 私人内容' : ''}`
-            // 没认出来就直说"没认出来"，不要拿一个假场景名糊上去（用户要求"当作没看见"）
-            : `最近一次没认出在做什么${observation.app ? `（当时是 ${observation.app}）` : ''}`)
-        : '还没看到什么（需要接上大模型才能看懂屏幕）',
-      `行为：空闲 ${status.behavior.idleSeconds}s · 连续使用 ${status.behavior.sessionMinutes} 分钟 · 本小时切换 ${status.behavior.switchesLastHour} 次`,
-      `在场：${status.presence.present ? '在电脑前' : '不在'}（来源：${status.presence.source}）`,
-      `习惯：采样 ${status.habits.samples} 次 · 覆盖 ${status.habits.activeDays} 天` +
-        (status.habits.typicalNow ? ` · 这个点通常在做${sceneLabel(status.habits.typicalNow)}` : ''),
-      status.lastIntervention
-        ? `上次开口：${status.lastIntervention.text}（${status.lastIntervention.reason}）`
-        : '还没主动开口过',
-      `今天主动打扰：${status.interventionsToday} 次（上限 ${status.settings.proactiveMaxPerHour}/小时）`,
-      `感知日志：${status.dataDir}`,
-    ];
-    return lines.join('\n');
   }
 
   /** 采了一帧后要在窗口上"躲起来"（敏感内容 / 陌生人）。 */
@@ -653,50 +880,27 @@ class DesktopPetApplication {
       lastObservation: null,
       behavior: { idleSeconds: 0, sessionMinutes: 0, switchesLastHour: 0, hour: new Date().getHours(), lateNight: false, userState: 'unknown' },
       presence: { present: true, source: 'unknown', at: '' },
-      habits: { samples: 0, activeDays: 0, latestActiveHour: null, earliestActiveHour: null, typicalNow: null },
+      habits: {
+        samples: 0,
+        activeDays: 0,
+        latestActiveHour: null,
+        earliestActiveHour: null,
+        typicalNow: null,
+        typicalKind: HABIT_KIND_ANY,
+        recentDays: 0,
+        windowDays: HABIT_WINDOW_DAYS,
+        model: null,
+      },
       lastIntervention: null,
       interventionsToday: 0,
       cameraReady: false,
       windowContext: { count: 0, foregroundTitle: '', foregroundProcess: '', sample: [], backingOff: false },
-      timeline: { date: '', activeMinutes: 0, idleMinutes: 0, byScene: [], byApp: [], recent: [], narrative: '' },
+      timeline: { date: '', activeMinutes: 0, idleMinutes: 0, unaccountedMinutes: 0, byScene: [], byApp: [], recent: [], narrative: '' },
       retention: { days: 0, lastPrunedAt: '', lastPrunedDays: 0 },
       dataDir: aiDataDir(),
       lastError: '',
     };
   }
-
-  /** 3.2 按需看屏幕（只剩场景）：结果同时进气泡与聊天窗口（和 AI 回复走同一套展示）。 */
-  private async viewScreen(mode: PerceptionViewMode): Promise<void> {
-    if (!this.perception) return;
-    // 用户主动点的「看我在做什么」：收起/隐藏时先请回桌面，结果才有地方说
-    this.expandForSpeech('view-screen');
-    const result = await this.perception.viewNow(mode);
-    this.handleSpeak({ text: result.text, animation: this.animationForScene(result.scene), kind: 'reply' });
-    if (this.aiService) {
-      this.aiService.recordEvent('interaction', `看屏幕（${viewModeLabel(mode)}）：${result.text.slice(0, 60)}`);
-    }
-  }
-
-  /** 场景 -> 动画（挑不到就交给 AI 模块按情绪决定）。 */
-  private animationForScene(scene: string): string | null {
-    const candidates = this.animationSummaries().map((item) => item.id);
-    const pick = (ids: readonly string[]): string | null => ids.find((id) => candidates.includes(id)) ?? null;
-    switch (scene) {
-      case 'coding':
-      case 'terminal':
-        return pick(['work', 'read', 'talk']);
-      case 'reading':
-        return pick(['read', 'work', 'talk']);
-      case 'video':
-      case 'gaming':
-        return pick(['cute', 'fawning', 'talk']);
-      case 'idle':
-        return pick(['lie', 'sleep', 'read']);
-      default:
-        return pick(['talk', 'cute']);
-    }
-  }
-
 
   /* ------------------------------------------------------------------ */
   /* 成长、记忆与反思（4.1 / 4.2）                                        */
@@ -827,6 +1031,13 @@ class DesktopPetApplication {
       onSpeak: (request) => this.handleSpeak(request),
       onStatus: () => this.refreshAISurfaces(),
       /*
+       * 日记写完 -> 推给「交互」窗口的日记页。
+       *
+       * 日记有两个入口（设置窗口的 AI 面板、交互窗口的日记页）外加每天自动写一篇，
+       * 不推的话正开着的日记页会停在旧清单上（"刚写完的那篇看不见"）。
+       */
+      onDiaryWritten: () => this.chatWindow?.pushDiary(),
+      /*
        * 「今天在做什么」喂给聊天与日记。
        *
        * 为什么由感知模块提供、而不是让 AI 模块自己去读文件：数据的真相在感知模块内存里
@@ -834,6 +1045,11 @@ class DesktopPetApplication {
        * 用回调而不是启动时快照：每轮对话/每次写日记都取当时最新的那一段。
        */
       getDailyTimeline: () => this.perception?.dailyTimelineText() ?? '',
+      /*
+       * 记忆宫殿的节点：只在模型**主动调用工具**时才会被读到（需求 7.3），
+       * 平时不进提示词。用回调而不是快照 —— 反思后新长出来的节点立刻可查。
+       */
+      getPalaceNodes: () => this.growth?.getNodes() ?? [],
     });
     this.aiService.load();
     this.logger.info('ai module ready', { data: { dataDir: aiDataDir() } });
@@ -845,6 +1061,9 @@ class DesktopPetApplication {
       logger: this.loggerFactory.create('ChatWindow'),
       getHistory: () => this.aiService?.history() ?? [],
       getStatus: () => this.aiStatus(),
+      getNotes: () => this.aiService?.noteBox() ?? emptyNoteBox(),
+      getDiary: () => this.aiService?.diarySnapshot() ?? emptyDiarySnapshot(),
+      getPanels: () => this.pluginRuntime?.getPanelViews() ?? [],
     });
   }
 
@@ -857,7 +1076,7 @@ class DesktopPetApplication {
    * 用户正在看的点击反应，也不该绕过防刷屏的冷却。
    *
    * ⚠️ **收起 / 隐藏 / 暂停行为时一律不触发**（用户点托盘菜单仍可手动播）。
-   * 为什么必须在这里拦：收起状态的默认动画是 watch / lie，而它是三段式 ——
+   * 为什么必须在这里拦：收起状态的默认动画是 watch / sleep，而它是三段式 ——
    * 每来一条触发动画都要"先播它的 end 再播新的"，然后结束后又要重新起默认动画。
    * 也就是说在她安静待着的时候，任何自动来源的动画都会让她**反复播收尾段**
    * （实测表现："右侧一直在循环 end"）。收起 = 安静待着，就不该有这些动画。
@@ -1006,11 +1225,19 @@ class DesktopPetApplication {
     return { ...fallback, presence: this.presence };
   }
 
-  /** 状态变化后刷新三处 UI：托盘菜单、设置窗口、聊天窗口。 */
+  /** 状态变化后刷新几处 UI：托盘菜单、设置窗口、聊天窗口、桌宠窗口。 */
   private refreshAISurfaces(): void {
     this.refreshTray();
     this.settingsWindow?.pushAIStatus();
-    this.chatWindow?.pushStatus(this.aiStatus());
+    const status = this.aiStatus();
+    this.chatWindow?.pushStatus(status);
+    /*
+     * 桌宠窗口也要一份：它的**行为**依赖情绪
+     * （"心情低于阈值 -> 随机池全变 sad"，判定在渲染层，见 Renderer.wireMoodMirror）。
+     */
+    this.ipcManager?.pushAIStatusToPet(status);
+    // 留言箱的未读数会出现在托盘菜单与聊天窗口的页签上，一起刷
+    this.chatWindow?.pushNotes();
   }
 
   private openPath(target: string): boolean {
@@ -1024,42 +1251,54 @@ class DesktopPetApplication {
     }
   }
 
-  private openChatWindow(): boolean {
-    this.chatWindow?.open();
+  /**
+   * 弹系统文件选择框，把选中的文件**复制**进收纳夹（`notes/files/`）。
+   *
+   * 为什么要这一步：小纸条是"她保存重要事情的目录"，而"重要的事情"很多时候是
+   * **一个文件**（她后来整理好的东西）。文件只能由主进程读写，所以选择框也在这里弹；
+   * 渲染层拿到的只是选完之后的收纳夹快照。
+   *
+   * 复制而不是移动：源文件留在原地，收纳夹里是一份副本 —— 收纳夹坏了也不会丢原件。
+   *
+   * @returns 收好之后的收纳夹；用户取消或失败时返回 null
+   */
+  private async importNoteFile(): Promise<NoteBox | null> {
+    if (!this.aiService) return null;
+    const parent = this.chatWindow?.getWindow() ?? this.settingsWindow?.getWindow() ?? null;
+    try {
+      const picked = parent
+        ? await dialog.showOpenDialog(parent, {
+            title: '选一个文件交给她收着',
+            buttonLabel: '收进小纸条',
+            properties: ['openFile'],
+          })
+        : await dialog.showOpenDialog({
+            title: '选一个文件交给她收着',
+            buttonLabel: '收进小纸条',
+            properties: ['openFile'],
+          });
+      if (picked.canceled || picked.filePaths.length === 0) return null;
+      const sourcePath = picked.filePaths[0];
+      if (!sourcePath) return null;
+      const box = await this.aiService.fileNote({
+        sourcePath,
+        title: basename(sourcePath),
+        text: '',
+      });
+      this.refreshAISurfaces();
+      return box;
+    } catch (error) {
+      this.logger.warn('importing note file failed', { error: describeError(error) });
+      return null;
+    }
+  }
+
+  private openChatWindow(view: ChatView = 'chat'): boolean {
+    this.chatWindow?.open(view);
     return this.chatWindow?.exists() ?? false;
   }
 
-  /**
-   * "她记住了什么？"——把长期记忆整理成一段可读文本显示在气泡里。
-   *
-   * 记忆必须是**可审计**的：用户点一下就能看到她在记什么，
-   * 而不是只能去翻 JSON 文件。记错了也才能被发现。
-   */
-  private memoryDigest(): string {
-    const snapshot = this.aiService?.memorySnapshot();
-    if (!snapshot || snapshot.profile.facts.length === 0) {
-      return '我现在还没记住什么。多和我说说话吧～\n（记忆日志：' + (this.aiService?.memoryLogFile ?? '-') + '）';
-    }
-    const label: Record<string, string> = {
-      name: '名字',
-      interest: '兴趣',
-      routine: '作息',
-      activity: '常做的事',
-      project: '在做的项目',
-      preference: '偏好',
-      relation: '提到的人',
-      note: '其它',
-    };
-    const lines = snapshot.profile.facts.slice(0, 12).map((fact) => `· ${label[fact.key] ?? fact.key}：${fact.value}`);
-    return [
-      `我记住了 ${snapshot.stats.facts} 件事（对话 ${snapshot.stats.turns} 轮）：`,
-      ...lines,
-      '',
-      '记忆日志：' + snapshot.logFile,
-    ].join('\n');
-  }
-
-  /** 立刻写一篇日记（托盘菜单与设置界面共用）。 */
+  /** 立刻写一篇日记（「交互」窗口的日记页与设置界面共用）。 */
   private async writeDiaryNow(): Promise<DiaryEntry> {
     if (!this.aiService) {
       throw new Error('AI 模块未就绪');
@@ -1199,128 +1438,34 @@ class DesktopPetApplication {
       config: this.config,
       logger: this.loggerFactory.create('TrayManager'),
       callbacks: {
-        onToggleVisible: () => {
-          const visible = this.windowManager?.toggle() ?? false;
-          this.windowVisible = visible;
-          this.refreshTray();
-          return visible;
-        },
         onShow: () => this.showPet(),
         onHide: () => this.hidePet(),
-        onToggleBehavior: () => {
-          this.behaviorsPausedByUser = !this.behaviorsPausedByUser;
-          this.syncBehaviorPause();
-          this.refreshTray();
-          return this.behaviorPaused;
-        },
-        onReloadPlugins: () => {
-          this.triggerPluginReload();
-        },
-        onResetAnimation: () => {
-          this.ipcManager?.setAnimation('idle');
-        },
         onPlayAnimation: (animationId) => {
           this.ipcManager?.setAnimation(animationId);
         },
-        onShowBubble: (text) => {
-          /* ready 交给控制器按"是否需要等测量"决定，这里随便给个值 */
-          this.applyBubble({ visible: true, text, ready: false });
-        },
-        onHideBubble: () => {
-          this.applyBubble(null);
-        },
-        onSetAlwaysOnTop: (value) => {
-          this.applyAlwaysOnTop(value);
-        },
-        onSetDockOnEdge: (value) => {
-          this.applyDockOnEdge(value);
-        },
         onOpenSettings: () => this.settingsWindow?.open(),
 
-        /* ------------------ AI 认知与人格（2.1~2.4） ------------------ */
-        onOpenChat: () => {
-          this.openChatWindow();
-        },
-        onSpeakUp: () => {
-          this.expandForSpeech('tray-speak-up');
-          void this.aiService?.speakUp('tray');
-        },
-        onWriteDiary: () => {
-          void this.writeDiaryNow().catch((error: unknown) => {
-            this.logger.warn('writing diary from tray failed', { error: describeError(error) });
-          });
-        },
-        onOpenDiaryFolder: () => {
-          this.openPath(this.aiService?.diaryService.dataDir ?? '');
-        },
-        onShowMemoryDigest: () => {
-          this.expandForSpeech('tray-memory-digest');
-          this.applyBubble({ visible: true, text: this.memoryDigest(), ready: false });
-        },
+        /* --------------------- 交互（她记的事 + 她的日记） --------------------- */
+        /*
+         * 「交互…」= 打开那个普通窗口（小纸条 / 日记 / 文件）。
+         * 菜单里以前还有一整块 AI 子菜单与「查看记忆宫殿」（2026-09 需求删掉）：
+         * 日记搬进了这个窗口，记忆宫殿只在设置窗口的面板里保留。
+         */
+        onOpenNotes: () => this.openChatWindow('notes'),
         onToggleCollapsed: () => this.toggleCollapsed(),
-        onResetEmotion: () => {
-          this.aiService?.resetEmotion();
-          this.refreshTray();
-        },
-        onOpenAISettings: () => this.settingsWindow?.open(),
 
-        /* ------------------ 环境与用户感知（3.1~3.6） ------------------ */
-        onLookScreen: (mode) => {
-          void this.viewScreen(mode);
+        /* ---------------------------- 插件 ---------------------------- */
+        /*
+         * 「插件」子菜单里点一下开关 = 立刻启停并写盘。
+         * 为什么放在菜单而不是只放设置窗口：需求是"插件可随时关闭"，
+         * 一个正在弹通知/占资源的插件，用户应该能用两次点击把它关掉。
+         */
+        onTogglePlugin: (id, enabled) => {
+          this.togglePlugin(id, enabled);
         },
-        onTogglePrivacyMode: () => {
-          // 这句确认也是"她开口"：收起/隐藏时先请回桌面再说
-          this.expandForSpeech('tray-privacy-mode');
-          const before = this.perception?.settings.privacyMode ?? false;
-          const status = this.perception?.setSettings({ privacyMode: !before }) ?? this.perceptionStatus();
-          this.applyBubble({
-            visible: true,
-            text: status.settings.privacyMode
-              ? '好，我不看了（隐私模式已开启）。'
-              : '隐私模式关掉了，我又可以陪着你了。',
-            ready: false,
-          });
-          return status.settings.privacyMode;
+        onPluginMenuItem: (pluginId, itemId) => {
+          this.pluginRuntime?.handleMenuClick(pluginId, itemId);
         },
-        onShowPerceptionDigest: () => {
-          this.expandForSpeech('tray-perception-digest');
-          this.applyBubble({ visible: true, text: this.perceptionDigest(), ready: false });
-        },
-        onOpenPerceptionLog: () => {
-          this.openPath(this.perception?.logPath ?? '');
-        },
-        onSamplePerception: () => {
-          // force = true：菜单点「立刻感知一次」就是要**现在**采一次，
-          // 不能被采样节流挡掉（否则用户点了没反应，只有行为数字动了一下）
-          void this.perception?.tick(Date.now(), true);
-        },
-        onToggleCameraConsent: () => {
-          const authorized = this.perception?.settings.cameraAuthorized === true;
-          this.perception?.authorizeCamera(!authorized);
-          if (!authorized) this.ipcManager?.requestCameraFrame();
-          return !authorized;
-        },
-
-        /* ------------------ 成长、记忆与反思（4.1 / 4.2） ------------------ */
-        onShowPalaceDigest: () => {
-          this.expandForSpeech('tray-palace-digest');
-          this.applyBubble({ visible: true, text: this.growth?.digest() ?? '成长模块未就绪', ready: false });
-        },
-        onOpenPalaceFile: () => {
-          this.openPath(this.growth?.palacePath ?? '');
-        },
-        onReflectNow: () => {
-          this.expandForSpeech('tray-reflect-now');
-          void this.growth?.reflectNow().then((entry) => {
-            this.applyBubble({ visible: true, text: entry.body, ready: false });
-            this.refreshTray();
-          });
-        },
-        onResetGrowthPolicy: () => {
-          this.growth?.resetPolicy();
-          this.refreshTray();
-        },
-        onOpenGrowthSettings: () => this.settingsWindow?.open(),
 
         onQuit: () => this.quit(),
       },
@@ -1802,12 +1947,230 @@ class DesktopPetApplication {
      */
     if (state.currentAnimation !== undefined) this.currentAnimation = state.currentAnimation;
     if (typeof state.currentState === 'string') this.currentState = state.currentState;
-    if (state.plugins) this.pluginRecords = state.plugins;
+    /*
+     * 插件清单以**主进程**为准（它才知道谁被关掉了），而 active / failed 这类
+     * 运行状态只有渲染层知道 —— 所以这里只记下"渲染层眼中的状态"，
+     * 展示时再与主进程清单合并（见 currentPluginRecords）。
+     */
+    if (state.plugins) {
+      for (const record of state.plugins) {
+        this.pluginLiveStatus.set(record.id, {
+          status: record.status,
+          ...(record.error !== undefined ? { error: record.error } : {}),
+        });
+      }
+    }
     // 尺寸与置顶以主进程为准：这里忽略 renderer 上报的同名字段，避免来回覆盖
     this.refreshTray();
   }
 
-  private pluginRecords: readonly PluginRecord[] = [];
+  /**
+   * 插件清单（主进程的**结构** + 渲染层的**运行状态**）。
+   *
+   * 为什么必须合并：
+   * - 只信主进程：被关掉的插件状态会一直是 discovered，菜单上看着像还活着；
+   * - 只信渲染层：被关掉的插件根本不在它的清单里，于是"关掉就再也打不开"。
+   * 合并规则：以主进程清单为骨架，启用中的插件用渲染层上报的状态覆盖（它是唯一
+   * 知道 active / failed 的一方）。
+   */
+  private currentPluginRecords(): readonly PluginRecord[] {
+    const base = this.pluginManager?.getPluginRecords() ?? [];
+    return base.map((record) => {
+      if (!record.enabled) return record;
+      const live = this.pluginLiveStatus.get(record.id);
+      if (!live) return record;
+      return {
+        ...record,
+        status: live.status,
+        ...(live.error !== undefined ? { error: live.error } : {}),
+      };
+    });
+  }
+
+  /**
+   * 启用 / 停用单个插件（"插件可随时关闭"的唯一实现）。
+   *
+   * 顺序：写盘并重新发现（PluginManager）-> 停用时先由 Main 回收它留下的一切
+   * （定时器 / 子进程 / 菜单项 / 面板）-> 把指令推给渲染层去现场加载或回收。
+   * 先回收 Main 侧资源再通知渲染层是刻意的：即使渲染层卡住或崩了，
+   * 系统的权限与资源都已经收回了。
+   */
+  private togglePlugin(id: string, enabled: boolean): readonly PluginRecord[] {
+    const manager = this.pluginManager;
+    if (!manager) return [];
+
+    const result = manager.setPluginEnabled(id, enabled);
+    if (!result.ok) {
+      this.logger.warn('plugin toggle failed', {
+        data: { id, enabled, reason: result.reason ?? '' },
+      });
+      return result.records;
+    }
+
+    if (!enabled) {
+      this.pluginRuntime?.revoke(id);
+      this.pluginLiveStatus.delete(id);
+    }
+
+    // bootstrap 里的清单要跟着变，否则"设置窗口重载插件"又回到旧清单
+    if (this.bootstrapData) {
+      this.bootstrapData = { ...this.bootstrapData, plugins: manager.getDiscoveredPlugins() };
+    }
+
+    this.ipcManager?.notifyPluginEnabled({ id, enabled, entry: result.entry });
+    this.logger.info('plugin toggled', { data: { id, enabled, status: result.entry ? 'will-activate' : 'will-stop' } });
+
+    this.refreshTray();
+    this.settingsWindow?.pushPlugins();
+    this.chatWindow?.pushPanels();
+    return this.currentPluginRecords();
+  }
+
+  /**
+   * 插件界面贡献变了（注册/更新/下线菜单项与面板）。
+   *
+   * 两个消费方：托盘菜单要重建「插件」子菜单，聊天窗口要刷新插件页签 ——
+   * 停用插件时它的面板会从快照里消失，聊天窗口据此把页签收掉。
+   */
+  private handlePluginUIContributionChanged(): void {
+    this.chatWindow?.pushPanels();
+    this.refreshTray();
+  }
+
+  /**
+   * 安装插件：弹目录选择框（或直接用给定路径）-> 复制进 `plugins/<id>/` -> 登记 -> 启用。
+   *
+   * 三条顺序是刻意的：
+   * - **先复制再启用**：复制失败时磁盘与清单都没变，用户能重试；
+   * - **代码缓存先失效**：覆盖安装（升级）时必须重新编译，否则跑的还是旧代码；
+   * - **先停再开**（升级已激活的插件时）：直接 enable 会被"已经加载过"挡掉，
+   *   于是新代码根本没上；渲染层那边对同一插件的启停是串行的，不会打架。
+   */
+  private installPlugin(directory?: string): PluginInstallResult {
+    const installer = this.pluginInstaller;
+    const manager = this.pluginManager;
+    if (!installer || !manager) {
+      return { ok: false, error: '插件安装器未就绪', records: this.currentPluginRecords() };
+    }
+
+    let source = directory;
+    if (source === undefined) {
+      const picked = this.pickPluginDirectory();
+      if (!picked) return { ok: false, error: '已取消', records: this.currentPluginRecords() };
+      source = picked;
+    }
+
+    const result = installer.install(source);
+    if (!result.ok || !result.id) {
+      this.settingsWindow?.pushPlugins();
+      return result;
+    }
+
+    const id = result.id;
+    manager.invalidatePluginCode(id);
+    const entry = manager.getManifestEntry(id);
+    const shouldEnable = entry === null || entry.enabled !== false;
+    /*
+     * 它之前是不是正在跑？（升级正在运行的插件时，必须先让渲染层把旧代码卸下，
+     * 否则 `enablePlugin` 会以"已经加载过"为由直接跳过 —— 新代码根本不会上。）
+     */
+    const wasActive = this.pluginLiveStatus.get(id)?.status === 'active';
+    if (this.bootstrapData) {
+      this.bootstrapData = { ...this.bootstrapData, plugins: manager.getDiscoveredPlugins() };
+    }
+
+    if (shouldEnable) {
+      const discovered = manager.getDiscoveredPlugin(id) ?? null;
+      if (wasActive) {
+        // 升级一个正在跑的插件：先让它卸下旧代码，再现场加载新代码
+        this.ipcManager?.notifyPluginEnabled({ id, enabled: false, entry: null });
+      }
+      this.ipcManager?.notifyPluginEnabled({ id, enabled: true, entry: discovered });
+    }
+
+    this.refreshTray();
+    this.settingsWindow?.pushPlugins();
+    this.chatWindow?.pushPanels();
+    this.logger.info('plugin install handled', { data: { id, enabled: shouldEnable } });
+    return { ok: true, id, records: this.currentPluginRecords() };
+  }
+
+  /**
+   * 卸载插件：停用（连带回收资源）-> 删目录 -> 从清单移除 -> 让渲染层忘掉它。
+   *
+   * 停用必须在删目录之前：`PluginRuntime.revoke` 会杀掉插件起的子进程
+   * （Windows 上"子进程的工作目录还在这个文件夹里"会让删除直接失败）。
+   * 删不掉时把插件放回停用前的状态 —— 不能出现"点了一下卸载，插件反而被停了"。
+   */
+  private uninstallPlugin(id: string): PluginInstallResult {
+    const installer = this.pluginInstaller;
+    const manager = this.pluginManager;
+    if (!installer || !manager) {
+      return { ok: false, id, error: '插件安装器未就绪', records: this.currentPluginRecords() };
+    }
+
+    const record = manager.getPluginRecord(id);
+    const wasEnabled = record?.enabled === true;
+    if (wasEnabled) this.togglePlugin(id, false);
+
+    const result = installer.uninstall(id);
+    if (!result.ok) {
+      if (wasEnabled) this.togglePlugin(id, true);
+      this.settingsWindow?.pushPlugins();
+      return { ...result, records: this.currentPluginRecords() };
+    }
+
+    manager.invalidatePluginCode(id);
+    this.pluginLiveStatus.delete(id);
+    if (this.bootstrapData) {
+      this.bootstrapData = { ...this.bootstrapData, plugins: manager.getDiscoveredPlugins() };
+    }
+    this.ipcManager?.notifyPluginRemoved(id);
+    this.refreshTray();
+    this.settingsWindow?.pushPlugins();
+    this.chatWindow?.pushPanels();
+    return { ...result, records: this.currentPluginRecords() };
+  }
+
+  /**
+   * 弹原生目录选择框挑一个插件文件夹。
+   *
+   * 为什么用**同步**版本：调用它的是一条 IPC invoke，主进程本来就得等用户选完；
+   * 同步版本少一层 Promise 与"窗口已关闭"的竞态处理，行为更可预测。
+   */
+  private pickPluginDirectory(): string | null {
+    const parent = this.settingsWindow?.getWindow() ?? null;
+    const options: Electron.OpenDialogOptions = {
+      title: '选择插件文件夹（里面要有 package.json）',
+      buttonLabel: '安装',
+      properties: ['openDirectory'],
+    };
+    try {
+      const picked = parent ? dialog.showOpenDialogSync(parent, options) : dialog.showOpenDialogSync(options);
+      const first = Array.isArray(picked) ? picked[0] : undefined;
+      return first && first.trim() !== '' ? first : null;
+    } catch (error) {
+      this.logger.warn('picking plugin directory failed', { error: describeError(error) });
+      return null;
+    }
+  }
+
+  /**
+   * 打开聊天窗口并切到某个插件的面板。
+   *
+   * 为什么走聊天窗口而不是给插件开一个小窗口：面板需要"列表 + 滚动 + 打字"，
+   * 聊天窗口已经具备这些（小纸条/文件页签就是同一个模式的先例），
+   * 而桌宠窗口是透明、点击穿透、跟着宠物缩放的小图层，放不下这些内容。
+   */
+  private openPluginPanel(pluginId: string, panelId: string): boolean {
+    const chat = this.chatWindow;
+    if (!chat) return false;
+    chat.open();
+    // 面板可能是刚注册的：先把最新快照推过去，再请它切到目标面板
+    chat.pushPanels();
+    chat.pushPanelRequest({ pluginId, panelId });
+    return true;
+  }
 
   private refreshTray(): void {
     this.trayManager?.updateState({
@@ -1817,7 +2180,9 @@ class DesktopPetApplication {
       currentState: this.currentState as TrayStatePayload['currentState'],
       // 显示状态（收起方向）也要给菜单：它决定显示"收起（贴边）"还是"展开"
       display: this.display,
-      plugins: this.pluginRecords,
+      plugins: this.currentPluginRecords(),
+      // 「插件」子菜单里插件自己注册的动作（点击会回流给插件，Main 不执行插件代码）
+      pluginMenu: this.pluginRuntime?.getMenuEntries() ?? [],
       // 尺寸与置顶由主进程自己持有，不需要 renderer 上报
       size: this.resolveWindowSize(),
       alwaysOnTop: this.settings.alwaysOnTop,
@@ -1825,10 +2190,12 @@ class DesktopPetApplication {
       animations: this.animationSummaries(),
       // 「AI（认知与人格）」子菜单需要状态与在场状态（心情会随心跳变化）
       ai: this.aiStatus(),
+      // 「小纸条…」菜单项要显示未读数（她留了东西，用户不打开窗口也该知道）
+      noteUnread: this.aiService?.noteBox().unread ?? 0,
       presence: this.presence,
-      // 「感知（环境与用户）」子菜单需要当前场景/打扰次数/隐私模式
+      // 顶部属性块要显示"感知：<场景> · 在电脑前"（隐私模式也会标出来）
       perception: this.perceptionStatus(),
-      // 「成长与记忆」子菜单需要记忆节点数、今天的反思与当前策略
+      // 顶部属性块要显示"记得的经历 N 段 · 一起 N 天"
       growth: this.growthStatus(),
     });
   }
@@ -1852,19 +2219,31 @@ class DesktopPetApplication {
       .sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id));
   }
 
-  private triggerPluginReload(): void {
+  private triggerPluginReload(): number {
     this.logger.info('plugin reload requested');
     try {
       // 重新发现（会重读 plugins.json），把新清单放进 bootstrap，再让 renderer 重载
       const discovered = this.pluginManager?.discoverPlugins() ?? [];
+      /*
+       * 被删掉 / 被关掉 / 加载失败的插件，它在 Main 侧留下的运行时资源
+       * （定时器、子进程、菜单项、面板）必须一起收掉 —— 整体重载最容易漏的就是这一步。
+       */
+      const alive = new Set(discovered.map((plugin) => plugin.id));
+      for (const record of this.pluginManager?.getPluginRecords() ?? []) {
+        if (!alive.has(record.id)) this.pluginRuntime?.revoke(record.id);
+      }
       if (this.bootstrapData) {
         this.bootstrapData = { ...this.bootstrapData, plugins: discovered };
       }
       this.ipcManager?.requestPluginReload();
-      this.pluginRecords = this.pluginManager?.getLoadedPlugins() ?? [];
+      this.pluginLiveStatus.clear();
       this.refreshTray();
+      this.settingsWindow?.pushPlugins();
+      this.chatWindow?.pushPanels();
+      return discovered.length;
     } catch (error) {
       this.logger.error('plugin reload failed', { error: describeError(error) });
+      return 0;
     }
   }
 
@@ -1922,6 +2301,9 @@ class DesktopPetApplication {
     this.perception?.dispose();
     // 成长侧要收尾：停反思定时器（记忆与策略都已落盘）
     this.growth?.dispose();
+    // 插件侧要收尾：清掉主进程持有的定时器、杀掉插件起的子进程
+    // （否则退出后可能留下孤儿 python/命令进程，而它们的父进程已经没了）
+    this.pluginRuntime?.dispose();
     this.windowManager?.markQuitting();
     this.ipcManager?.notifyShutdown();
     this.settingsWindow?.destroy();
@@ -1996,20 +2378,24 @@ class DesktopPetApplication {
       chatRenderer: this.config.chatHtmlPath,
       chatRendererExists: existsSync(this.config.chatHtmlPath),
       userData: app.getPath('userData'),
+      // 数据目录的解析结果：记忆/日记/小纸条现在默认落在**项目目录**下
+      dataDir: this.dataDirInfo?.dir ?? app.getPath('userData'),
+      dataDirSource: this.dataDirInfo?.source ?? 'userdata',
+      dataDirMigrated: [...(this.dataDirInfo?.migrated ?? [])],
       // AI 认知与人格（2.1~2.4）：自检里带上关键路径与开关，便于排查"为什么她不理我"
       ai: this.aiStatus(),
-      aiSettingsFile: join(app.getPath('userData'), 'ai-settings.json'),
-      aiMemoryDir: join(app.getPath('userData'), 'memory'),
-      aiDiaryDir: join(app.getPath('userData'), 'diary'),
+      aiSettingsFile: join(aiDataDir(), 'ai-settings.json'),
+      aiMemoryDir: join(aiDataDir(), 'memory'),
+      aiDiaryDir: join(aiDataDir(), 'diary'),
       // 环境与用户感知（3.1~3.6）：开关状态与数据目录
       perception: this.perceptionStatus(),
-      perceptionSettingsFile: join(app.getPath('userData'), 'perception-settings.json'),
-      perceptionDir: join(app.getPath('userData'), 'perception'),
+      perceptionSettingsFile: join(aiDataDir(), 'perception-settings.json'),
+      perceptionDir: join(aiDataDir(), 'perception'),
       // 成长、记忆与反思（4.1/4.2）
       growth: this.growthStatus(),
-      growthSettingsFile: join(app.getPath('userData'), 'growth-settings.json'),
-      memoryNodesFile: join(app.getPath('userData'), 'memory', 'nodes.json'),
-      reflectionDir: join(app.getPath('userData'), 'reflection'),
+      growthSettingsFile: join(aiDataDir(), 'growth-settings.json'),
+      memoryNodesFile: join(aiDataDir(), 'memory', 'nodes.json'),
+      reflectionDir: join(aiDataDir(), 'reflection'),
     };
   }
 
@@ -2026,15 +2412,17 @@ class DesktopPetApplication {
 /* -------------------------------------------------------------------------- */
 
 /**
- * AI 数据目录（记忆 / 日记 / 配置 / 情绪）。
+ * AI 数据目录（记忆 / 日记 / 小纸条 / 配置 / 情绪）。
  *
- * 默认是 `%APPDATA%\DesktopPet`；环境变量 `DESKTOP_PET_AI_DATA_DIR` 可以改到
- * 别处 —— 自动化验收靠它把测试数据隔离到临时目录，不污染用户真实的记忆。
+ * 由 `bootstrap()` 里的 `resolveDataDir()` 解析并缓存：
+ * 默认是**项目目录下的 `data/`**（需求：记忆不放在 C 盘），
+ * 找不到可写位置时退回 userData；环境变量 `DESKTOP_PET_AI_DATA_DIR`
+ * 仍然优先（自动化验收靠它把测试数据隔离到临时目录）。
  */
+let resolvedDataDir: string | null = null;
+
 function aiDataDir(): string {
-  const override = process.env.DESKTOP_PET_AI_DATA_DIR;
-  if (typeof override === 'string' && override.trim() !== '') return override;
-  return app.getPath('userData');
+  return resolvedDataDir ?? app.getPath('userData');
 }
 
 /**
@@ -2079,6 +2467,16 @@ function emptyMemorySnapshot(): {  profile: { userName: string; petName: string;
     dataDir: '',
     stats: { events: 0, turns: 0, facts: 0 },
   };
+}
+
+/** AI 模块未就绪时的空收纳夹（绝不返回 undefined，窗口不必判空）。 */
+function emptyNoteBox(): NoteBox {
+  return { notes: [], unread: 0, dataDir: '', filesDir: '', orphans: [] };
+}
+
+/** AI 模块未就绪时的空日记快照（同上：「交互」窗口的日记页不必判空）。 */
+function emptyDiarySnapshot(): DiarySnapshot {
+  return { items: [], dataDir: '', todayWritten: false, diaryHour: 22 };
 }
 
 /* -------------------------------------------------------------------------- */

@@ -38,30 +38,44 @@ import type {
   SceneKind,
   ScreenObservation,
 } from '../../shared/perception-types';
+import { isRecognizedScene } from '../../shared/perception-types';
 import { evaluateSceneTrigger } from '../../shared/pet-triggers';
 import {
+  HABIT_WINDOW_DAYS,
   buildBehaviorSnapshot,
   capturePermission,
+  describeHour,
   emptyHabitProfile,
   formatObservationLogLine,
   gateIntervention,
+  habitDayKindOf,
   habitPredictionText,
   isPlanEnabled,
   isSensitive,
   isTerminalProcess,
   learnHabit,
+  normalizeProcessName,
   planIntervention,
   refineSceneByWindow,
   TERMINAL_ACTIVITY_TEXT,
   terminalObservationFor,
-  topSceneAtHour,
   describeWindowContext,
   withoutOwnWindows,
   type InterventionPlan,
 } from '../../shared/perception';
+import {
+  buildHabitModelMessages,
+  buildHabitRoutines,
+  habitModelDigest,
+  localHabitModel,
+  parseHabitModel,
+  sanitizeHabitLine,
+  type HabitModel,
+} from '../../shared/habit-model';
 import type { PolicyOverlay } from '../../shared/growth-types';
 import { defaultPolicyOverlay } from '../../shared/growth';
 import { clampOverlay, describePolicy, effectivePerception } from '../../shared/growth';
+import { buildSmallTalk, pickSmallTalk, type SmallTalkCandidate, type SmallTalkKind } from '../../shared/small-talk';
 import type { LLMClient } from '../ai/llm-client';
 import { LLMError } from '../ai/llm-client';
 import type { Logger } from '../../shared/logger';
@@ -100,6 +114,15 @@ export interface PerceptionServiceOptions {
   readonly onSettingsChanged?: (settings: PerceptionSettings) => void;
   /** 写时间线叙述时要用的名字（来自 AI 设置；没接 AI 模块时给默认值）。 */
   readonly getNames?: () => { readonly petName: string; readonly userName: string };
+  /**
+   * 最近值得提一句的**真实记忆**（记忆宫殿里的节点标题 + 距今几天）。
+   *
+   * 用途："最近发生的有趣的事"这一类闲聊必须来自她真的记住的东西 ——
+   * 拿不到就返回 null（她就不提，而不是编一件）。
+   */
+  readonly getRecentMoment?: () => { readonly title: string; readonly daysAgo: number } | null;
+  /** 注入随机源（闲聊轮换用；验收可以固定它）。 */
+  readonly random?: () => number;
 }
 
 /** 内存里保留的观察条数（用于切换频率统计）。 */
@@ -139,6 +162,14 @@ export class PerceptionService {
   private triggerScene: SceneKind | null = null;
   private triggerSceneSince = Date.now();
   private lastSceneTriggerAt = 0;
+  /**
+   * 上一次**真的说出去**的闲聊类别（"不会连着说同一类"靠它）。
+   *
+   * 只有真的开口了才更新：被频率闸门拦下的那一次不算说过。
+   */
+  private lastSmallTalkKind: SmallTalkKind | null = null;
+  /** 这一次挑中的类别，等 `intervene()` 确认开口后才提交到 `lastSmallTalkKind`。 */
+  private pendingSmallTalkKind: SmallTalkKind | null = null;
   private interventionTimes: number[] = [];
   private lastError = '';
   /** 上次按保留期清理明细的日子（每天只做一次；手动采样会强制做一次）。 */
@@ -152,7 +183,28 @@ export class PerceptionService {
   private lastPauseReason = '';
   /** 上次真正采样的时间（节流用；0 = 还没采过）。 */
   private lastCaptureAt = 0;
+  /**
+   * 模型复核（"每 5 分钟 / 换了进程才花一次 token"）用的三个状态。
+   *
+   * 见 `PerceptionSettings.modelRefreshMs`：30 秒一调模型约 18 万 token/小时，
+   * 而屏幕上的场景并不会 30 秒变一次 —— 所以中间的采样**沿用上一次的模型判断**。
+   */
+  private lastModelAt = 0;
+  private lastModelProcess = '';
+  private lastModelObservation: ScreenObservation | null = null;
   private powerHooked = false;
+  /**
+   * 当前的习惯模型（把统计归纳成一段话）。
+   *
+   * `null` = 还没建模过（首次启动、或用户清空过感知数据）。
+   * 有值之后**只会在建模成功时替换**：LLM 失败时退回模板，不会把旧的抹掉又不给新的。
+   */
+  private habitModel: HabitModel | null = null;
+  /** 上次建模的日子（每天最多一次；「立刻建模」按钮可以强制）。 */
+  private lastModelDay = '';
+  /** 上次建模时的观察样本数（没涨就不重复烧 token）。 */
+  private lastModelSamples = -1;
+  private modeling = false;
 
   public constructor(options: PerceptionServiceOptions) {
     this.options = options;
@@ -246,6 +298,32 @@ export class PerceptionService {
     // 今天的记录在内存里（还没落盘的也算），历史日期读文件
     if (date === localDay()) return this.observations;
     return this.store.readObservations(date);
+  }
+
+  /**
+   * 省下模型调用时，"复用"上一次的模型判断。
+   *
+   * 产出的是**一条正常的观察**（进日志、进习惯、进时间线），只是：
+   *   - `mode: 'local'` → `decide()` 不会拿它去主动开口（本地信号不配开口，见上层注释）；
+   *   - `tokens: 0` → 用量统计里一眼能看出"这一条没花钱"；
+   *   - `evidence` 写明"沿用上一次的模型判断"，复盘时不会误以为是新看到的结果；
+   *   - `windowTitle` 更新成**当前**标题（标题变了但进程没变时，这条记录仍然诚实）。
+   *
+   * 没有任何模型判断可复用（刚启动、或上一次就没看成）时返回 null —— 那就什么都不记，
+   * 与"没配模型"的行为一致，而不是硬编一个场景出来。
+   */
+  private reuseLastModelObservation(now: number): ScreenObservation | null {
+    const last = this.lastModelObservation;
+    if (!last) return null;
+    const foreground = this.settings.windowContext ? this.effectiveForeground() : null;
+    return {
+      ...last,
+      at: new Date(now).toISOString(),
+      mode: 'local',
+      tokens: 0,
+      windowTitle: (foreground?.title ?? last.windowTitle ?? '').slice(0, 120),
+      evidence: `窗口未变化，沿用上一次的判断（省一次模型调用）：${last.evidence ?? ''}`.slice(0, 200),
+    };
   }
 
   /**
@@ -358,6 +436,7 @@ export class PerceptionService {
   public load(): void {
     this.settingsStore.load();
     this.habits = this.store.load();
+    this.habitModel = this.store.loadHabitModel();
     this.timeline.load();
     this.hookPowerMonitor();
     this.logger.info('perception ready', {
@@ -367,10 +446,143 @@ export class PerceptionService {
         cameraAuthorized: this.settings.cameraAuthorized,
         intervalMs: this.settings.captureIntervalMs,
         habitSamples: this.habits.samples,
+        habitModel: this.habitModel === null ? 'none' : this.habitModel.source,
       },
     });
     this.store.log('system', '感知模块已加载');
     this.options.onSettingsChanged?.(this.settings);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 3.6 习惯建模（把统计归纳成她的话）                                     */
+  /* ------------------------------------------------------------------ */
+
+  /** 当前习惯模型（面板/闲聊用）。`null` = 还没建模过。 */
+  public getHabitModel(): HabitModel | null {
+    return this.habitModel;
+  }
+
+  /**
+   * 生成一次习惯模型。
+   *
+   * 两条触发路径：
+   * - **每天一次**：`habitModelHour` 之后的第一次采样（见 `maybeModelHabits()`）；
+   * - **手动**：「立刻建模」按钮（`force = true`，面板与托盘都能点）。
+   *
+   * 三条克制：
+   *   - 样本没涨就不重复调用（`lastModelSamples`）—— 没新数据时结论不会变，白烧 token；
+   *   - 大模型不可用 / 调用失败 / 输出不可解析 → 退回 `localHabitModel()` 模板，
+   *     并把原因写进 `error`（面板能看到"为什么这次是模板"）；
+   *   - 模型只写**措辞**，条目（几点、在做什么、几天）永远由本地统计算出（见 habit-model.ts）。
+   *
+   * @returns 最新的模型（即使这次跳过了，也返回当前那份）
+   */
+  public async modelHabits(force = false): Promise<HabitModel | null> {
+    if (this.modeling) return this.habitModel;
+    if (!this.settings.habits) return this.habitModel;
+    if (!force && this.habits.samples <= this.lastModelSamples) return this.habitModel;
+
+    this.modeling = true;
+    try {
+      const routines = buildHabitRoutines(this.habits);
+      const digest = habitModelDigest(this.habits, routines);
+      const names = this.options.getNames?.() ?? { petName: '鲸鱼娘', userName: '' };
+      const fallback = (error: string, tokens = 0): HabitModel => {
+        const local = localHabitModel({
+          profile: this.habits,
+          routines,
+          petName: names.petName,
+          userName: names.userName,
+          now: new Date(),
+        });
+        return {
+          summary: local.summary,
+          line: local.line,
+          routines,
+          source: 'template',
+          tokens,
+          updatedAt: new Date().toISOString(),
+          samples: this.habits.samples,
+          activeDays: this.habits.activeDays,
+          error,
+        };
+      };
+
+      let model: HabitModel;
+      const client = this.options.getClient();
+      if (!this.options.isLLMUsable() || !client) {
+        model = fallback('没有可用的大模型（没配密钥或不可用），用本地统计拼的');
+      } else {
+        try {
+          const messages = buildHabitModelMessages({ digest, petName: names.petName, userName: names.userName });
+          const result = await client.complete({
+            messages: [
+              { role: 'system', content: messages.system },
+              { role: 'user', content: messages.user },
+            ],
+            temperature: 0.6,
+            maxTokens: 700,
+            reasoningEffort: 'none',
+            purpose: 'habit-model',
+          });
+          const parsed = parseHabitModel(result.text);
+          model = parsed === null
+            ? fallback('模型输出看不懂，用本地统计拼的', result.totalTokens)
+            : {
+                summary: parsed.summary,
+                line: sanitizeHabitLine(parsed.line),
+                routines,
+                source: 'llm',
+                tokens: result.totalTokens,
+                updatedAt: new Date().toISOString(),
+                samples: this.habits.samples,
+                activeDays: this.habits.activeDays,
+                error: '',
+              };
+        } catch (error) {
+          const message = error instanceof LLMError ? error.message : describeError(error);
+          this.logger.warn('habit modeling failed; using local template', { error: message });
+          model = fallback(`建模调用失败（${message}），用本地统计拼的`);
+        }
+      }
+
+      this.habitModel = model;
+      this.lastModelSamples = this.habits.samples;
+      this.lastModelDay = localDay(new Date());
+      this.store.saveHabitModel(model);
+      this.store.log('habits', `习惯建模（${model.source === 'llm' ? '大模型' : '本地模板'}）：${model.routines.length} 条时段`);
+      this.logger.info('habit model updated', {
+        data: {
+          source: model.source,
+          routines: model.routines.length,
+          tokens: model.tokens,
+          samples: model.samples,
+          error: model.error,
+        },
+      });
+      this.emitStatus();
+      return model;
+    } finally {
+      this.modeling = false;
+    }
+  }
+
+  /**
+   * 每天到点后自动建模一次。
+   *
+   * 与"每天第一次采样清理明细"同一个模式（采样循环里顺手判一次），
+   * 不额外起定时器：感知本身就有心跳，多一个定时器只会多一处需要收尾的东西。
+   */
+  private maybeModelHabits(now: number): void {
+    if (!this.settings.habits) return;
+    if (this.habits.samples === 0) return;
+    const day = localDay(new Date(now));
+    if (this.lastModelDay === day) return;
+    if (new Date(now).getHours() < this.settings.habitModelHour) return;
+    this.lastModelDay = day;
+    void this.modelHabits().catch((error: unknown) => {
+      this.logger.warn('daily habit modeling failed', { error: describeError(error) });
+    });
   }
 
   /** 启动采样循环（桌宠启动时调用一次）。 */
@@ -555,10 +767,32 @@ export class PerceptionService {
       });
       this.decide(terminalObservation, now);
       this.emitStatus();
+      this.maybeModelHabits(now);
       return this.status();
     }
 
-    if (llmUsable) {
+    /*
+     * **要不要现在花一次模型调用**（用户实测后定的策略，见 `modelRefreshMs`）。
+     *
+     * 先说清楚为什么需要这道闸门：一次视觉调用约 1450~1700 token
+     * （系统提示词 + 整屏图 + 地址栏图 + 窗口列表），30 秒一次就是约 18 万 token/小时，
+     * 200,000/天的预算**一小时就见底**，之后她只能退回本地判断 —— 用户看到的是
+     * "她越来越笨"，而时间线还是断的。
+     *
+     * 判定顺序：
+     * 1. 前台**进程变了** → 立刻看一眼（换了应用，值得重新判断）；
+     * 2. 距上次模型调用 ≥ `modelRefreshMs`（默认 5 分钟）→ 兜底复核一次
+     *    （同一个窗口里也可能换了内容，例如浏览器从一个视频页逛到文档页）；
+     * 3. 其余情况**沿用上一次的模型判断**（本地复制一条，`mode: 'local'`，
+     *    不主动开口）—— 时间线因此每 30 秒都有记录、保持连贯，而几乎不花 token。
+     */
+    const foregroundNow = this.settings.windowContext ? this.effectiveForeground() : null;
+    const processNow = normalizeProcessName(foregroundNow?.process ?? '');
+    const processChanged = processNow !== '' && this.lastModelProcess !== '' && processNow !== this.lastModelProcess;
+    const dueForModel = this.lastModelAt === 0 || now - this.lastModelAt >= this.settings.modelRefreshMs;
+    const askModel = processChanged || dueForModel;
+
+    if (llmUsable && askModel) {
       const frame = await this.capture.grab();
       if (frame) {
         // 地址栏横条：与整屏同一轮截取，只为让模型读出网址（读不到就整条不传）
@@ -567,6 +801,9 @@ export class PerceptionService {
         if (analysis) {
           observation = analysis.observation;
           this.lastObservation = observation;
+          this.lastModelAt = now;
+          this.lastModelProcess = processNow;
+          this.lastModelObservation = observation;
           this.observations.push(observation);
           if (this.observations.length > OBSERVATION_MEMORY) this.observations.shift();
           // 日志行的拼装现在统一在 `formatObservationLogLine()`（文件与面板共用）
@@ -583,6 +820,29 @@ export class PerceptionService {
       } else {
         this.lastError = '截屏失败（桌面捕获不可用）';
       }
+    } else if (llmUsable) {
+      /*
+       * 省下这次模型调用：沿用上一次的模型判断。
+       *
+       * ⚠️ 有意**不重新用本地规则猜一遍**：同一个窗口里模型说"写东西"、
+       * 本地规则按进程名猜"浏览网页"，两个判断来回横跳会让时间线**因为场景反复变化**
+       * 而碎成一片（正好是这次要修的问题）。窗口没变，就沿用上一次的结论；
+       * 窗口真的变了，上面那条 `processChanged` 会立刻调模型重新判断。
+       */
+      const reused = this.reuseLastModelObservation(now);
+      if (reused) {
+        observation = reused;
+        this.lastObservation = reused;
+        this.observations.push(reused);
+        if (this.observations.length > OBSERVATION_MEMORY) this.observations.shift();
+        this.store.recordObservation(reused);
+        if (this.settings.habits) {
+          this.habits = learnHabit(this.habits, reused);
+          this.store.saveHabits(this.habits);
+        }
+        this.timeline.observe(reused, now);
+      }
+      this.lastError = '';
     } else {
       /*
        * 没模型时的**本地降级**：只凭"最上层窗口的进程名 + 标题"判断场景。
@@ -618,6 +878,7 @@ export class PerceptionService {
      */
     this.decide(observation && observation.mode === 'llm' ? observation : null, now);
     this.emitStatus();
+    this.maybeModelHabits(now);
     return this.status();
   }
 
@@ -772,7 +1033,14 @@ export class PerceptionService {
         activeDays: this.habits.activeDays,
         latestActiveHour: this.habits.latestActiveHour,
         earliestActiveHour: this.habits.earliestActiveHour,
-        typicalNow: this.settings.habits ? topSceneAtHour(this.habits, hour) : null,
+        // 看点：当前是工作日还是周末，以及那一档的数据（旧数据会退回 `*` 档）
+        typicalNow: this.settings.habits
+          ? describeHour(this.habits, hour, { kind: habitDayKindOf(new Date(now)) })?.scene ?? null
+          : null,
+        typicalKind: habitDayKindOf(new Date(now)),
+        recentDays: Object.keys(this.habits.daily).length,
+        windowDays: HABIT_WINDOW_DAYS,
+        model: this.settings.habits ? this.habitModel : null,
       },
       lastIntervention: this.lastIntervention,
       interventionsToday: this.interventionTimes.filter((at) => localDay(new Date(at)) === localDay(new Date(now))).length,
@@ -955,15 +1223,62 @@ export class PerceptionService {
     this.maybeWorkReadTrigger(observation, now);
 
     if (!this.settings.behavior && !this.settings.habits) return;
+    /*
+     * 日常闲聊的候选每次都重新组装（问候随时段变、今天的活动随时间线变），
+     * 再由 `pickSmallTalk` 轮换着挑一条 —— **不新增开口机会**，
+     * 只是把原来那句固定的习惯询问换成一组内容（需求："频率不变"）。
+     */
+    const smallTalk = this.buildSmallTalkFor(now);
     const plan = planIntervention({
       observation,
       behavior: this.behavior,
       settings: this.settings,
       previousScene: this.previousScene(observation),
-      habitText: this.settings.habits ? habitPredictionText({ profile: this.habits, now, settings: this.settings, behavior: this.behavior }) : null,
+      smallTalk,
     });
     if (!plan) return;
     this.interveneIfAllowed(plan, now);
+  }
+
+  /**
+   * 组装并挑出这一次要说的小话头（闲聊）。
+   *
+   * 四件事：
+   *   1. 习惯询问只在 `habits` 开关开着时进候选（关掉就不提"按你的习惯…"）；
+   *   2. 习惯台词**优先用模型写的那句**（`habitModel.line`，更像人话），
+   *      没有模型/模型没给这句时退回 `habitPredictionText()` 的模板句；
+   *   3. 今天的活动来自**时间线统计**（真实数字，取最主要的那一项）；
+   *   4. 最近的事来自注入的真实记忆（拿不到就不提）。
+   *
+   * `lastSmallTalkKind` 让"不会连着说同一类"成立；说话成功后才更新它
+   * （被频率闸门拦下时不算说过，下次可以继续用同一类）。
+   */
+  private buildSmallTalkFor(now: number): SmallTalkCandidate | null {
+    const names = this.options.getNames?.() ?? { petName: '鲸鱼娘', userName: '' };
+    const totals = this.timeline.today().totals;
+    const top = [...totals.byScene]
+      .filter((item) => isRecognizedScene(item.scene) && item.minutes > 0)
+      .sort((a, b) => b.minutes - a.minutes)[0] ?? null;
+    /*
+     * 模型那句只在**它与当前时段真的相关**时才用：模型是每天（或手动）生成的，
+     * 而这条闲聊可能发生在完全不同的时段 —— 比如它写的是"这个点你一般在写代码吧"，
+     * 而现在是凌晨三点。所以先用 `habitPredictionText()` 判断"现在有没有可说的习惯"，
+     * 有才轮到模型那句顶上。
+     */
+    const templateLine = this.settings.habits
+      ? habitPredictionText({ profile: this.habits, now, settings: this.settings, behavior: this.behavior })
+      : null;
+    const modelLine = templateLine === null ? '' : sanitizeHabitLine(this.habitModel?.line ?? '');
+    const candidates = buildSmallTalk({
+      hour: new Date(now).getHours(),
+      userName: names.userName,
+      habitText: modelLine !== '' ? modelLine : templateLine,
+      topActivity: top ? { scene: top.scene, minutes: top.minutes } : null,
+      recentMoment: this.options.getRecentMoment?.() ?? null,
+    });
+    const picked = pickSmallTalk(candidates, this.options.random ?? Math.random, this.lastSmallTalkKind);
+    if (picked) this.pendingSmallTalkKind = picked.kind;
+    return picked;
   }
 
   /**
@@ -1011,8 +1326,18 @@ export class PerceptionService {
     this.lastIntervention = { at: new Date(now).toISOString(), kind: plan.kind, reason, text: plan.text };
     this.interventionTimes.push(now);
     if (this.interventionTimes.length > 200) this.interventionTimes.shift();
+    /*
+     * 闲聊真的说出去了才记下类别：下一次挑的时候会避开它 ——
+     * 这是"不一开口就是同一句"的具体实现（被闸门拦下的不算说过）。
+     */
+    if (plan.kind === 'small-talk' && this.pendingSmallTalkKind !== null) {
+      this.lastSmallTalkKind = this.pendingSmallTalkKind;
+      this.pendingSmallTalkKind = null;
+    }
     this.store.log('intervention', `开口（${plan.kind}）：${plan.text} · 通过：${reason}`);
-    this.logger.info('perception intervention', { data: { kind: plan.kind, reason } });
+    this.logger.info('perception intervention', {
+      data: { kind: plan.kind, reason, smallTalk: plan.kind === 'small-talk' ? this.lastSmallTalkKind ?? '' : '' },
+    });
     try {
       this.options.onIntervene(plan, reason);
     } catch (error) {

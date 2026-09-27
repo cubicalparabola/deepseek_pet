@@ -12,7 +12,7 @@
  */
 
 import { build } from 'esbuild';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -57,6 +57,15 @@ const manifest = readManifest();
 if (manifest.length === 0) {
   console.log('[build-plugins] 没有需要构建的插件');
 }
+
+/*
+ * 先清掉上一次的产物。
+ *
+ * 为什么必须清：安装/卸载插件是运行期行为，清单会变。不清的话，
+ * 一个**已经被卸载的插件**的编译产物会一直躺在 dist/plugins 里，
+ * 打包时跟着进安装包（多打一份死代码），也容易被误当成"它还在"。
+ */
+rmSync(outRoot, { recursive: true, force: true });
 
 let built = 0;
 for (const entry of manifest) {

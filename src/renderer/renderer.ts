@@ -33,14 +33,18 @@ import type { AIChatReply, AIStatusView, InteractionKind } from '../shared/ai-ty
 import {
   DEFAULT_BEHAVIOR_CONFIG,
   DEFAULT_DISPLAY_STATE,
-  DOCKED_RANDOM_INTERVAL_MS,
+  DOCKED_FIDGET_INTERVAL_MS,
   NORMAL_RANDOM_INTERVAL_MS,
+  SAD_POOL_ANIMATION,
+  SAD_POOL_MOOD_BELOW,
   defaultAnimationFor,
+  fidgetFor,
   isQuietDisplay,
   parseBehaviorConfig,
   pickPoolAnimation,
   poolsFor,
   resolveDisplayState,
+  sadPoolAnimation,
   type BehaviorConfig,
   type PetDisplayState,
 } from '../shared/behavior-config';
@@ -54,7 +58,9 @@ import {
 } from '../shared/dock';
 import {
   ANIMATION_CATEGORIES,
+  CLICK_REACTIONS,
   inferAnimationCategory,
+  pickClickReaction,
   resolveLoopCount,
   resolvePlayLoopCount,
 } from '../shared/animation-types';
@@ -82,7 +88,13 @@ import {
   supportsBalanceQuery,
 } from '../shared/balance';
 import type { PerceptionStatus } from '../shared/perception-types';
-import { DEFAULT_PERCEPTION_SETTINGS, isRecognizedScene } from '../shared/perception-types';
+import {
+  DEFAULT_PERCEPTION_SETTINGS,
+  isRecognizedScene,
+} from '../shared/perception-types';
+import { buildSmallTalk, pickSmallTalk } from '../shared/small-talk';
+import { migrateNote } from '../shared/notes';
+import { formatPalaceRecall, recallTokens, selectPalaceMatches } from '../shared/memory-recall';
 import type { GrowthStatus } from '../shared/growth-types';
 import { NODE_KINDS, POLICY_MIN_FACTOR } from '../shared/growth-types';
 import {
@@ -107,17 +119,28 @@ import {
 } from '../shared/growth';
 import {
   BROWSER_APPS,
+  HABIT_KIND_ANY,
+  HABIT_MIN_DAYS,
+  HABIT_MIN_SCENE_DAYS,
+  HABIT_WINDOW_DAYS,
   TERMINAL_ACTIVITY_TEXT,
   TERMINAL_PROCESSES,
   URL_SCENE_RULES,
   appKind,
   capturePermission,
+  describeHour,
   describeWindowContext,
   emptyHabitProfile,
   formatLogTimestamp,
   formatObservationLogLine,
   gateIntervention,
+  habitBucketKey,
+  habitActiveDays,
+  habitCounts,
+  habitDayKindOf,
   habitPredictionText,
+  habitStatsLines,
+  habitWindowCutoff,
   inferUserState,
   isLateNight,
   isPlanEnabled,
@@ -128,6 +151,7 @@ import {
   learnHabit,
   matchesAppName,
   matchesSensitiveKeywords,
+  migrateHabitProfile,
   normalizeScene,
   normalizeWindowTitle,
   parseSceneFixes,
@@ -135,12 +159,22 @@ import {
   refineScene,
   refineSceneByUrl,
   refineSceneByWindow,
+  appDisplayName,
+  normalizeProcessName,
   safeHost,
   sceneLabel,
   terminalObservationFor,
   topSceneAtHour,
   withoutOwnWindows,
 } from '../shared/perception';
+import {
+  buildHabitModelMessages,
+  buildHabitRoutines,
+  habitModelDigest,
+  localHabitModel,
+  parseHabitModel,
+  sanitizeHabitLine,
+} from '../shared/habit-model';
 import { createLoggerFactory } from '../shared/logging';
 import {
   SUMMARY_MAX_CHARS,
@@ -174,20 +208,11 @@ import { RuntimeCapabilities, readBridge } from './core/runtime';
 import { CameraSensor } from './core/camera-sensor';
 
 /**
- * 区域 -> 互动动画（第一版默认映射；插件可用更高的 Action 覆盖）。
- * 抚摸类反应统一用 `stroke`（原先的 `touch` 已合并进来）。
+ * 点击反应动画不再按身体区域区分（需求）：点一下从 `CLICK_REACTIONS`
+ * （cute / fawning / stroke）里随机挑一条，见 `handleIntent`。
+ *
+ * 挑选逻辑是共享层的纯函数 `pickClickReaction`，验收可以直接钉死。
  */
-const REGION_ANIMATIONS: Readonly<Record<PetRegion, string>> = {
-  head: 'cute',
-  face: 'cute',
-  ear: 'fawning',
-  body: 'stroke',
-  belly: 'stroke',
-  skirt: 'fawning',
-  legs: 'stroke',
-  tail: 'fawning',
-  outside: 'stroke',
-};
 
 /** preload 注入的启动数据（避免 renderer 启动时再往返一次 IPC）。 */
 interface BootstrapPayload {
@@ -241,12 +266,36 @@ class PetApplication {
   private displayState: PetDisplayState = { ...DEFAULT_DISPLAY_STATE };
   /** 随机池与间隔配置（来自 `behavior.json`）。 */
   private behaviorConfig: BehaviorConfig = DEFAULT_BEHAVIOR_CONFIG;
+  /**
+   * 当前心情的镜像（0–100）。
+   *
+   * 真相在主进程（情绪要持久化、按在场状态衰减）；渲染层只需要它来决定
+   * "心情过低时随机池是不是该全演 sad"（需求）。
+   * 初值给满值 = "还没收到状态推送前不算难过"，避免启动瞬间误判。
+   */
+  private mood = 100;
   /** 拖拽令牌：每次拖拽 +1，用于作废竞态中的异步结果。 */
   private dragToken = 0;
   private dragOriginReady = false;
   private dragOriginWindow = { x: 0, y: 0 };
   private dragOriginScreen = { x: 0, y: 0 };
   private started = false;
+
+  /* --- 互动 -> 心情（需求：互动动画播放结束才能加 mood 值） ------------- */
+
+  /**
+   * 本次互动**期望**播出的反应动画 id（`handleIntent` 在派发请求之前登记）。
+   *
+   * 为什么要在派发之前登记：动画请求可能被**同步**拒绝（冷却 / 不可打断 / 优先级），
+   * 那时 `animation:start` 永远不会来。先登记，"这次互动有没有动画可等"才判得准。
+   */
+  private expectedInteractionAnimation: string | null = null;
+  /** 上面那条请求是否**同步被拒**（冷却 / 不可打断 / 优先级不足）→ 没有动画可等。 */
+  private expectedInteractionRejected = false;
+  /** 正在播放的互动反应动画（点击/双击）。null = 没有。 */
+  private interactionAnimationId: string | null = null;
+  /** 等互动动画播完后要结算的心情互动（可能攒了多次连点）。 */
+  private pendingMoodKinds: InteractionKind[] = [];
 
   public constructor() {
     this.stage = requireElement('pet-stage');
@@ -292,16 +341,30 @@ class PetApplication {
       layers: this.layers,
       resolveAsset: (relative) => this.runtime.resolveAsset(relative),
       /*
-       * 收起（贴边）时的"安静模式"：只允许她当前状态的默认姿势**与自己那个随机池**
-       * （需求：收起时只有 sleep / peek 一个随机动画）。正常状态返回 null（不限制）。
-       * 见 AnimationManagerOptions.getQuietPolicy —— 这是"end 一直循环"的根治点。
+       * 收起（贴边）时的"安静模式"：只允许她当前状态的默认姿势**与它的随机小动作**。
+       *
+       * 需求：收起时她安静地维持默认姿势（sleep / watch），只在默认姿势里随机插一小段
+       * （lie / peek）—— 所以白名单必须把 **fidget 里的动画**也算进来，
+       * 否则那两段会被这条规则以 `docked` 拒掉，表现为"收起后从来不换姿势"。
+       *
+       * 正常状态返回 null（不限制）。见 AnimationManagerOptions.getQuietPolicy ——
+       * 这是"end 一直循环"的根治点。
        */
       getQuietPolicy: () => {
         const state = resolveDisplayState(this.displayState);
         if (state === 'normal' || state === 'hidden') return null;
         const fallback = defaultAnimationFor(this.behaviorConfig, state);
         const poolAnimations = poolsFor(this.behaviorConfig, state).flatMap((pool) => [...pool.animations]);
-        return { allowed: [...new Set([...(fallback ? [fallback] : []), ...poolAnimations])] };
+        const fidgetAnimations = fidgetFor(this.behaviorConfig, state)?.animations ?? [];
+        return {
+          allowed: [
+            ...new Set([
+              ...(fallback ? [fallback] : []),
+              ...poolAnimations,
+              ...fidgetAnimations,
+            ]),
+          ],
+        };
       },
     });
 
@@ -325,9 +388,14 @@ class PetApplication {
         void this.execute(action);
       },
       getState: () => this.stateMachine.get(),
-      // 随机动画按"当前显示状态"取池：正常 25–60 秒，收起 3–8 分钟且只有一个候选
+      // 随机动画按"当前显示状态"取池：正常 25–60 秒；收起状态没有池，改走"随机小动作"
       getDisplayState: () => resolveDisplayState(this.displayState),
       getKnownAnimations: () => new Set(this.animationManager.list()),
+      // "随机小动作"的门槛：默认姿势正在播、且已在循环段（见 BehaviorManager.tickFidget）
+      getCurrentAnimation: () => this.animationManager.getCurrentAnimation(),
+      getPersistentPhase: () => this.animationManager.getPersistentPhase(),
+      // 心情过低时随机池整体换成 sad（阈值来自 behavior.json 的 sadPool）
+      getMood: () => this.mood,
       config: this.behaviorConfig,
     });
 
@@ -349,7 +417,10 @@ class PetApplication {
        * 用可选调用避免在极早/极晚时序下（petAPI 缺失）把交互打断。
        */
       onInteraction: (kind) => {
+        // 互动本身立刻上报：记忆事件与"她主动开口有没有被回应"都要用**真实时刻**
         this.runtime.ai()?.notifyInteraction(kind);
+        // 心情等互动动画播完再加（拖动这类没有动画的互动立刻加，见 queueInteractionMood）
+        this.queueInteractionMood(kind);
       },
     });
 
@@ -360,6 +431,17 @@ class PetApplication {
       animations: this.animationManager,
       actions: this.actionManager,
       behaviors: this.behaviorManager,
+      /*
+       * preload 的插件桥：插件的系统能力（联网 / 起进程 / 通知 / 定时器 /
+       * 菜单与面板）全部经它转给 Main —— 权限执法在那边，渲染层不掌握
+       * "谁有权限"的真相（否则改一行渲染层的代码就能越权）。
+       * preload 没注入时为 null：插件仍能加载，只是这些能力返回"不可用"。
+       */
+      bridge: this.runtime.pluginBridge() ?? null,
+      // `ui.say` 的落地点：让桌宠冒个泡说一句话（气泡尺寸由 Main 算）
+      say: (text) => {
+        void this.runtime.bubble()?.set({ visible: true, text, ready: false });
+      },
       runtime: {
         version: this.runtime.version,
         platform: this.runtime.platform,
@@ -472,7 +554,7 @@ class PetApplication {
     });
 
     /*
-     * 播放"当前状态的默认动画"：正常是 idle，下方收起是 lie，右侧收起是 watch。
+     * 播放"当前状态的默认动画"：正常是 idle，下方收起是 sleep，右侧收起是 watch。
      * 不能一律 `playFallback`（那永远是 idle）—— 否则启动时就已收起时她会站在边上发呆。
      */
     await this.playDisplayDefault('startup');
@@ -499,6 +581,14 @@ class PetApplication {
   private wireManagers(): void {
     // 动画开始 -> 状态机进入 PLAYING
     this.eventBus.onFrom('App', PetEvents.AnimationStart, (payload) => {
+      /*
+       * 互动反应动画（点击/双击）开始播了：记下它，等它的 `animation:end`
+       * 才是"加心情"的时机（见 `queueInteractionMood`）。
+       * 托盘菜单手动播放也是 `source: 'user'`，但 reason 是 `tray-menu`，
+       * 所以用 reason 前缀把它排除掉 —— 手动挑动画不该给心情。
+       */
+      if (this.isInteractionReaction(payload)) this.interactionAnimationId = payload.animationId;
+
       this.runtime.notifyAnimationChanged({
         animationId: payload.animationId,
         priority: payload.priority,
@@ -518,15 +608,37 @@ class PetApplication {
     // 动画结束 -> 回到 IDLE（“WebM 播放结束自动回到 IDLE”就实现在这里）
     this.eventBus.onFrom('App', PetEvents.AnimationEnd, (payload) => {
       /*
+       * 互动反应动画播完 = 加心情的时机（需求："互动动画播放结束才能加 mood 值"）。
+       *
+       * 放在状态机判定**之前**：心情结算与状态衔接是两件事，
+       * 不该因为下面那条"已有新动画接手就提前 return"而被跳过。
+       */
+      if (this.interactionAnimationId !== null && payload.animationId === this.interactionAnimationId) {
+        this.interactionAnimationId = null;
+        this.flushPendingMood(payload.animationId, payload.completed ? 'completed' : 'interrupted');
+      }
+
+      /*
        * 收尾段结束时可能**已经**接上了打断它的那条动画
        * （AnimationManager 的 `pendingAfterEnd`，见 requestAnimation 第 5 步）。
        * 那种情况下不能再去迁 IDLE —— 一迁就会触发 resumeFallbackLoop，
        * 而 `playFallback` 带 `interrupt: 'force'`，会把刚接上的动画顶掉。
-       * 判据用"现在有没有动画在播"，而不是"谁接上了"，两条挂起路径（排队 / 收尾）都覆盖。
+       *
+       * 两条挂起路径都靠 `isHandoverPending()` 覆盖：挂起项是排到 `setTimeout(0)`
+       * 才真正开始的，所以此刻 `getCurrentAnimation()` 还是 null ——
+       * 只看它就判断"没有动画了"，会立刻接回默认姿势，于是多出一段
+       * `默认 -> 默认 end -> 目标`（收起时表现为"刚趴下又要爬起来"）。
        */
-      if (this.animationManager.getCurrentAnimation() !== null) {
+      if (
+        this.animationManager.getCurrentAnimation() !== null ||
+        this.animationManager.isHandoverPending()
+      ) {
         this.logger.info('animation end but a new animation already took over; keeping it', {
-          data: { finished: payload.animationId, current: this.animationManager.getCurrentAnimation() },
+          data: {
+            finished: payload.animationId,
+            current: this.animationManager.getCurrentAnimation(),
+            handover: this.animationManager.isHandoverPending(),
+          },
         });
         this.pushTrayState();
         return;
@@ -538,6 +650,18 @@ class PetApplication {
     });
 
     this.eventBus.onFrom('App', PetEvents.AnimationRejected, (payload) => {
+      /*
+       * 互动反应动画**被同步拒绝**（冷却 / 不可打断 / 优先级不足）：
+       * 这次点击不会播任何动画，所以"等动画播完再加心情"的前置条件不成立 ——
+       * 记下来，由 `queueInteractionMood` 在互动上报的那一刻立刻结算。
+       *
+       * 为什么需要这个标记：请求是在 `handleIntent` 里派发的，拒绝是**同步**发生的
+       * （早于 `InteractionManager.onInteraction` 回调），光看 `animation:start`
+       * 永远等不到，心情会被静默吞掉。
+       */
+      if (this.expectedInteractionAnimation !== null && payload.animationId === this.expectedInteractionAnimation) {
+        this.expectedInteractionRejected = true;
+      }
       this.logger.debug('animation request rejected', {
         data: { id: payload.animationId, rejection: payload.rejection, source: payload.source ?? 'system' },
       });
@@ -622,8 +746,80 @@ class PetApplication {
       });
     });
     this.runtime.pluginBridge()?.onReloadRequested(() => {
-      void this.pluginHost.reloadAll(this.plugins);
+      void this.reloadPluginsFromMain();
     });
+
+    /*
+     * 插件运行期三条指令（"插件可随时关闭"在渲染层的落点）：
+     * - `onEnabled`：Main 要求启用/停用**某一个**插件（设置窗口或托盘点了开关）；
+     * - `onUIEvent`：插件注册的菜单项被点、通知被点、或聊天窗口里的面板动作；
+     * - `onTimer`：插件定时器到点（定时器由 Main 持有，隐藏窗口也不会被降频）。
+     */
+    this.runtime.pluginBridge()?.onEnabled((payload) => {
+      void this.pluginHost.applyEnabledCommand(payload.id, payload.enabled, payload.entry);
+    });
+    this.runtime.pluginBridge()?.onUIEvent((event) => this.pluginHost.handleUIEvent(event));
+    this.runtime.pluginBridge()?.onTimer((payload) => {
+      this.pluginHost.handleTimerTick(payload.pluginId, payload.timerId, payload.kind);
+    });
+    /*
+     * 插件被卸载（设置窗口里点了「卸载」）：渲染层要连记录一起忘掉，
+     * 并清掉它的存储 —— 否则托盘菜单里会一直挂着一个已经不存在的插件。
+     */
+    this.runtime.pluginBridge()?.onRemoved((payload) => {
+      void this.pluginHost.removePlugin(payload.id);
+      this.plugins = this.plugins.filter((plugin) => plugin.id !== payload.id);
+    });
+    this.wireMoodMirror();
+  }
+
+  /**
+   * 整体重载插件：**先向 Main 要最新清单**，再让宿主全部卸下重装。
+   *
+   * 为什么要重新问一遍：渲染层手里那份清单是启动时的快照，
+   * 直接拿它重载的话，"刚放进 plugins/ 的新插件"与"刚被关掉的插件"
+   * 都要等到重启才生效 —— 那「重载插件」这个按钮就名不副实了。
+   */
+  private async reloadPluginsFromMain(): Promise<void> {
+    const bridge = this.runtime.pluginBridge();
+    if (bridge) {
+      try {
+        this.plugins = await bridge.discover();
+      } catch (error) {
+        this.logger.warn('refreshing plugin list failed; reloading with the cached list', {
+          error: describeError(error),
+        });
+      }
+    }
+    await this.pluginHost.reloadAll(this.plugins);
+  }
+
+  /**
+   * 心情镜像（渲染层 -> 行为系统）。
+   *
+   * 为什么渲染层需要知道心情：需求是"心情低于阈值时，所有随机池的动画都变成 sad" ——
+   * 池子在渲染层（BehaviorManager），所以至少要有一个"当前心情"的读数。
+   *
+   * 数据来源是主进程的状态推送（`ai.onStatus`，情绪心跳/互动/聊天后都会推一次）。
+   * 这里**只读地缓存一个数**：不做任何 IPC 往返，也不参与情绪计算本身
+   * （情绪的真相永远在主进程）。启动时补一次主动查询，避免等第一个心跳。
+   */
+  private wireMoodMirror(): void {
+    const ai = this.runtime.ai();
+    if (!ai) return;
+    ai.onStatus((status) => {
+      this.applyMood(status?.emotion?.mood);
+    });
+    void ai
+      .status()
+      .then((status) => this.applyMood(status?.emotion?.mood))
+      .catch(() => undefined);
+  }
+
+  /** 落一次心情读数（非法值忽略：宁可保持上一次，也不要让它变成 NaN 影响判定）。 */
+  private applyMood(mood: unknown): void {
+    if (typeof mood !== 'number' || !Number.isFinite(mood)) return;
+    this.mood = mood;
   }
 
   /**
@@ -690,9 +886,9 @@ class PetApplication {
    * 这时如果什么都不做，`<video>` 会停在反应动画的最后一帧，
    * 表现为「点击之后就不循环了」。
    *
-   * ⚠️ 默认动画**不等于** idle：下方收起时是 lie、右侧收起时是 watch。
+   * ⚠️ 默认动画**不等于** idle：下方收起时是 sleep、右侧收起时是 watch。
    * 早期实现一律接回 `playFallback()`（idle），收起状态下她就会站起来 ——
-   * 这正是"收起 = 默认动画 lie/watch"这条需求最容易漏掉的地方。
+   * 这正是"收起 = 默认动画 sleep/watch"这条需求最容易漏掉的地方。
    *
    * 注意必须以**动画本身**为准来判断，而不是只看状态：
    * 打断旧动画时也会触发状态变化，此时新动画已经在播，不能再去抢一次。
@@ -747,7 +943,7 @@ class PetApplication {
    *
    * 三个播放参数/守卫是关键：
    * - `loop: true`：一次性素材（idle）要一直循环；
-   * - `loopCountRange: 'forever'`：**三段式**素材（watch / lie）也要一直循环，
+   * - `loopCountRange: 'forever'`：**三段式**素材（watch / sleep）也要一直循环，
    *   只在离开这个状态时才播它的收尾段（需求："收起时点击先播 end 再播 idle"）；
    * - **幂等**：已经在播这条默认动画就什么都不做。
    *   这不是优化，而是**防死循环**：调用方（自愈链路、resumeFallbackLoop）
@@ -775,7 +971,7 @@ class PetApplication {
    *
    * 三件事必须一起做，缺一个就会出现"收起了她还站着"这类不一致：
    *   1. 记住新状态；
-   *   2. 切换到该状态的默认动画（idle / lie / watch）；
+   *   2. 切换到该状态的默认动画（idle / sleep / watch）；
    *   3. 让 BehaviorManager 换池并重新排期（收起后立刻蹦一下会很怪）。
    */
   private async applyDisplayState(next: PetDisplayState, reason: string): Promise<void> {
@@ -842,7 +1038,7 @@ class PetApplication {
     }
     /*
      * ⚠️ 修的是这条：自愈要回到**当前显示状态的默认动画**，不是硬编码 idle。
-     * 收起状态的默认是 watch / lie（三段式）—— 回 idle 会让
+     * 收起状态的默认是 watch / sleep（三段式）—— 回 idle 会让
      * `resumeFallbackLoop()` 再把默认动画接回来，形成
      * `watch -> end -> idle -> watch -> end ...` 的循环（用户报告"end 一直循环"）。
      * `playDisplayDefault()` 自身幂等，重复自愈也不会反复打断。
@@ -899,7 +1095,7 @@ class PetApplication {
     this.logger.warn('no active animation but a frozen frame is visible; resuming default', {
       data: { reason, attempt: this.recoveryAttempts, state: this.stateMachine.get() },
     });
-    // 同 checkVideoHealth：回到**当前显示状态的默认动画**（收起时是 watch/lie）
+    // 同 checkVideoHealth：回到**当前显示状态的默认动画**（收起时是 watch/sleep）
     void this.playDisplayDefault(`self-heal-stuck:${reason}`)
       .catch((error: unknown) => {
         this.logger.warn('self-heal default play failed', { error: describeError(error) });
@@ -1054,14 +1250,18 @@ class PetApplication {
    */
   public handleIntent(intent: InteractionIntent): void {
     this.currentRegion = intent.region;
-    if (intent.kind === 'region-enter') return;
+    if (intent.kind === 'region-enter') {
+      // 只是划过区域：不产生互动，也不该把上一次点击的期望留在这里
+      this.expectInteractionAnimation(null);
+      return;
+    }
 
     /*
      * 收起状态下点一下 = **只展开**（需求："点击宠物展开"，且
      * "收起时点击宠物应该先播放 end 再播放 idle"）。
      *
      * 所以这里**不再同时**播点击反应（cute/fawning/stroke）：
-     * 收起状态的默认动画是 watch（右侧）/ lie（下方），点一下的动作语义是"把我放出来"，
+     * 收起状态的默认动画是 watch（右侧）/ sleep（下方），点一下的动作语义是"把我放出来"，
      * 应该由它自己的收尾段负责过渡 —— 现在走的是 AnimationManager 的三段式语义：
      *   watch 在 loop 段 -> 立刻进 end 段 -> 收尾播完 -> 接上 idle。
      * 之前"展开 + 点击反应"同时发生会有两个问题（实测）：
@@ -1077,6 +1277,11 @@ class PetApplication {
       this.logger.info('click while docked: expanding (end -> idle)', {
         data: { dock: this.displayState.dock, region: intent.region },
       });
+      /*
+       * 收起状态点击**没有反应动画**（只有默认姿势的收尾段）：
+       * 期待值登记为 null，心情会在互动那一刻立刻结算（见 queueInteractionMood）。
+       */
+      this.expectInteractionAnimation(null);
       void this.runtime.requestUndock().then((display) => {
         if (display) void this.applyDisplayState(display, 'click-undock');
       });
@@ -1086,18 +1291,33 @@ class PetApplication {
     const payload: PetClickPayload = intent.payload;
 
     if (intent.kind === 'double-click') {
-      this.logger.info('double click', { data: { region: intent.region } });
-      void this.execute({
-        type: 'animation',
-        animationId: 'play',
-        priority: 60,
-        source: 'user',
-        reason: 'user-double-click',
-      });
+      /*
+       * 需求："去掉双击触发动画的代码"。
+       * 双击不再播 `play`（也不播任何动画）—— 它仍然算一次互动
+       * （InteractionManager 会照常上报 `doubleclick`，记忆与心情各自按既有规则处理），
+       * 只是没有可等的"互动动画"，所以心情在互动那一刻就结算。
+       */
+      this.expectInteractionAnimation(null);
+      this.logger.info('double click: no animation by design', { data: { region: intent.region } });
       return;
     }
 
-    const animationId = REGION_ANIMATIONS[intent.region] ?? 'stroke';
+    /*
+     * 点击反应：**不分区域**了，从 cute / fawning / stroke 里随机挑一条
+     * （需求）。挑的时候避开正在冷却的那条，否则连点会出现"点了没反应"。
+     */
+    const animationId = pickClickReaction(
+      this.animationManager.list(),
+      Math.random,
+      (id) => this.animationManager.isOnCooldown(id),
+    );
+    if (animationId === null) {
+      this.logger.warn('click reaction unavailable: none of the candidates is registered', {
+        data: { candidates: CLICK_REACTIONS.join('/') },
+      });
+      this.expectInteractionAnimation(null);
+      return;
+    }
     this.logger.info('click', {
       data: { region: intent.region, nx: payload.nx.toFixed(2), ny: payload.ny.toFixed(2), animationId },
     });
@@ -1108,6 +1328,7 @@ class PetApplication {
      * 放在动画管理器里，插件/AI/感知触发也能享受同一套语义，
      * 渲染层只负责提交意图（这也正是 Action Pipeline 的设计约定）。
      */
+    this.expectInteractionAnimation(animationId);
     void this.execute({
       type: 'animation',
       animationId,
@@ -1125,6 +1346,84 @@ class PetApplication {
     } catch (error) {
       this.logger.error('action execution error (ignored)', { error: describeError(error) });
     }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 互动 -> 心情（需求：互动动画播放结束才能加 mood 值）                    */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * 登记"这次互动期望播出的反应动画"。
+   *
+   * 必须**在派发动画请求之前**调用：`AnimationManager.requestAnimation` 的拒绝
+   * （冷却 / 不可打断 / 优先级）是同步发生的，而互动上报回调在它之后 ——
+   * 事后再登记就永远看不到那次拒绝，心情会被静默吞掉。
+   *
+   * @param animationId 期望的反应动画；null = 这次互动没有动画（拖动 / 收起状态点击）
+   */
+  private expectInteractionAnimation(animationId: string | null): void {
+    this.expectedInteractionAnimation = animationId;
+    this.expectedInteractionRejected = false;
+  }
+
+  /**
+   * 这次 `animation:start` 是不是"用户互动反应动画"（点击 / 双击）。
+   *
+   * 判据是 `source: 'user'` **加上** reason 前缀：托盘菜单手动挑动画也是
+   * `source: 'user'`（reason = `tray-menu`），它不该参与心情结算。
+   */
+  private isInteractionReaction(payload: { source?: string; reason?: string }): boolean {
+    if (payload.source !== 'user') return false;
+    const reason = payload.reason ?? '';
+    return reason.startsWith('user-click:') || reason === 'user-double-click';
+  }
+
+  /**
+   * 用户碰了她之后，决定"心情什么时候加"。
+   *
+   * 四种真实形态，判定顺序不能换：
+   * 1. **拖动 / 收起状态下点击**：本来就没有反应动画 —— 立刻结算；
+   * 2. **已经有一条互动动画在播**：点击动画 `interruptible: false`（不可打断），
+   *    这次请求会被拒；攒着等那条播完一起结算，连点不会白点；
+   * 3. **请求被同步拒绝**（冷却 / 优先级不足）：没有动画可等 —— 立刻结算；
+   * 4. **其余**：动画即将开始（视频加载是异步的）—— 等它的 `animation:end`。
+   */
+  private queueInteractionMood(kind: InteractionKind): void {
+    const expected = this.expectedInteractionAnimation;
+    const rejected = this.expectedInteractionRejected;
+    this.expectedInteractionAnimation = null;
+    this.expectedInteractionRejected = false;
+
+    const hasReaction = kind !== 'drag' && expected !== null;
+    if (!hasReaction || (this.interactionAnimationId === null && rejected)) {
+      this.runtime.ai()?.notifyInteractionSettled(kind);
+      return;
+    }
+    this.pendingMoodKinds.push(kind);
+    this.logger.debug('interaction mood waits for animation end', {
+      data: {
+        kind,
+        expected: expected ?? '-',
+        playing: this.interactionAnimationId ?? '-',
+        pending: this.pendingMoodKinds.length,
+      },
+    });
+  }
+
+  /**
+   * 互动动画播完 -> 把攒下的互动一次性结算（连点会攒成多条，逐条加心情）。
+   *
+   * `interrupted` 也照样结算：那条动画确实播过（可能只播了一半），
+   * 而用户是真的点了她 —— 心情按"碰过"算，比按"看完整段"算更符合直觉。
+   */
+  private flushPendingMood(animationId: string, reason: 'completed' | 'interrupted'): void {
+    if (this.pendingMoodKinds.length === 0) return;
+    const kinds = this.pendingMoodKinds;
+    this.pendingMoodKinds = [];
+    for (const kind of kinds) this.runtime.ai()?.notifyInteractionSettled(kind);
+    this.logger.info('interaction mood settled after animation end', {
+      data: { animationId, reason, kinds: kinds.join(',') },
+    });
   }
 
   /* ------------------------------------------------------------------ */
@@ -1188,10 +1487,7 @@ class PetApplication {
 
   private openContextMenu(region: PetRegion): void {
     this.currentRegion = region;
-    this.runtime.showContextMenu({
-      region,
-      animationId: this.animationManager.getCurrentAnimation(),
-    });
+    this.runtime.showContextMenu();
   }
 
   private pushTrayState(): void {
@@ -1270,6 +1566,8 @@ class PetApplication {
     readonly click: (region: PetRegion, nx?: number, ny?: number) => void;
     /** 显示状态（收起方向 / 隐藏）。 */
     readonly display: () => PetDisplayState;
+    /** 心情镜像读数（渲染层缓存的主进程心情；用于验证推送链路）。 */
+    readonly mood: () => number;
     /**
      * 动画与行为的**纯模型**（这一次大改的核心规则）。
      *
@@ -1281,16 +1579,26 @@ class PetApplication {
       readonly resolvePlayLoopCount: typeof resolvePlayLoopCount;
       readonly inferAnimationCategory: typeof inferAnimationCategory;
       readonly ANIMATION_CATEGORIES: typeof ANIMATION_CATEGORIES;
+      /** 点击反应动画的候选集与随机挑选（点击不再分区域）。 */
+      readonly CLICK_REACTIONS: typeof CLICK_REACTIONS;
+      readonly pickClickReaction: typeof pickClickReaction;
       readonly parseBehaviorConfig: typeof parseBehaviorConfig;
       readonly pickPoolAnimation: typeof pickPoolAnimation;
       readonly poolsFor: typeof poolsFor;
       readonly defaultAnimationFor: typeof defaultAnimationFor;
+      /** 心情过低时随机池换成哪一条（需求："低于阈值全变 sad，高于阈值变回来"）。 */
+      readonly sadPoolAnimation: typeof sadPoolAnimation;
+      /** 内置的 sad 阈值与动画 id（与 pet-triggers 的"很难过"档保持一致）。 */
+      readonly SAD_POOL_MOOD_BELOW: typeof SAD_POOL_MOOD_BELOW;
+      readonly SAD_POOL_ANIMATION: typeof SAD_POOL_ANIMATION;
+      /** 某个显示状态的"随机小动作"配置（收起时的 lie / peek）。 */
+      readonly fidgetFor: typeof fidgetFor;
       readonly resolveDisplayState: typeof resolveDisplayState;
       /** 收起/隐藏 = 安静模式（这时她不该开口说话）。 */
       readonly isQuietDisplay: typeof isQuietDisplay;
       readonly DEFAULT_BEHAVIOR_CONFIG: typeof DEFAULT_BEHAVIOR_CONFIG;
       readonly NORMAL_RANDOM_INTERVAL_MS: typeof NORMAL_RANDOM_INTERVAL_MS;
-      readonly DOCKED_RANDOM_INTERVAL_MS: typeof DOCKED_RANDOM_INTERVAL_MS;
+      readonly DOCKED_FIDGET_INTERVAL_MS: typeof DOCKED_FIDGET_INTERVAL_MS;
       readonly evaluateDock: typeof evaluateDock;
       readonly dockTargetPosition: typeof dockTargetPosition;
       readonly shouldUndock: typeof shouldUndock;
@@ -1365,6 +1673,36 @@ class PetApplication {
       readonly learnHabit: typeof learnHabit;
       readonly emptyHabitProfile: typeof emptyHabitProfile;
       readonly habitPredictionText: typeof habitPredictionText;
+      /** 习惯 v2：分档读数 / 统计文本 / 常量（去重、衰减、可回落、平日周末）。 */
+      readonly describeHour: typeof describeHour;
+      readonly habitDayKindOf: typeof habitDayKindOf;
+      readonly habitBucketKey: typeof habitBucketKey;
+      readonly habitStatsLines: typeof habitStatsLines;
+      readonly HABIT_WINDOW_DAYS: typeof HABIT_WINDOW_DAYS;
+      readonly habitCounts: typeof habitCounts;
+      readonly habitActiveDays: typeof habitActiveDays;
+      readonly habitWindowCutoff: typeof habitWindowCutoff;
+      /** v1 -> v2 画像迁移（纯函数；验收直接喂旧 JSON 断言）。 */
+      readonly migrateHabitProfile: typeof migrateHabitProfile;
+      readonly HABIT_MIN_DAYS: typeof HABIT_MIN_DAYS;
+      readonly HABIT_MIN_SCENE_DAYS: typeof HABIT_MIN_SCENE_DAYS;
+      readonly HABIT_KIND_ANY: typeof HABIT_KIND_ANY;
+      /** 习惯建模：本地算条目 + 提示词 + 解析 + 模板（模型只写措辞，条目不经过模型）。 */
+      readonly buildHabitRoutines: typeof buildHabitRoutines;
+      readonly habitModelDigest: typeof habitModelDigest;
+      readonly buildHabitModelMessages: typeof buildHabitModelMessages;
+      readonly parseHabitModel: typeof parseHabitModel;
+      readonly localHabitModel: typeof localHabitModel;
+      readonly sanitizeHabitLine: typeof sanitizeHabitLine;
+      /** 日常闲聊：候选组装与轮换挑选（问候 / 今天的活动 / 最近的事 / 习惯询问）。 */
+      readonly buildSmallTalk: typeof buildSmallTalk;
+      readonly pickSmallTalk: typeof pickSmallTalk;
+      /** 纸条记录的**向下兼容迁移**（旧"邮箱"格式 -> 现在的收纳夹格式）。 */
+      readonly migrateNote: typeof migrateNote;
+      /** 记忆召回（她主动查记忆宫殿时的纯检索）：分词、打分、拼文本。 */
+      readonly recallTokens: typeof recallTokens;
+      readonly selectPalaceMatches: typeof selectPalaceMatches;
+      readonly formatPalaceRecall: typeof formatPalaceRecall;
       readonly topSceneAtHour: typeof topSceneAtHour;
       /** 这个场景算不算"看懂了"（`other` = 没认出来，一律当作没看见）。 */
       readonly isRecognizedScene: typeof isRecognizedScene;
@@ -1379,6 +1717,12 @@ class PetApplication {
       readonly isSensitive: typeof isSensitive;
       readonly normalizeScene: typeof normalizeScene;
       readonly sceneLabel: typeof sceneLabel;
+      /**
+       * 界面显示用的程序名：已知进程名 -> 固定名字（同一个 Edge 不许叫三个名字）。
+       * 纯函数，验收直接钉"msedge 永远显示成 Microsoft Edge"。
+       */
+      readonly appDisplayName: typeof appDisplayName;
+      readonly normalizeProcessName: typeof normalizeProcessName;
       /** 场景纠正（"浏览器被认成笔记软件"这类误判的确定性补救）。 */
       readonly refineScene: typeof refineScene;
       readonly appKind: typeof appKind;
@@ -1477,20 +1821,34 @@ class PetApplication {
         });
       },
       display: () => this.displayState,
+      /**
+       * 心情镜像读数（渲染层从主进程推送缓存下来的那个数）。
+       *
+       * 暴露出来是为了能验证"推送真的到了"：`petDebug.mood()` 与
+       * `ai.status().emotion.mood` 必须一致 —— 镜像断了的话随机池的 sad 规则
+       * 就会一直按启动时的旧值判定。
+       */
+      mood: () => this.mood,
       animationModel: {
         resolveLoopCount,
         resolvePlayLoopCount,
         inferAnimationCategory,
         ANIMATION_CATEGORIES,
+        CLICK_REACTIONS,
+        pickClickReaction,
         parseBehaviorConfig,
         pickPoolAnimation,
         poolsFor,
         defaultAnimationFor,
+        sadPoolAnimation,
+        SAD_POOL_MOOD_BELOW,
+        SAD_POOL_ANIMATION,
+        fidgetFor,
         resolveDisplayState,
         isQuietDisplay,
         DEFAULT_BEHAVIOR_CONFIG,
         NORMAL_RANDOM_INTERVAL_MS,
-        DOCKED_RANDOM_INTERVAL_MS,
+        DOCKED_FIDGET_INTERVAL_MS,
         evaluateDock,
         dockTargetPosition,
         shouldUndock,
@@ -1557,6 +1915,30 @@ class PetApplication {
         learnHabit,
         emptyHabitProfile,
         habitPredictionText,
+        describeHour,
+        habitDayKindOf,
+        habitBucketKey,
+        habitActiveDays,
+        habitCounts,
+        habitWindowCutoff,
+        habitStatsLines,
+        migrateHabitProfile,
+        HABIT_WINDOW_DAYS,
+        HABIT_MIN_DAYS,
+        HABIT_MIN_SCENE_DAYS,
+        HABIT_KIND_ANY,
+        buildHabitRoutines,
+        habitModelDigest,
+        buildHabitModelMessages,
+        parseHabitModel,
+        localHabitModel,
+        sanitizeHabitLine,
+        buildSmallTalk,
+        pickSmallTalk,
+        migrateNote,
+        recallTokens,
+        selectPalaceMatches,
+        formatPalaceRecall,
         topSceneAtHour,
         isRecognizedScene,
         recognizedSegments,
@@ -1569,6 +1951,8 @@ class PetApplication {
         isSensitive,
         normalizeScene,
         sceneLabel,
+        appDisplayName,
+        normalizeProcessName,
         refineScene,
         appKind,
         matchesAppName,

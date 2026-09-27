@@ -11,16 +11,38 @@
     "docked-bottom": {
       "label": "下方收起",
       "defaultAnimation": "sleep",
-      "pools": [
-        "docked-bottom-random"
-      ]
+      "pools": [],
+      "fidget": {
+        "animations": [
+          "lie"
+        ],
+        "intervalMs": [
+          180000,
+          480000
+        ],
+        "loopCountRange": [
+          1,
+          3
+        ]
+      }
     },
     "docked-right": {
       "label": "右侧收起",
       "defaultAnimation": "watch",
-      "pools": [
-        "docked-right-random"
-      ]
+      "pools": [],
+      "fidget": {
+        "animations": [
+          "peek"
+        ],
+        "intervalMs": [
+          180000,
+          480000
+        ],
+        "loopCountRange": [
+          1,
+          2
+        ]
+      }
     },
     "hidden": {
       "label": "隐藏",
@@ -35,8 +57,8 @@
         "roll",
         "hot",
         "bomb",
-        "lie",
         "play",
+        "play_tail",
         "shake",
         "sing",
         "spin",
@@ -53,36 +75,11 @@
         2
       ],
       "onlyWhenIdle": true
-    },
-    "docked-bottom-random": {
-      "label": "收起时趴一会儿",
-      "animations": [
-        "lie"
-      ],
-      "intervalMs": [
-        180000,
-        480000
-      ],
-      "initialDelayMs": 60000,
-      "cooldownMs": 30000,
-      "persistentLoopCountRange": [
-        1,
-        2
-      ],
-      "onlyWhenIdle": true
-    },
-    "docked-right-random": {
-      "label": "收起时偷看",
-      "animations": [
-        "peek"
-      ],
-      "intervalMs": [
-        180000,
-        480000
-      ],
-      "initialDelayMs": 60000,
-      "cooldownMs": 30000,
-      "onlyWhenIdle": true
     }
+  },
+  "sadPool": {
+    "enabled": true,
+    "moodBelow": 25,
+    "animation": "sad"
   }
 }

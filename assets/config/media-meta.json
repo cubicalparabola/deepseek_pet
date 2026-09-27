@@ -105,6 +105,13 @@
     "fps": 24,
     "alpha": true
   },
+  "play_tail.webm": {
+    "width": 834,
+    "height": 1112,
+    "duration": 6.04,
+    "fps": 24,
+    "alpha": true
+  },
   "read-end.webm": {
     "width": 834,
     "height": 1112,

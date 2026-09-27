@@ -24,6 +24,7 @@ import type { SettingsWindowBridge } from '../shared/settings-window';
 import { mountAIPanel } from './ai-panel';
 import { mountPerceptionPanel } from './perception-panel';
 import { mountGrowthPanel } from './growth-panel';
+import { mountPluginPanel } from './plugin-panel';
 
 function requireElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -39,8 +40,11 @@ const detailLabel = requireElement('scale-detail');
 const notice = requireElement('notice');
 const savedLabel = requireElement('saved');
 const alwaysOnTopInput = requireElement<HTMLInputElement>('always-on-top');
+const dockOnEdgeInput = requireElement<HTMLInputElement>('dock-on-edge');
 const resetButton = requireElement<HTMLButtonElement>('reset');
 const openConfigButton = requireElement<HTMLButtonElement>('open-config');
+const reloadPluginsButton = requireElement<HTMLButtonElement>('reload-plugins');
+const actionStatus = requireElement('action-status');
 const closeButton = requireElement<HTMLButtonElement>('close');
 const stepLabel = requireElement('step');
 const rangeLabel = requireElement('range');
@@ -72,6 +76,17 @@ function flashSaved(): void {
   savedTimer = window.setTimeout(() => savedLabel.classList.remove('show'), 1100);
 }
 
+/** 动作按钮的结果提示（重载插件这类"点一下就该有回音"的操作）。 */
+let actionTimer: number | null = null;
+function showActionStatus(text: string): void {
+  actionStatus.hidden = false;
+  actionStatus.textContent = text;
+  if (actionTimer !== null) window.clearTimeout(actionTimer);
+  actionTimer = window.setTimeout(() => {
+    actionStatus.hidden = true;
+  }, 2600);
+}
+
 /** 用请求值刷新文案（立即反馈，不等待主进程）。 */
 function renderRequested(scale: number): void {
   percentLabel.textContent = formatPetScale(scale);
@@ -88,6 +103,8 @@ function renderApplied(state: PetSettingsState): void {
   percentLabel.textContent = formatPetScale(size.scale);
   detailLabel.textContent = `窗口 ${size.width}×${size.height}px · 实际高度 ${size.height}px`;
   alwaysOnTopInput.checked = state.alwaysOnTop;
+  // 拖到边缘收起是主进程的状态（托盘窗口位置变化也会改它），一律以回读为准
+  dockOnEdgeInput.checked = state.dockOnEdge;
 
   if (size.clampedByDisplay) {
     notice.hidden = false;
@@ -152,12 +169,41 @@ alwaysOnTopInput.addEventListener('change', () => {
   void bridge.setAlwaysOnTop(alwaysOnTopInput.checked).then(renderApplied);
 });
 
+/*
+ * 拖到边缘自动收起。
+ *
+ * 关掉之后，`dockOnEdge=false` 会写进 settings.json：她可以被拖到屏幕中间停住，
+ * 不会再一松手就贴边（这是用户主动关掉的行为，不随重启还原）。
+ */
+dockOnEdgeInput.addEventListener('change', () => {
+  if (!bridge) return;
+  void bridge.setDockOnEdge(dockOnEdgeInput.checked).then(renderApplied);
+});
+
 resetButton.addEventListener('click', () => {
   applyScale(1);
 });
 
 openConfigButton.addEventListener('click', () => {
   void bridge?.openConfigFolder();
+});
+
+/*
+ * 重载插件：从托盘菜单搬来的（菜单只留日常动作）。
+ * 有意**显示结果**而不是静默成功 —— 磁盘上没有插件时，"点了没反应"会被当成坏了。
+ */
+reloadPluginsButton.addEventListener('click', () => {
+  if (!bridge) return;
+  reloadPluginsButton.disabled = true;
+  void bridge
+    .reloadPlugins()
+    .then((count) => {
+      showActionStatus(count > 0 ? `已重载 ${count} 个插件` : '没有发现插件（看 assets/config/plugins.json）');
+    })
+    .catch(() => showActionStatus('重载插件失败，详情见日志'))
+    .finally(() => {
+      reloadPluginsButton.disabled = false;
+    });
 });
 
 closeButton.addEventListener('click', () => {
@@ -214,4 +260,18 @@ try {
   if (bridge) mountGrowthPanel(requireElement('growth-panel-root'), bridge.growth, bridge.initial.growth);
 } catch (error) {
   console.error('[settings] mounting growth panel failed', error);
+}
+
+/*
+ * 插件管理面板。
+ *
+ * 与上面三个面板同一套接线方式：初始快照直接用 bootstrap 里那一份
+ * （`initial.plugins` 含**被关掉的**插件），面板挂载后还会自己 `list()` 一次
+ * 并订阅 `onChanged` —— 谁持有闭包谁去拉数据，页面这一层只做一行接线，
+ * 挂载失败也被下面的 try/catch 兜住，不会连累"调尺寸"。
+ */
+try {
+  if (bridge) mountPluginPanel(requireElement('plugin-panel-root'), bridge.plugins, bridge.initial.plugins ?? []);
+} catch (error) {
+  console.error('[settings] mounting plugin panel failed', error);
 }
