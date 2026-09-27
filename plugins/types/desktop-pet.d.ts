@@ -84,9 +84,9 @@ declare module 'desktop-pet' {
     readonly button: 'left' | 'middle' | 'right';
     readonly x: number;
     readonly y: number;
+    /** 归一化坐标（0-1）。点击反应与点在哪无关（不再有"命中区域"）。 */
     readonly nx: number;
     readonly ny: number;
-    readonly region: string;
     readonly detail: number;
   }
 
@@ -109,10 +109,9 @@ declare module 'desktop-pet' {
   export interface PetEventMap {
     'pet:click': PetClickPayload;
     'pet:dblclick': PetClickPayload;
-    'pet:pointer-enter': { readonly region: string; readonly nx: number; readonly ny: number };
-    'pet:pointer-move': { readonly region: string; readonly nx: number; readonly ny: number };
-    'pet:pointer-leave': { readonly region: string; readonly nx: number; readonly ny: number };
-    'pet:region': { readonly region: string; readonly nx: number; readonly ny: number };
+    'pet:pointer-enter': { readonly nx: number; readonly ny: number };
+    'pet:pointer-move': { readonly nx: number; readonly ny: number };
+    'pet:pointer-leave': { readonly nx: number; readonly ny: number };
     'pet:drag': { readonly phase: 'start' | 'move' | 'end'; readonly screenX: number; readonly screenY: number };
     'animation:request': { readonly animationId: string; readonly priority?: number };
     'animation:start': { readonly animationId: string; readonly priority: number; readonly loop: boolean };

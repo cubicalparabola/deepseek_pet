@@ -53,8 +53,8 @@ app.whenReady().then(async () => {
     const bus = window.petDebug.bus;
     window.__events = [];
     window.__subs = [
-      bus.on('pet:click', (p) => window.__events.push({ t: 'pet:click', region: p.region })),
-      bus.on('pet:dblclick', (p) => window.__events.push({ t: 'pet:dblclick', region: p.region })),
+      bus.on('pet:click', (p) => window.__events.push({ t: 'pet:click', nx: p.nx })),
+      bus.on('pet:dblclick', (p) => window.__events.push({ t: 'pet:dblclick', nx: p.nx })),
       bus.on('animation:start', (p) => window.__events.push({ t: 'anim', id: p.animationId, reason: p.reason })),
       bus.on('pet:drag', (p) => window.__events.push({ t: 'drag', phase: p.phase })),
     ];

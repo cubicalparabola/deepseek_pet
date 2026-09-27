@@ -323,7 +323,7 @@ app.whenReady().then(async () => {
     let sawEndPhase = false;
     /** end 段期间窗口位置的集合：需求要求"播 end 时不要移动位置"。 */
     const positionsDuringEnd = new Set();
-    window.petDebug.click('head', 0.5, 0.4);
+    window.petDebug.click(0.5, 0.4);
     const t0 = Date.now();
     let afterClick = null;
     while (Date.now() - t0 < 20000) {
@@ -413,7 +413,7 @@ app.whenReady().then(async () => {
     const segments = anim.getDefinition('sleep').segments || {};
     const saw = new Set();
     let sawEndPhase = false;
-    window.petDebug.click('head', 0.5, 0.4);
+    window.petDebug.click(0.5, 0.4);
     const t0 = Date.now();
     let afterClick = null;
     while (Date.now() - t0 < 15000) {
@@ -503,18 +503,22 @@ app.whenReady().then(async () => {
     };
   })()`);
   const normalPool = (pools.normal ?? []).find((p) => p.id === 'normal-random');
-  const dockedPool = (pools.docked ?? [])[0];
+  const bottomFidget = pools.config['docked-bottom'].fidget;
+  const rightFidget = pools.config['docked-right'].fidget;
   step(
-    '随机池：正常状态 9 个候选、25~60 秒；收起状态只有 1 个候选且 3~8 分钟',
+    '随机池与收起小动作：正常 9 个候选 25~60 秒；收起**没有池**，改由 fidget 换姿势（lie / peek，3~8 分钟、1~3 轮）',
     pools,
     Boolean(normalPool) &&
       normalPool.animations.length === 9 &&
       normalPool.interval[0] === 25000 &&
       normalPool.interval[1] === 60000 &&
-      Boolean(dockedPool) &&
-      dockedPool.animations.length === 1 &&
-      dockedPool.interval[0] === 180000 &&
-      dockedPool.interval[1] === 480000 &&
+      (pools.docked ?? []).length === 0 &&
+      (bottomFidget?.animations ?? []).join(',') === 'lie' &&
+      (rightFidget?.animations ?? []).join(',') === 'peek' &&
+      bottomFidget?.intervalMs?.[0] === 180000 &&
+      bottomFidget?.intervalMs?.[1] === 480000 &&
+      // 轮数必须是"几轮"：曾经被毫秒区间夹成 1000（`lie` 一轮 5 秒 ≈ 趴 85 分钟）
+      (bottomFidget?.loopCountRange?.[1] ?? 0) <= 20 &&
       pools.config['docked-bottom'].defaultAnimation === 'sleep' &&
       pools.config['docked-right'].defaultAnimation === 'watch',
   );

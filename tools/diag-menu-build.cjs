@@ -55,7 +55,7 @@ app.whenReady().then(async () => {
   // 触发右键菜单（会构建 context menu）
   const beforeCtx = captured.length;
   await win.webContents.executeJavaScript(
-    `(() => { window.petAPI.menu.showContextMenu({ region: 'body', animationId: window.petDebug.anim.getCurrentAnimation() }); return true; })()`,
+    `(() => { window.petAPI.menu.showContextMenu({ animationId: window.petDebug.anim.getCurrentAnimation() }); return true; })()`,
     true,
   );
   await new Promise((r) => setTimeout(r, 1200));

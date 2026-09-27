@@ -22,11 +22,15 @@ export interface PetClickPayload {
   readonly button: 'left' | 'middle' | 'right';
   readonly x: number;
   readonly y: number;
-  /** 归一化坐标（0-1），便于判断“点击了头部/肚子/尾巴”这类分区互动。 */
+  /**
+   * 归一化坐标（0-1），基于宠物窗口内部坐标。
+   *
+   * ⚠️ 这里**没有**"命中区域"（head / belly / tail…）：那套分区从来没接进行为链
+   * —— 点击反应本来就是从 cute / fawning / stroke 里随机挑一条，与点在哪无关。
+   * 分区字段因此连同分类逻辑一起删掉了（用户要求：没实现的功能不要留在代码里）。
+   */
   readonly nx: number;
   readonly ny: number;
-  /** 命中的分区标签（由 InteractionManager 计算，例如 "head" / "belly" / "tail" / "body"）。 */
-  readonly region: string;
   readonly detail: number;
 }
 
@@ -35,7 +39,6 @@ export interface PetPointerPayload {
   readonly y: number;
   readonly nx: number;
   readonly ny: number;
-  readonly region: string;
 }
 
 export interface PetDragPayload {
@@ -44,14 +47,6 @@ export interface PetDragPayload {
   readonly screenY: number;
   readonly offsetX: number;
   readonly offsetY: number;
-}
-
-export interface PetRegionPayload {
-  readonly region: string;
-  readonly x: number;
-  readonly y: number;
-  readonly nx: number;
-  readonly ny: number;
 }
 
 export interface AnimationStartPayload {
@@ -155,7 +150,6 @@ export interface PetEventMap {
   'pet:pointer-move': PetPointerPayload;
   'pet:pointer-leave': PetPointerPayload;
   'pet:drag': PetDragPayload;
-  'pet:region': PetRegionPayload;
 
   'animation:request': AnimationRequestPayload;
   'animation:start': AnimationStartPayload;
@@ -219,7 +213,6 @@ export const PetEvents = {
   PetPointerMove: 'pet:pointer-move',
   PetPointerLeave: 'pet:pointer-leave',
   PetDrag: 'pet:drag',
-  PetRegion: 'pet:region',
   AnimationRequest: 'animation:request',
   AnimationStart: 'animation:start',
   AnimationEnd: 'animation:end',

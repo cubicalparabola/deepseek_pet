@@ -1048,12 +1048,12 @@ app.whenReady().then(async () => {
    *   2. 点击反应按 interrupt:'queue' 排队，收尾段结束后接上。
    *
    * 走**真实点击入口** window.petApp.handleIntent(...)，不在测试里复刻
-   * 区域->动画的映射（复刻过的断言漏过真 bug）。
+   * 点击 -> 动画的挑选逻辑（复刻过的断言漏过真 bug）。
    */
   const clickDeferRun = await run(`(async () => {
     const anim = window.petDebug.anim;
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-    const payload = { button: 'left', x: 100, y: 100, nx: 0.5, ny: 0.5, region: 'body', detail: 1 };
+    const payload = { button: 'left', x: 100, y: 100, nx: 0.5, ny: 0.5, detail: 1 };
     anim.resetCooldowns();
     anim.stop('click-defer-reset');
     await wait(200);
@@ -1061,7 +1061,7 @@ app.whenReady().then(async () => {
     for (let i = 0; i < 40 && anim.getPersistentPhase() !== 'loop'; i++) await wait(100);
     const before = { animation: anim.getCurrentAnimation(), phase: anim.getPersistentPhase() };
 
-    window.petApp.handleIntent({ kind: 'click', region: 'body', payload });
+    window.petApp.handleIntent({ kind: 'click', payload });
     // 立刻应进 end 段（不是硬切到 stroke）
     let enteredEnd = false;
     const t0 = Date.now();
@@ -1108,7 +1108,7 @@ app.whenReady().then(async () => {
     const anim = window.petDebug.anim;
     const bus = window.petDebug.bus;
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-    const payload = { button: 'left', x: 100, y: 100, nx: 0.5, ny: 0.5, region: 'body', detail: 1 };
+    const payload = { button: 'left', x: 100, y: 100, nx: 0.5, ny: 0.5, detail: 1 };
     anim.resetCooldowns();
     anim.stop('no-defer-reset');
     await wait(200);
@@ -1116,7 +1116,7 @@ app.whenReady().then(async () => {
     const sub = bus.on('animation:rejected', (p) => rejections.push({ id: p.animationId, rejection: p.rejection }));
     const started = await anim.play('bomb', { interrupt: 'force', reason: 'no-defer-setup', bypassCooldown: true });
     const before = { animation: anim.getCurrentAnimation(), priority: anim.getCurrentPriority() };
-    window.petApp.handleIntent({ kind: 'click', region: 'body', payload });
+    window.petApp.handleIntent({ kind: 'click', payload });
     await wait(500);
     sub.unsubscribe();
     return { started: started.accepted, before, after: anim.getCurrentAnimation(), rejections };
@@ -1628,33 +1628,34 @@ app.whenReady().then(async () => {
   );
 
   /*
-   * 真实点击路径：同一个区域（head）点多次，产出的动画仍必须落在三条候选之内
-   * —— 区域不再决定动画（以前 head 恒等于 cute）。
-   * 这里刻意**不**断言"一定是某一条"：那正是本次要拆掉的行为。
+   * 真实点击路径：连点多次，产出的动画仍必须落在三条候选之内
+   * —— 点击反应从来**不由位置决定**（以前有个 head/belly/tail 的分区字段，
+   * 但它没接进行为链，已按用户要求连同分类逻辑一起删掉）。
+   * 这里刻意**不**断言"一定是某一条"。
    */
-  const clickRegionRun = await run(`(async () => {
+  const clickReactionRun = await run(`(async () => {
     const anim = window.petDebug.anim;
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     const seen = [];
     for (let i = 0; i < 4; i++) {
-      anim.stop('click-region-reset');
+      anim.stop('click-reset');
       anim.resetCooldowns();
       await wait(150);
       window.petApp.handleIntent({
-        kind: 'click', region: 'head',
-        payload: { button: 'left', x: 1, y: 1, nx: 0.5, ny: 0.1, region: 'head', detail: 1 },
+        kind: 'click',
+        payload: { button: 'left', x: 1, y: 1, nx: 0.5, ny: 0.1, detail: 1 },
       });
       await wait(300);
       seen.push(anim.getCurrentAnimation());
-      anim.stop('click-region-cleanup');
+      anim.stop('click-cleanup');
     }
     return { seen };
   })()`);
   record(
-    '点击不再按区域选动画：head 点 4 次都落在 cute/fawning/stroke 之内',
-    (clickRegionRun.seen ?? []).length === 4 &&
-      clickRegionRun.seen.every((id) => ['cute', 'fawning', 'stroke'].includes(id)),
-    JSON.stringify(clickRegionRun.seen),
+    '点击反应从 cute/fawning/stroke 里挑（连点 4 次都落在候选内）',
+    (clickReactionRun.seen ?? []).length === 4 &&
+      clickReactionRun.seen.every((id) => ['cute', 'fawning', 'stroke'].includes(id)),
+    JSON.stringify(clickReactionRun.seen),
   );
 
   /*
@@ -1674,8 +1675,8 @@ app.whenReady().then(async () => {
     anim.resetCooldowns();
     await wait(200);
     window.petApp.handleIntent({
-      kind: 'double-click', region: 'body',
-      payload: { button: 'left', x: 1, y: 1, nx: 0.5, ny: 0.5, region: 'body', detail: 2 },
+      kind: 'double-click',
+      payload: { button: 'left', x: 1, y: 1, nx: 0.5, ny: 0.5, detail: 2 },
     });
     await wait(600);
     sub.unsubscribe();
@@ -1684,7 +1685,7 @@ app.whenReady().then(async () => {
   record(
     '双击不再触发动画（也不再走 user-click 反应）',
     (doubleClickRun.started ?? []).every((item) =>
-      item.reason !== 'user-double-click' && !item.reason.startsWith('user-click:')),
+      item.reason !== 'user-double-click' && !item.reason.startsWith('user-click')),
     JSON.stringify(doubleClickRun.started),
   );
 
@@ -2511,8 +2512,8 @@ app.whenReady().then(async () => {
     const bus = window.petDebug.bus;
     const seen = [];
     const subs = [
-      bus.on('pet:click', (p) => seen.push({ t: 'pet:click', region: p.region, at: Date.now() })),
-      bus.on('pet:dblclick', (p) => seen.push({ t: 'pet:dblclick', region: p.region, at: Date.now() })),
+      bus.on('pet:click', (p) => seen.push({ t: 'pet:click', nx: p.nx, at: Date.now() })),
+      bus.on('pet:dblclick', (p) => seen.push({ t: 'pet:dblclick', nx: p.nx, at: Date.now() })),
       bus.on('pet:drag', (p) => seen.push({ t: 'pet:drag', phase: p.phase, at: Date.now() })),
     ];
     await window.petAPI.bubble.set({ visible: true, text: '点下面的按钮关闭我' });
@@ -3601,7 +3602,7 @@ app.whenReady().then(async () => {
       { id: 'throwing-handler', name: 'Throwing', version: '1.0.0', dir: 'plugins/examples/throwing', enabled: true, status: 'loaded' }
     );
     const sub = bus.on('pet:click', () => { laterRan = true; });
-    bus.emit('pet:click', { region: 'head', nx: 0.5, ny: 0.3, x: 1, y: 1, button: 'left', detail: 1 });
+    bus.emit('pet:click', { nx: 0.5, ny: 0.3, x: 1, y: 1, button: 'left', detail: 1 });
     sub.unsubscribe();
     return { activated: host.getLoadedPlugins().find((r) => r.id === 'throwing-handler')?.status, laterRan, alive: window.petDebug.anim.getCurrentAnimation() };
   })()`);

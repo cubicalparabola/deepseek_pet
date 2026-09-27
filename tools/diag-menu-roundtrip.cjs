@@ -65,7 +65,7 @@ app.whenReady().then(async () => {
   /** 打开真实右键菜单（走 renderer 的真实入口），返回其中 watch 菜单项。 */
   const openContextMenuAndFindWatch = async () => {
     const before = built.length;
-    await js(`(() => { window.petAPI.menu.showContextMenu({ region: 'body', animationId: window.petDebug.anim.getCurrentAnimation() }); return true; })()`);
+    await js(`(() => { window.petAPI.menu.showContextMenu({ animationId: window.petDebug.anim.getCurrentAnimation() }); return true; })()`);
     await wait(1200);
     const entry = built.slice(before).find((e) => e.template?.some((x) => x?.label === '播放动画（测试）')) ?? built[built.length - 1];
     const top = entry?.template?.find((x) => x?.label === '播放动画（测试）');

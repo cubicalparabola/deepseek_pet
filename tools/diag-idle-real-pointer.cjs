@@ -45,8 +45,8 @@ app.whenReady().then(async () => {
       bus.on('animation:start', (p) => window.__ev.push({ ms: Date.now(), t: 'start', id: p.animationId, reason: p.reason })),
       bus.on('animation:end', (p) => window.__ev.push({ ms: Date.now(), t: 'end', id: p.animationId, reason: p.reason, completed: p.completed })),
       bus.on('animation:rejected', (p) => window.__ev.push({ ms: Date.now(), t: 'rejected', id: p.animationId, rejection: p.rejection })),
-      bus.on('pet:click', (p) => window.__ev.push({ ms: Date.now(), t: 'pet:click', region: p.region })),
-      bus.on('pet:dblclick', (p) => window.__ev.push({ ms: Date.now(), t: 'pet:dblclick', region: p.region })),
+      bus.on('pet:click', (p) => window.__ev.push({ ms: Date.now(), t: 'pet:click', nx: p.nx })),
+      bus.on('pet:dblclick', (p) => window.__ev.push({ ms: Date.now(), t: 'pet:dblclick', nx: p.nx })),
       bus.on('pet:drag', () => window.__ev.push({ ms: Date.now(), t: 'pet:drag' })),
     ];
     window.__snap = () => {
@@ -134,7 +134,7 @@ app.whenReady().then(async () => {
       console.log(`    ${t.stuck ? '[卡]' : '    '} ${t.tag}: anim=${t.animation} stage=${t.vids.map((v) => `${v.src}:${v.paused ? 'paused' : 'playing'}:op${v.op}`).join(' ')}`);
     }
     console.log('  事件:');
-    for (const e of r.events) console.log(`    ${e.t} ${e.id ?? e.region ?? ''} ${e.reason ?? e.rejection ?? ''}${e.completed !== undefined ? ` completed=${e.completed}` : ''}`);
+    for (const e of r.events) console.log(`    ${e.t} ${e.id ?? e.nx ?? ''} ${e.reason ?? e.rejection ?? ''}${e.completed !== undefined ? ` completed=${e.completed}` : ''}`);
   }
   app.exit(0);
 }).catch((error) => {

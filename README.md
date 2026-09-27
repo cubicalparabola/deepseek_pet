@@ -87,7 +87,7 @@ Renderer Process（桌宠窗口）
   ├── AnimationManager  动画播放唯一入口（优先级 / 打断 / 冷却 / 排队）
   ├── ActionManager     统一 Action Pipeline（守门 + 分发）
   ├── BehaviorManager   行为调度（随机动画池：按显示状态取池，见 §10）
-  ├── InteractionManager 鼠标互动（命中区域、点击、拖拽）
+  ├── InteractionManager 鼠标互动（点击、双击、右键、拖拽）
   ├── PluginHost        插件沙箱宿主 + PluginContext 注入（启停即回收）
   └── PetLayers         渲染图层（video 双缓冲 / image 静态图）
 ```
@@ -599,7 +599,7 @@ ffmpeg 滤镜链（`tools/convert-alpha.mjs`）：
 ## 6. 事件总线
 
 ```ts
-eventBus.emit('pet:click', { region: 'head', ... });
+eventBus.emit('pet:click', { nx: 0.5, ny: 0.3, ... });
 eventBus.emit('animation:start', { animationId: 'cute', priority: 50 });
 eventBus.emit('animation:end', { animationId: 'cute', completed: true });
 
@@ -613,7 +613,7 @@ sub.unsubscribe();
 - **监听器抛错被隔离**：同步异常被捕获，异步 rejection 被上报，不影响其它监听器与桌宠主体；
 - 自定义事件名也被允许（`PetEventName = KnownEventName | (string & {})`），插件与未来 AI 事件无需修改核心。
 
-主要事件：`app:ready`、`pet:click`、`pet:dblclick`、`pet:drag`、`pet:region`、`animation:request|start|end|rejected`、`state:change`、`action:received|rejected`、`plugin:discovered|loaded|activated|deactivated|unloaded|error`、`behavior:triggered|paused`。
+主要事件：`app:ready`、`pet:click`、`pet:dblclick`、`pet:drag`、`animation:request|start|end|rejected`、`state:change`、`action:received|rejected`、`plugin:discovered|loaded|activated|deactivated|unloaded|error`、`behavior:triggered|paused`。
 
 ---
 
@@ -846,7 +846,7 @@ export default definePlugin({
   async activate(context: PluginContext) {
     context.logger.info('插件已激活');
     context.events.on('pet:click', (payload) => {
-      context.logger.info(`被点击：${payload.region}`);
+      context.logger.info(`被点击（归一化坐标 ${payload.nx.toFixed(2)}, ${payload.ny.toFixed(2)}）`);
     });
     context.events.on('animation:end', (payload) => {
       context.logger.info(`动画结束：${payload.animationId}`);
@@ -920,7 +920,7 @@ async activate(ctx: PluginContext) {
 
 ## 9. 鼠标互动
 
-- **命中区域**：`InteractionManager` 把归一化坐标映射为 `head / face / ear / body / belly / skirt / legs / tail / outside`，可通过 `regions` 参数调整分区（**仅用于命中判定与右键菜单展示**）；
+- **命中判定**：`InteractionManager` 只判断"这一点算不算落在她身上"（归一化纵坐标 ≤ `CONTENT_BOTTOM` = 0.97，素材底部约 3% 是投影/空白）；**没有** head/belly/tail 那套分区 —— 它从来没接进行为链，已按用户要求删除；
 - **点击** → `pet:click` 事件 + Action（**不再按区域区分动画**：从 `cute` / `fawning` / `stroke` 里随机挑一条，且会避开正在冷却的那条）；
 - **双击** → `pet:double-click`（**不再触发动画**：它仍算一次互动，但没有可等的互动动画）；
 - **右键** → 原生上下文菜单（与托盘菜单**完全相同**：属性读数（心情与饱腹各占一行）、显示/隐藏、收起（贴边）、交互、播放动画（测试）、插件、设置、退出）；

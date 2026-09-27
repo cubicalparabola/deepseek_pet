@@ -61,9 +61,9 @@ app.whenReady().then(async () => {
       window.__raf = requestAnimationFrame(tick);
     };
     window.__raf = requestAnimationFrame(tick);
-    window.__click = (region) => window.petApp.handleIntent({
-      kind: 'click', region,
-      payload: { button: 'left', x: 100, y: 100, nx: 0.5, ny: 0.5, region, detail: 1 },
+    window.__click = (nx = 0.5, ny = 0.5) => window.petApp.handleIntent({
+      kind: 'click',
+      payload: { button: 'left', x: 100, y: 100, nx, ny, detail: 1 },
     });
     return true;
   })()`);

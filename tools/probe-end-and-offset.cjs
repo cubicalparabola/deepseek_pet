@@ -67,7 +67,7 @@ app.whenReady().then(async () => {
     const posDocked = await pos();
 
     // 点一下（真实点击路径）-> 会先播 end，再回 idle
-    window.petDebug.click('head', 0.5, 0.4);
+    window.petDebug.click(0.5, 0.4);
     const samples = [];
     const t0 = Date.now();
     let idleAt = null;

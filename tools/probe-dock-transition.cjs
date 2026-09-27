@@ -69,7 +69,7 @@ app.whenReady().then(async () => {
     return (await api.window.dragEnd()).dock;
   })()`);
   result.steadyRight = await run(`${sampler}(8000)`);
-  await run(`window.petDebug.click('head', 0.5, 0.4)`);
+  await run(`window.petDebug.click(0.5, 0.4)`);
   result.clickUndock = await run(`${sampler}(12000)`);
 
   /* ---------------- 2) 右侧收起：拖离边缘展开 ---------------- */
@@ -125,7 +125,7 @@ app.whenReady().then(async () => {
   result.realDrag = realDrag;
   result.realDragSteady = await run(`${sampler}(15000)`);
   result.realDragClick = await (async () => {
-    await run(`window.petDebug.click('head', 0.5, 0.4)`);
+    await run(`window.petDebug.click(0.5, 0.4)`);
     return run(`${sampler}(12000)`);
   })();
 
@@ -140,7 +140,7 @@ app.whenReady().then(async () => {
   })()`);
   result.bottomDock = bottomDock;
   result.steadyBottom = await run(`${sampler}(6000)`);
-  await run(`window.petDebug.click('head', 0.5, 0.4)`);
+  await run(`window.petDebug.click(0.5, 0.4)`);
   result.clickUndockBottom = await run(`${sampler}(9000)`);
 
   // 判定：稳态里 end 素材出现几次

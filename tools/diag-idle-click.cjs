@@ -46,9 +46,9 @@ app.whenReady().then(async () => {
       bus.on('animation:end', (p) => window.__ev.push({ ms: Date.now(), t: 'end', id: p.animationId, reason: p.reason, completed: p.completed })),
       bus.on('animation:rejected', (p) => window.__ev.push({ ms: Date.now(), t: 'rejected', id: p.animationId, rejection: p.rejection })),
     ];
-    window.__click = (region) => window.petApp.handleIntent({
-      kind: 'click', region,
-      payload: { button: 'left', x: 100, y: 100, nx: 0.5, ny: 0.5, region, detail: 1 },
+    window.__click = (nx = 0.5, ny = 0.5) => window.petApp.handleIntent({
+      kind: 'click',
+      payload: { button: 'left', x: 100, y: 100, nx, ny, detail: 1 },
     });
     window.__snap = () => {
       const a = window.petDebug.anim;

@@ -200,7 +200,7 @@ import { AnimationManager } from './core/animation-manager';
 import { StateMachine } from './core/state-machine';
 import { ActionManager } from './core/action-manager';
 import { BehaviorManager } from './core/behavior-manager';
-import { InteractionManager, type InteractionIntent, type PetRegion } from './core/interaction-manager';
+import { InteractionManager, type InteractionIntent } from './core/interaction-manager';
 import { PluginHost } from './core/plugin-host';
 import { PetLayers } from './core/layers';
 import { BubbleView } from './core/bubble-view';
@@ -255,7 +255,6 @@ class PetApplication {
   private readonly cameraSensor: CameraSensor;
 
   private plugins: readonly DiscoveredPlugin[] = [];
-  private currentRegion: PetRegion = 'outside';
   private currentSize: PetSizeInfo | null = null;
   /**
    * 显示状态（正常 / 下方收起 / 右侧收起 / 隐藏）。
@@ -404,7 +403,7 @@ class PetApplication {
       eventBus: this.eventBus,
       stage: this.stage,
       onIntent: (intent) => this.handleIntent(intent),
-      onContextMenu: ({ region }) => this.openContextMenu(region),
+      onContextMenu: () => this.openContextMenu(),
       onDragStart: (x, y) => {
         void this.beginDrag(x, y);
       },
@@ -692,7 +691,7 @@ class PetApplication {
     });
 
     // 用户交互 -> 重置 idle timeout
-    for (const event of [PetEvents.PetClick, PetEvents.PetDoubleClick, PetEvents.PetRegion] as const) {
+    for (const event of [PetEvents.PetClick, PetEvents.PetDoubleClick] as const) {
       this.eventBus.onFrom('App', event, () => {
         this.behaviorManager.notifyInteraction();
       });
@@ -1244,18 +1243,14 @@ class PetApplication {
   /**
    * 交互意图入口（`InteractionManager` 的唯一回调）。
    *
-   * 声明为 public 是为了让自动化验收能走**真实点击路径**（命中区域 -> 映射动画 ->
+   * 声明为 public 是为了让自动化验收能走**真实点击路径**（点一下 -> 挑反应动画 ->
    * 提交动作），而不是在测试里复刻一遍这段映射逻辑 —— 复刻过的断言曾经漏掉
    * 真实 bug（菜单 equal-priority 那次）。
+   *
+   * 注意：这里**不再有"命中区域"**（head / belly / tail…）。那套分区从来没接进
+   * 行为链：点击反应一律从 cute / fawning / stroke 里随机挑一条，与点在哪无关。
    */
   public handleIntent(intent: InteractionIntent): void {
-    this.currentRegion = intent.region;
-    if (intent.kind === 'region-enter') {
-      // 只是划过区域：不产生互动，也不该把上一次点击的期望留在这里
-      this.expectInteractionAnimation(null);
-      return;
-    }
-
     /*
      * 收起状态下点一下 = **只展开**（需求："点击宠物展开"，且
      * "收起时点击宠物应该先播放 end 再播放 idle"）。
@@ -1275,7 +1270,7 @@ class PetApplication {
      */
     if (this.displayState.dock !== 'free') {
       this.logger.info('click while docked: expanding (end -> idle)', {
-        data: { dock: this.displayState.dock, region: intent.region },
+        data: { dock: this.displayState.dock },
       });
       /*
        * 收起状态点击**没有反应动画**（只有默认姿势的收尾段）：
@@ -1298,13 +1293,13 @@ class PetApplication {
        * 只是没有可等的"互动动画"，所以心情在互动那一刻就结算。
        */
       this.expectInteractionAnimation(null);
-      this.logger.info('double click: no animation by design', { data: { region: intent.region } });
+      this.logger.info('double click: no animation by design');
       return;
     }
 
     /*
-     * 点击反应：**不分区域**了，从 cute / fawning / stroke 里随机挑一条
-     * （需求）。挑的时候避开正在冷却的那条，否则连点会出现"点了没反应"。
+     * 点击反应：从 cute / fawning / stroke 里随机挑一条（需求："不分区域"）。
+     * 挑的时候避开正在冷却的那条，否则连点会出现"点了没反应"。
      */
     const animationId = pickClickReaction(
       this.animationManager.list(),
@@ -1319,7 +1314,7 @@ class PetApplication {
       return;
     }
     this.logger.info('click', {
-      data: { region: intent.region, nx: payload.nx.toFixed(2), ny: payload.ny.toFixed(2), animationId },
+      data: { nx: payload.nx.toFixed(2), ny: payload.ny.toFixed(2), animationId },
     });
     /*
      * 点击反应不再需要渲染层自己"等收尾段"：
@@ -1334,8 +1329,8 @@ class PetApplication {
       animationId,
       priority: 50,
       source: 'user',
-      reason: `user-click:${intent.region}`,
-      metadata: { region: intent.region, nx: payload.nx, ny: payload.ny },
+      reason: 'user-click',
+      metadata: { nx: payload.nx, ny: payload.ny },
     });
   }
 
@@ -1485,8 +1480,7 @@ class PetApplication {
   /* 托盘 / 右键菜单                                                     */
   /* ------------------------------------------------------------------ */
 
-  private openContextMenu(region: PetRegion): void {
-    this.currentRegion = region;
+  private openContextMenu(): void {
     this.runtime.showContextMenu();
   }
 
@@ -1526,7 +1520,6 @@ class PetApplication {
   public describe(): {
     readonly state: PetState;
     readonly animation: string | null;
-    readonly region: PetRegion;
     readonly plugins: number;
     readonly behaviorsPaused: boolean;
     readonly animations: number;
@@ -1535,7 +1528,6 @@ class PetApplication {
     return {
       state: this.stateMachine.get(),
       animation: this.animationManager.getCurrentAnimation(),
-      region: this.currentRegion,
       plugins: this.pluginHost.getLoadedPlugins().length,
       behaviorsPaused: this.behaviorManager.isPaused(),
       animations: this.animationManager.list().length,
@@ -1563,7 +1555,7 @@ class PetApplication {
      * 与 `handleIntent` 完全同一条实现（它本来就是 InteractionManager 的回调），
      * 所以"收起状态下点一下就展开"这类行为能被真实验证，而不是在测试里复刻一遍。
      */
-    readonly click: (region: PetRegion, nx?: number, ny?: number) => void;
+    readonly click: (nx?: number, ny?: number) => void;
     /** 显示状态（收起方向 / 隐藏）。 */
     readonly display: () => PetDisplayState;
     /** 心情镜像读数（渲染层缓存的主进程心情；用于验证推送链路）。 */
@@ -1813,11 +1805,10 @@ class PetApplication {
       interactions: this.interactionManager,
       plugins: this.pluginHost,
       events: this.eventBus,
-      click: (region, nx = 0.5, ny = 0.5) => {
+      click: (nx = 0.5, ny = 0.5) => {
         this.handleIntent({
           kind: 'click',
-          region,
-          payload: { button: 'left', x: 0, y: 0, nx, ny, region, detail: 1 },
+          payload: { button: 'left', x: 0, y: 0, nx, ny, detail: 1 },
         });
       },
       display: () => this.displayState,

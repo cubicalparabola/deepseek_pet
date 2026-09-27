@@ -50,8 +50,7 @@ app.whenReady().then(async () => {
         bus.on('animation:rejected', (p) => events.push({ t: 'rejected', id: p.animationId, rejection: p.rejection })),
         bus.on('action:received', (p) => events.push({ t: 'action', type: p.type, target: p.target, source: p.source, reason: p.reason })),
         bus.on('action:rejected', (p) => events.push({ t: 'action-rejected', type: p.type, rejection: p.rejection })),
-        bus.on('pet:click', (p) => events.push({ t: 'pet:click', region: p.region })),
-        bus.on('pet:region', (p) => events.push({ t: 'pet:region', region: p.region })),
+        bus.on('pet:click', (p) => events.push({ t: 'pet:click', nx: p.nx })),
         bus.on('pet:dblclick', () => events.push({ t: 'pet:dblclick' })),
       ];
 

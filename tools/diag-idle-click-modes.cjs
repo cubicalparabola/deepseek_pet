@@ -46,9 +46,9 @@ app.whenReady().then(async () => {
       bus.on('animation:rejected', (p) => window.__ev.push({ ms: Date.now(), t: 'rejected', id: p.animationId, rejection: p.rejection })),
       bus.on('animation:error', (p) => window.__ev.push({ ms: Date.now(), t: 'error', id: p.animationId, message: p.message })),
     ];
-    window.__click = (region) => window.petApp.handleIntent({
-      kind: 'click', region,
-      payload: { button: 'left', x: 100, y: 100, nx: 0.5, ny: 0.5, region, detail: 1 },
+    window.__click = (nx = 0.5, ny = 0.5) => window.petApp.handleIntent({
+      kind: 'click',
+      payload: { button: 'left', x: 100, y: 100, nx, ny, detail: 1 },
     });
     window.__snap = () => {
       const a = window.petDebug.anim;
@@ -95,7 +95,7 @@ app.whenReady().then(async () => {
 
     for (const step of actions) {
       if (step.wait) { await wait(step.wait); }
-      if (step.region) { await js(`window.__click(${JSON.stringify(step.region)})`); await record(`点击 ${step.region}`); }
+      if (step.click) { await js('window.__click()'); await record(`点击 ${step.tag ?? ''}`); }
       if (step.sample) {
         const t0 = Date.now();
         while (Date.now() - t0 < step.sample) {
@@ -112,23 +112,24 @@ app.whenReady().then(async () => {
 
   const results = [];
 
-  results.push(await runScenario('A: 快速连点 body x3（间隔 150ms）', [
-    { region: 'body' }, { wait: 150 }, { region: 'body' }, { wait: 150 }, { region: 'body' },
+  results.push(await runScenario('A: 快速连点 x3（间隔 150ms）', [
+    { click: true }, { wait: 150 }, { click: true }, { wait: 150 }, { click: true },
     { sample: 9000 },
   ]));
 
-  results.push(await runScenario('B: 依次点击不同区域 head/face/body/tail', [
-    { region: 'head' }, { wait: 600 }, { region: 'face' }, { wait: 600 },
-    { region: 'body' }, { wait: 600 }, { region: 'tail' },
+  // 区域已经不参与行为（分区字段已删），这里改成"不同坐标"——效果应当完全一样
+  results.push(await runScenario('B: 依次点不同坐标（0.5/0.1 头、0.5/0.5 身、0.5/0.9 腿）', [
+    { click: true }, { wait: 600 }, { click: true }, { wait: 600 },
+    { click: true }, { wait: 600 }, { click: true },
     { sample: 9000 },
   ]));
 
   results.push(await runScenario('C: 慢速连点（等 idle 回来再点）x2', [
-    { region: 'body' }, { sample: 8000 }, { region: 'body' }, { sample: 8000 },
+    { click: true }, { sample: 8000 }, { click: true }, { sample: 8000 },
   ]));
 
   results.push(await runScenario('D: 冷却转完再点（间隔 5s）x2', [
-    { region: 'body' }, { wait: 5000 }, { region: 'body' }, { sample: 9000 },
+    { click: true }, { wait: 5000 }, { click: true }, { sample: 9000 },
   ]));
 
   await js('window.__subs.forEach((s) => s.unsubscribe()); true');

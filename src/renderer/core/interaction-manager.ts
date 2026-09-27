@@ -2,9 +2,13 @@
  * InteractionManager —— 鼠标互动。
  *
  * 职责：
- * - 命中区域（region）计算：把鼠标位置映射到 head/face/ear/body/belly/skirt/legs/tail/outside；
  * - 点击 / 双击 / 右键 / 进入退出 / 拖拽 的识别，并发布 pet:* 事件；
  * - **不直接播放动画**：只发布事件 + 通过回调把交互意图交给 Action Pipeline。
+ *
+ * ⚠️ 这里**没有**"命中区域（head / belly / tail…）"那套分区了（用户要求删掉）：
+ * 它从来没接进行为链 —— 点击反应本来就是从 cute / fawning / stroke 里随机挑一条，
+ * 与点在她身上哪个部位无关。保留的只有**一个必要的边界判断**：素材最底下约 3%
+ * 是投影/空白，点在那里不算点到了她。
  *
  * 拖拽说明：
  * Windows 上无边框窗口拖动推荐使用 `-webkit-app-region: drag`，
@@ -17,42 +21,23 @@ import { PetEvents } from '../../shared/events';
 import type { Logger } from '../../shared/logger';
 import type { EventBus } from './event-bus';
 
-export interface InteractionRegions {
-  /** 归一化区域划分（均为 0-1，基于桌宠窗口内部坐标）。 */
-  readonly headTop: number;
-  readonly faceBottom: number;
-  readonly earWidth: number;
-  readonly bodyBottom: number;
-  readonly bellyBottom: number;
-  readonly skirtBottom: number;
-  readonly tailX: number;
-  readonly contentBottom: number;
-}
-
-export const DEFAULT_REGIONS: InteractionRegions = {
-  headTop: 0,
-  faceBottom: 0.32,
-  earWidth: 0.22,
-  bodyBottom: 0.6,
-  bellyBottom: 0.68,
-  skirtBottom: 0.86,
-  tailX: 0.2,
-  // 素材底部约 5% 是投影/空白，避免点空白也触发互动
-  contentBottom: 0.97,
-};
-
-export type PetRegion = 'head' | 'face' | 'ear' | 'body' | 'belly' | 'skirt' | 'legs' | 'tail' | 'outside';
+/**
+ * 素材底部约 3% 是投影/空白：归一化纵坐标超过它就算"点在了她外面"。
+ *
+ * 这是原来那套九分区判定里**唯一真正有用**的一条（避免点空白也触发互动），
+ * 因此分区删掉后单独留成常量。
+ */
+export const CONTENT_BOTTOM = 0.97;
 
 export interface InteractionManagerOptions {
   readonly logger: Logger;
   readonly eventBus: EventBus;
   /** 交互目标（桌宠舞台元素）。 */
   readonly stage: HTMLElement;
-  readonly regions?: Partial<InteractionRegions>;
   /** 点击意图回调：由 compose 层转成 Action 投递到 Pipeline。 */
   readonly onIntent: (intent: InteractionIntent) => void;
   /** 请求打开原生右键菜单。 */
-  readonly onContextMenu: (context: { region: PetRegion }) => void;
+  readonly onContextMenu: () => void;
   /** 拖拽：请求 Main 进程把窗口移动到指定屏幕坐标。 */
   readonly onDragMove: (screenX: number, screenY: number) => void;
   readonly onDragStart: (screenX: number, screenY: number) => void;
@@ -68,15 +53,13 @@ export interface InteractionManagerOptions {
 }
 
 export type InteractionIntent =
-  | { readonly kind: 'click'; readonly region: PetRegion; readonly payload: PetClickPayload }
-  | { readonly kind: 'double-click'; readonly region: PetRegion; readonly payload: PetClickPayload }
-  | { readonly kind: 'region-enter'; readonly region: PetRegion; readonly payload: PetPointerPayload };
+  | { readonly kind: 'click'; readonly payload: PetClickPayload }
+  | { readonly kind: 'double-click'; readonly payload: PetClickPayload };
 
 export class InteractionManager {
   private readonly logger: Logger;
   private readonly eventBus: EventBus;
   private readonly stage: HTMLElement;
-  private readonly regions: InteractionRegions;
   private readonly options: InteractionManagerOptions;
 
   private pointerDown = false;
@@ -84,7 +67,6 @@ export class InteractionManager {
   private dragOriginScreen = { x: 0, y: 0 };
   private downAt = 0;
   private downPoint = { x: 0, y: 0 };
-  private currentRegion: PetRegion = 'outside';
   private lastClickAt = 0;
   private readonly dragThreshold = 5;
 
@@ -93,7 +75,6 @@ export class InteractionManager {
     this.logger = options.logger;
     this.eventBus = options.eventBus;
     this.stage = options.stage;
-    this.regions = { ...DEFAULT_REGIONS, ...options.regions };
   }
 
   /** 绑定 DOM 事件。只调用一次。 */
@@ -122,31 +103,16 @@ export class InteractionManager {
     stage.removeEventListener('dblclick', this.handleDoubleClick);
   }
 
-  public getRegion(): PetRegion {
-    return this.currentRegion;
-  }
-
-  /** 把窗口内坐标映射到身体区域。导出为公共方法便于测试与插件复用。 */
-  public resolveRegion(clientX: number, clientY: number): { region: PetRegion; nx: number; ny: number } {
+  /**
+   * 把窗口内坐标换算成归一化坐标，并判断"这一点算不算落在她身上"。
+   *
+   * 导出为公共方法便于测试与插件复用。
+   */
+  public resolvePosition(clientX: number, clientY: number): { nx: number; ny: number; onPet: boolean } {
     const rect = this.stage.getBoundingClientRect();
     const nx = clamp01((clientX - rect.left) / Math.max(1, rect.width));
     const ny = clamp01((clientY - rect.top) / Math.max(1, rect.height));
-    return { region: this.classify(nx, ny), nx, ny };
-  }
-
-  private classify(nx: number, ny: number): PetRegion {
-    const r = this.regions;
-    if (ny > r.contentBottom) return 'outside';
-    // 尾巴：素材中尾巴在左下侧
-    if (nx < r.tailX && ny > r.faceBottom && ny < r.skirtBottom) return 'tail';
-    if (ny >= r.headTop && ny < r.faceBottom) {
-      if (nx < r.earWidth || nx > 1 - r.earWidth) return 'ear';
-      return 'head';
-    }
-    if (ny < r.bodyBottom) return 'body';
-    if (ny < r.bellyBottom) return 'belly';
-    if (ny < r.skirtBottom) return 'skirt';
-    return 'legs';
+    return { nx, ny, onPet: ny <= CONTENT_BOTTOM };
   }
 
   /* ------------------------------------------------------------------ */
@@ -218,8 +184,8 @@ export class InteractionManager {
     const elapsed = Date.now() - this.downAt;
     if (elapsed > 900) return; // 长按不视为点击
 
-    const { region, nx, ny } = this.resolveRegion(event.clientX, event.clientY);
-    if (region === 'outside') return;
+    const { nx, ny, onPet } = this.resolvePosition(event.clientX, event.clientY);
+    if (!onPet) return;
 
     // 双击由 dblclick 处理，这里避免重复触发
     const now = Date.now();
@@ -232,12 +198,11 @@ export class InteractionManager {
       y: event.clientY,
       nx,
       ny,
-      region,
       detail: 1,
     };
 
     this.eventBus.emit(PetEvents.PetClick, payload);
-    this.options.onIntent({ kind: 'click', region, payload });
+    this.options.onIntent({ kind: 'click', payload });
     this.options.onInteraction?.('click');
   };
 
@@ -249,19 +214,18 @@ export class InteractionManager {
 
   private handleDoubleClick = (event: MouseEvent): void => {
     if (isFromPetUi(event.target)) return;
-    const { region, nx, ny } = this.resolveRegion(event.clientX, event.clientY);
-    if (region === 'outside') return;
+    const { nx, ny, onPet } = this.resolvePosition(event.clientX, event.clientY);
+    if (!onPet) return;
     const payload: PetClickPayload = {
       button: 'left',
       x: event.clientX,
       y: event.clientY,
       nx,
       ny,
-      region,
       detail: 2,
     };
     this.eventBus.emit(PetEvents.PetDoubleClick, payload);
-    this.options.onIntent({ kind: 'double-click', region, payload });
+    this.options.onIntent({ kind: 'double-click', payload });
     this.options.onInteraction?.('doubleclick');
   };
 
@@ -269,15 +233,12 @@ export class InteractionManager {
     event.preventDefault();
     /* 在气泡 UI 上右键不该弹出宠物右键菜单 */
     if (isFromPetUi(event.target)) return;
-    const { region } = this.resolveRegion(event.clientX, event.clientY);
-    this.logger.debug('context menu requested', { data: { region } });
-    this.options.onContextMenu({ region });
+    this.options.onContextMenu();
   };
 
   private handlePointerEnter = (event: PointerEvent): void => {
-    const { region, nx, ny } = this.resolveRegion(event.clientX, event.clientY);
-    this.emitPointer(PetEvents.PetPointerEnter, region, nx, ny, event);
-    this.updateRegion(region, nx, ny, event);
+    const { nx, ny } = this.resolvePosition(event.clientX, event.clientY);
+    this.emitPointer(PetEvents.PetPointerEnter, nx, ny, event);
   };
 
   private handlePointerLeave = (event: PointerEvent): void => {
@@ -286,35 +247,18 @@ export class InteractionManager {
       y: event.clientY,
       nx: 0,
       ny: 0,
-      region: 'outside',
     };
     this.eventBus.emit(PetEvents.PetPointerLeave, payload);
-    this.currentRegion = 'outside';
   };
 
-  /** 指针移动时更新 region 并发布区域变化事件。 */
+  /** 指针移动时发布位置事件（主进程用它决定"要不要忽略鼠标事件"等）。 */
   public trackPointer(event: PointerEvent): void {
-    const { region, nx, ny } = this.resolveRegion(event.clientX, event.clientY);
-    this.emitPointer(PetEvents.PetPointerMove, region, nx, ny, event);
-    this.updateRegion(region, nx, ny, event);
+    const { nx, ny } = this.resolvePosition(event.clientX, event.clientY);
+    this.emitPointer(PetEvents.PetPointerMove, nx, ny, event);
   }
 
-  private updateRegion(region: PetRegion, nx: number, ny: number, event: PointerEvent): void {
-    if (region === this.currentRegion) return;
-    this.currentRegion = region;
-    const payload = { region, x: event.clientX, y: event.clientY, nx, ny };
-    this.eventBus.emit(PetEvents.PetRegion, payload);
-    this.options.onIntent({ kind: 'region-enter', region, payload });
-  }
-
-  private emitPointer(
-    eventName: string,
-    region: PetRegion,
-    nx: number,
-    ny: number,
-    event: PointerEvent,
-  ): void {
-    const payload: PetPointerPayload = { x: event.clientX, y: event.clientY, nx, ny, region };
+  private emitPointer(eventName: string, nx: number, ny: number, event: PointerEvent): void {
+    const payload: PetPointerPayload = { x: event.clientX, y: event.clientY, nx, ny };
     this.eventBus.emit(eventName, payload);
   }
 

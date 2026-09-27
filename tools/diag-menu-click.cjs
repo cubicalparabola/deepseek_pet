@@ -63,7 +63,7 @@ app.whenReady().then(async () => {
 
   // ---------- 准备：用右键菜单项启动 watch（等价于用户右键 -> 播放动画 -> watch）----------
   await win.webContents.executeJavaScript(
-    `(() => { window.petAPI.menu.showContextMenu({ region: 'body', animationId: window.petDebug.anim.getCurrentAnimation() }); return true; })()`,
+    `(() => { window.petAPI.menu.showContextMenu({ animationId: window.petDebug.anim.getCurrentAnimation() }); return true; })()`,
     true,
   );
   await wait(1500);
@@ -79,7 +79,7 @@ app.whenReady().then(async () => {
 
   // ---------- 关键：再次调用右键菜单里 watch 的 click ----------
   await win.webContents.executeJavaScript(
-    `(() => { window.petAPI.menu.showContextMenu({ region: 'body', animationId: window.petDebug.anim.getCurrentAnimation() }); return true; })()`,
+    `(() => { window.petAPI.menu.showContextMenu({ animationId: window.petDebug.anim.getCurrentAnimation() }); return true; })()`,
     true,
   );
   await wait(1500);

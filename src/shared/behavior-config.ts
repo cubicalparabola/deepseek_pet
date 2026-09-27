@@ -320,7 +320,8 @@ function normalizePool(id: string, raw: unknown, issues: BehaviorConfigIssue[]):
     initialDelayMs,
     cooldownMs: num(raw.cooldownMs, 0, 0, 3600_000),
     // 池里的三段式成员默认"播一两轮"就收尾（不写 = 沿用定义里的轮数）
-    persistentLoopCountRange: interval(raw.persistentLoopCountRange, [1, 2]),
+    // 注意同样是**轮数**，用 countRange 而不是 interval（后者下限是 1000 毫秒）
+    persistentLoopCountRange: countRange(raw.persistentLoopCountRange, [1, 2]),
     ...(Object.keys(weights).length > 0 ? { weights } : {}),
     onlyWhenIdle: raw.onlyWhenIdle !== false,
     ...(typeof raw.label === 'string' ? { label: raw.label } : {}),
@@ -344,10 +345,29 @@ function normalizeFidget(raw: unknown, state: DisplayStateId, issues: BehaviorCo
   return {
     animations,
     intervalMs: interval(raw.intervalMs, DOCKED_FIDGET_INTERVAL_MS),
+    /*
+     * ⚠️ 这里必须用**轮数**的夹取（1~20），不能复用 `interval()` ——
+     * 那个函数的下限是 1000（它是给毫秒用的），会让 `[1,3]` 变成 `[1000,1000]`：
+     * 小动作一次要循环 1000 轮（`lie` 每轮 5 秒 ≈ 85 分钟），
+     * 画面上就是"她趴下去起不来了"。实测被 `tools/diag-anim-system.cjs` 抓到。
+     */
     ...(Array.isArray(raw.loopCountRange)
-      ? { loopCountRange: interval(raw.loopCountRange, [1, 2]) }
+      ? { loopCountRange: countRange(raw.loopCountRange, [1, 2]) }
       : {}),
   };
+}
+
+/** 归一化"循环几轮"：下限 1、上限 20（与毫秒区间区分开）。 */
+function countRange(value: unknown, fallback: readonly [number, number]): readonly [number, number] {
+  if (!Array.isArray(value) || value.length !== 2) return fallback;
+  const a = value[0];
+  const b = value[1];
+  if (typeof a !== 'number' || typeof b !== 'number' || !Number.isFinite(a) || !Number.isFinite(b)) {
+    return fallback;
+  }
+  const min = num(Math.min(a, b), fallback[0], 1, 20);
+  const max = num(Math.max(a, b), fallback[1], min, 20);
+  return [min, max];
 }
 
 /**
